@@ -85,7 +85,6 @@ impl PlayerApp {
                         ui.add_space(20.0);
                         egui::Frame::NONE
                             .fill(theme::ACCENT_SOFT)
-                            .corner_radius(10)
                             .inner_margin(egui::Margin::symmetric(9, 4))
                             .show(ui, |ui| {
                                 ui.label(
@@ -204,12 +203,7 @@ impl PlayerApp {
                 });
                 ui.add_space(10.0);
 
-                ui.columns(4, |columns| {
-                    metric(&mut columns[0], "Objects", "—", "Decoder pending");
-                    metric(&mut columns[1], "LFE", "—", "Single native bed");
-                    metric(&mut columns[2], "Position", "—", "OAMD pending");
-                    metric(&mut columns[3], "Buffer", "—", "Render queue offline");
-                });
+                metric_strip(ui);
 
                 ui.add_space(16.0);
                 scene_placeholder(ui, self.source.is_some());
@@ -322,7 +316,6 @@ fn card(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::NONE
         .fill(theme::SURFACE)
         .stroke(Stroke::new(1.0, theme::BORDER))
-        .corner_radius(12)
         .inner_margin(egui::Margin::same(14))
         .show(ui, contents);
 }
@@ -336,25 +329,66 @@ fn key_value(ui: &mut egui::Ui, key: &str, value: &str) {
     });
 }
 
-fn metric(ui: &mut egui::Ui, title: &str, value: &str, detail: &str) {
-    egui::Frame::NONE
-        .fill(theme::SURFACE)
-        .stroke(Stroke::new(1.0, theme::BORDER))
-        .corner_radius(12)
-        .inner_margin(egui::Margin::same(12))
-        .show(ui, |ui| {
-            ui.set_min_height(76.0);
-            ui.label(RichText::new(title).size(11.0).color(theme::MUTED));
-            ui.label(RichText::new(value).size(20.0).strong().color(theme::TEXT));
-            ui.label(RichText::new(detail).size(10.0).color(theme::MUTED));
-        });
+fn metric_strip(ui: &mut egui::Ui) {
+    const METRICS: [(&str, &str, &str); 4] = [
+        ("OBJECTS", "—", "Decoder pending"),
+        ("LFE", "—", "Single native bed"),
+        ("POSITION", "—", "OAMD pending"),
+        ("BUFFER", "—", "Render queue offline"),
+    ];
+
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 96.0), egui::Sense::hover());
+    let painter = ui.painter().clone();
+    painter.rect_filled(rect, 0.0, theme::SURFACE);
+    let cell_width = rect.width() / 4.0;
+    let first_cell = egui::Rect::from_min_size(rect.min, egui::vec2(cell_width, rect.height()));
+    painter.rect_filled(first_cell, 0.0, theme::STAGE);
+    painter.rect_stroke(
+        rect,
+        0.0,
+        Stroke::new(1.0, theme::BORDER),
+        egui::StrokeKind::Inside,
+    );
+
+    let mut left = rect.left();
+    for (index, (title, value, detail)) in METRICS.into_iter().enumerate() {
+        let right = if index + 1 == METRICS.len() {
+            rect.right()
+        } else {
+            left + cell_width
+        };
+        if index > 0 {
+            painter.line_segment(
+                [
+                    egui::pos2(left, rect.top()),
+                    egui::pos2(left, rect.bottom()),
+                ],
+                Stroke::new(1.0, theme::BORDER),
+            );
+        }
+        let cell = egui::Rect::from_min_max(
+            egui::pos2(left + 16.0, rect.top() + 12.0),
+            egui::pos2(right - 12.0, rect.bottom() - 10.0),
+        );
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(cell)
+                .layout(Layout::top_down(Align::Min)),
+            |ui| {
+                ui.label(RichText::new(title).size(10.0).strong().color(theme::MUTED));
+                ui.label(RichText::new(value).size(21.0).strong().color(theme::TEXT));
+                ui.label(RichText::new(detail).size(10.0).color(theme::MUTED));
+            },
+        );
+        left = right;
+    }
 }
 
 fn scene_placeholder(ui: &mut egui::Ui, has_source: bool) {
     egui::Frame::NONE
         .fill(theme::STAGE)
         .stroke(Stroke::new(1.0, theme::BORDER))
-        .corner_radius(14)
         .inner_margin(egui::Margin::same(18))
         .show(ui, |ui| {
             ui.set_min_height(300.0);
@@ -390,12 +424,12 @@ fn draw_drop_overlay(context: &egui::Context) {
     let rect = context.content_rect().shrink(24.0);
     painter.rect_filled(
         rect,
-        14.0,
+        0.0,
         Color32::from_rgba_unmultiplied(255, 253, 247, 244),
     );
     painter.rect_stroke(
         rect,
-        14.0,
+        0.0,
         Stroke::new(2.0, theme::ACCENT),
         egui::StrokeKind::Inside,
     );

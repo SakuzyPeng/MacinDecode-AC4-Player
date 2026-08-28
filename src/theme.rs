@@ -24,24 +24,24 @@ pub fn install(context: &egui::Context) {
     visuals.selection.bg_fill = ACCENT;
     visuals.selection.stroke = Stroke::new(1.0, Color32::WHITE);
     visuals.hyperlink_color = ACCENT;
-    visuals.window_corner_radius = CornerRadius::same(14);
-    visuals.menu_corner_radius = CornerRadius::same(12);
+    visuals.window_corner_radius = CornerRadius::ZERO;
+    visuals.menu_corner_radius = CornerRadius::ZERO;
     visuals.widgets.noninteractive.bg_fill = SURFACE;
     visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, BORDER);
     visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, MUTED);
-    visuals.widgets.noninteractive.corner_radius = CornerRadius::same(10);
+    visuals.widgets.noninteractive.corner_radius = CornerRadius::ZERO;
     visuals.widgets.inactive.weak_bg_fill = SURFACE;
     visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, BORDER);
     visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, TEXT);
-    visuals.widgets.inactive.corner_radius = CornerRadius::same(10);
+    visuals.widgets.inactive.corner_radius = CornerRadius::ZERO;
     visuals.widgets.hovered.weak_bg_fill = HOVER;
     visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, ACCENT);
     visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, TEXT);
-    visuals.widgets.hovered.corner_radius = CornerRadius::same(10);
+    visuals.widgets.hovered.corner_radius = CornerRadius::ZERO;
     visuals.widgets.active.weak_bg_fill = ACCENT_SOFT;
     visuals.widgets.active.bg_stroke = Stroke::new(1.0, ACCENT);
     visuals.widgets.active.fg_stroke = Stroke::new(1.0, INK);
-    visuals.widgets.active.corner_radius = CornerRadius::same(10);
+    visuals.widgets.active.corner_radius = CornerRadius::ZERO;
     context.set_visuals(visuals);
 
     context.all_styles_mut(|style| {
