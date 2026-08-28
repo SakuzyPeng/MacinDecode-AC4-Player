@@ -242,7 +242,7 @@ impl PlayerApp {
 
     fn draw_transport(&mut self, root: &mut egui::Ui) {
         egui::Panel::bottom("transport")
-            .exact_size(112.0)
+            .exact_size(136.0)
             .frame(
                 egui::Frame::NONE
                     .fill(theme::SURFACE)
@@ -250,25 +250,106 @@ impl PlayerApp {
                     .inner_margin(egui::Margin::symmetric(22, 14)),
             )
             .show(root, |ui| {
-                ui.horizontal(|ui| {
-                    ui.colored_label(self.status.color(), "●");
-                    ui.label(RichText::new(&self.status.text).color(theme::MUTED));
-                });
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.add_enabled(false, egui::Button::new("◀◀"));
-                    ui.add_enabled(false, egui::Button::new("▶"));
-                    ui.add_enabled(false, egui::Button::new("■"));
-                    ui.add_space(8.0);
-                    ui.label(RichText::new("00:00").monospace().color(theme::MUTED));
-                    ui.add_enabled(
-                        false,
-                        egui::Slider::new(&mut self.timeline_preview, 0.0..=1.0).show_value(false),
-                    );
-                    ui.label(RichText::new("--:--").monospace().color(theme::MUTED));
-                });
+                let (content, _) =
+                    ui.allocate_exact_size(ui.available_size(), egui::Sense::hover());
+                let status_rect =
+                    egui::Rect::from_min_size(content.min, egui::vec2(content.width(), 20.0));
+                ui.scope_builder(
+                    egui::UiBuilder::new()
+                        .max_rect(status_rect)
+                        .layout(Layout::left_to_right(Align::Center)),
+                    |ui| {
+                        ui.colored_label(self.status.color(), "●");
+                        ui.label(RichText::new(&self.status.text).color(theme::MUTED));
+                    },
+                );
+
+                let control_height = 34.0 + ui.spacing().item_spacing.y + 20.0;
+                let control_rect = egui::Rect::from_center_size(
+                    content.center(),
+                    egui::vec2(content.width(), control_height),
+                );
+                ui.scope_builder(
+                    egui::UiBuilder::new()
+                        .max_rect(control_rect)
+                        .layout(Layout::top_down(Align::Center)),
+                    |ui| {
+                        transport_buttons(ui);
+                        transport_progress(ui, &mut self.timeline_preview);
+                    },
+                );
             });
     }
+}
+
+fn transport_buttons(ui: &mut egui::Ui) {
+    let button_size = egui::vec2(44.0, 34.0);
+    let group_width = button_size.x * 3.0 + ui.spacing().item_spacing.x * 2.0;
+    let (row, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), button_size.y),
+        egui::Sense::hover(),
+    );
+    let group = egui::Rect::from_center_size(row.center(), egui::vec2(group_width, button_size.y));
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(group)
+            .layout(Layout::left_to_right(Align::Center)),
+        |ui| {
+            disabled_transport_button(ui, "◀◀", button_size);
+            disabled_transport_button(ui, "▶", button_size);
+            disabled_transport_button(ui, "■", button_size);
+        },
+    );
+}
+
+fn disabled_transport_button(ui: &mut egui::Ui, glyph: &str, size: egui::Vec2) {
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    ui.painter().rect_filled(rect, 0.0, theme::HOVER);
+    ui.painter().rect_stroke(
+        rect,
+        0.0,
+        Stroke::new(1.0, theme::BORDER),
+        egui::StrokeKind::Inside,
+    );
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        glyph,
+        egui::FontId::proportional(15.0),
+        theme::MUTED,
+    );
+}
+
+fn transport_progress(ui: &mut egui::Ui, timeline_preview: &mut f32) {
+    let row_width = ui.available_width();
+    let progress_width = (row_width * 0.55).clamp(260.0, 520.0);
+    let time_width = 50.0;
+    let group_width = progress_width + time_width * 2.0 + ui.spacing().item_spacing.x * 2.0;
+    let (row, _) = ui.allocate_exact_size(egui::vec2(row_width, 20.0), egui::Sense::hover());
+    let group = egui::Rect::from_center_size(row.center(), egui::vec2(group_width, row.height()));
+
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(group)
+            .layout(Layout::left_to_right(Align::Center)),
+        |ui| {
+            ui.add_sized(
+                [time_width, 18.0],
+                egui::Label::new(RichText::new("00:00").monospace().color(theme::MUTED))
+                    .halign(Align::RIGHT),
+            );
+            ui.add_enabled_ui(false, |ui| {
+                ui.spacing_mut().interact_size.y = 18.0;
+                ui.spacing_mut().slider_width = progress_width;
+                ui.add(egui::Slider::new(timeline_preview, 0.0..=1.0).show_value(false));
+            });
+            ui.add_sized(
+                [time_width, 18.0],
+                egui::Label::new(RichText::new("--:--").monospace().color(theme::MUTED))
+                    .halign(Align::LEFT),
+            );
+        },
+    );
 }
 
 impl eframe::App for PlayerApp {
