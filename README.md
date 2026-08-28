@@ -6,8 +6,8 @@
 ## 当前能力
 
 - Windows、macOS 原生窗口，基于 `egui`/`eframe` 的 Winit + WGPU 后端。
-- 选择或拖入 `.m4a`、`.mp4`、`.ac4` 文件，仅记录路径和展示文件信息。
-- 展示 presentation、空间后端、对象场景、诊断和传输控制的占位状态。
+- 多选或拖入 `.m4a`、`.mp4`、`.ac4` 文件，组成可选择、可移除的播放列表。
+- 展示 presentation、对象场景、诊断、输出设备和传输控制的占位状态。
 - 预留 Windows Spatial Audio 与 macOS AU Spatial Mixer 两个后端选项。
 
 ## 明确不做
@@ -30,4 +30,3 @@ cargo clippy --all-targets -- -D warnings
 MIT/Apache-2.0 的 `egui`/`eframe` 与 MIT 的 `rfd`，不以 GPLv3 作为发布基础。
 
 架构边界见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
-
