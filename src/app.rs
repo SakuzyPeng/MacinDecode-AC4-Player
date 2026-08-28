@@ -408,34 +408,38 @@ fn metric_strip(ui: &mut egui::Ui) {
 }
 
 fn scene_placeholder(ui: &mut egui::Ui, has_source: bool) {
-    egui::Frame::NONE
+    let available_height = ui.available_height();
+    let frame = egui::Frame::NONE
         .fill(theme::STAGE)
         .stroke(Stroke::new(1.0, theme::BORDER))
-        .inner_margin(egui::Margin::same(18))
-        .show(ui, |ui| {
-            ui.set_min_height(300.0);
-            ui.vertical_centered(|ui| {
-                ui.add_space(82.0);
-                let headline = if has_source {
-                    "Ready for decoder integration"
-                } else {
-                    "No object scene"
-                };
-                ui.label(
-                    RichText::new(headline)
-                        .size(19.0)
-                        .strong()
-                        .color(theme::TEXT),
-                );
-                ui.add_space(6.0);
-                ui.label(
-                    RichText::new(
-                        "This shell does not parse metadata, decode PCM, or open an audio device.",
-                    )
-                    .color(theme::MUTED),
-                );
-            });
+        .inner_margin(egui::Margin::same(18));
+    let margins = frame.total_margin();
+    let content_height = (available_height - margins.top - margins.bottom).max(180.0);
+
+    frame.show(ui, |ui| {
+        ui.set_min_height(content_height);
+        ui.vertical_centered(|ui| {
+            ui.add_space(((content_height - 62.0) / 2.0).max(24.0));
+            let headline = if has_source {
+                "Ready for decoder integration"
+            } else {
+                "No object scene"
+            };
+            ui.label(
+                RichText::new(headline)
+                    .size(19.0)
+                    .strong()
+                    .color(theme::TEXT),
+            );
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new(
+                    "This shell does not parse metadata, decode PCM, or open an audio device.",
+                )
+                .color(theme::MUTED),
+            );
         });
+    });
 }
 
 fn draw_diagnostics_content(root: &mut egui::Ui) {
