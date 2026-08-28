@@ -11,6 +11,8 @@ pub struct PlayerApp {
     backend: SpatialBackendKind,
     status: StatusLine,
     timeline_preview: f32,
+    volume: f32,
+    muted: bool,
     diagnostics_open: bool,
 }
 
@@ -22,6 +24,8 @@ impl PlayerApp {
             backend: SpatialBackendKind::Automatic,
             status: StatusLine::idle("Choose or drop an AC-4 media file"),
             timeline_preview: 0.0,
+            volume: 0.8,
+            muted: false,
             diagnostics_open: false,
         }
     }
@@ -280,15 +284,30 @@ impl PlayerApp {
                     content.center(),
                     egui::vec2(content.width(), control_height),
                 );
+                let volume_width = if content.width() >= 700.0 {
+                    150.0
+                } else {
+                    120.0
+                };
+                let side_reserve = volume_width + 20.0;
                 ui.scope_builder(
                     egui::UiBuilder::new()
                         .max_rect(control_rect)
                         .layout(Layout::top_down(Align::Center)),
                     |ui| {
                         transport_buttons(ui);
-                        transport_progress(ui, &mut self.timeline_preview);
+                        transport_progress(ui, &mut self.timeline_preview, side_reserve);
                     },
                 );
+
+                let volume_rect = egui::Rect::from_center_size(
+                    egui::pos2(
+                        content.right() - volume_width / 2.0,
+                        control_rect.bottom() - 10.0,
+                    ),
+                    egui::vec2(volume_width, 28.0),
+                );
+                volume_control(ui, volume_rect, &mut self.volume, &mut self.muted);
             });
     }
 }
@@ -331,10 +350,15 @@ fn disabled_transport_button(ui: &mut egui::Ui, glyph: &str, size: egui::Vec2) {
     );
 }
 
-fn transport_progress(ui: &mut egui::Ui, timeline_preview: &mut f32) {
+fn transport_progress(ui: &mut egui::Ui, timeline_preview: &mut f32, side_reserve: f32) {
     let row_width = ui.available_width();
-    let progress_width = (row_width * 0.55).clamp(260.0, 520.0);
     let time_width = 50.0;
+    let spacing = ui.spacing().item_spacing.x;
+    let max_group_width = (row_width - side_reserve * 2.0).max(260.0);
+    let max_progress_width = (max_group_width - time_width * 2.0 - spacing * 2.0).max(140.0);
+    let progress_width = (row_width * 0.45)
+        .clamp(160.0, 420.0)
+        .min(max_progress_width);
     let group_width = progress_width + time_width * 2.0 + ui.spacing().item_spacing.x * 2.0;
     let (row, _) = ui.allocate_exact_size(egui::vec2(row_width, 20.0), egui::Sense::hover());
     let group = egui::Rect::from_center_size(row.center(), egui::vec2(group_width, row.height()));
@@ -361,6 +385,123 @@ fn transport_progress(ui: &mut egui::Ui, timeline_preview: &mut f32) {
             );
         },
     );
+}
+
+fn volume_control(ui: &mut egui::Ui, rect: egui::Rect, volume: &mut f32, muted: &mut bool) {
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(Layout::left_to_right(Align::Center)),
+        |ui| {
+            if speaker_button(ui, *muted, *volume).clicked() {
+                if *muted {
+                    if *volume <= f32::EPSILON {
+                        *volume = 0.5;
+                    }
+                    *muted = false;
+                } else {
+                    *muted = true;
+                }
+            }
+
+            let slider_width = (rect.width() - 28.0 - ui.spacing().item_spacing.x).max(56.0);
+            ui.spacing_mut().interact_size.y = 18.0;
+            ui.spacing_mut().slider_width = slider_width;
+            let response = ui.add(egui::Slider::new(volume, 0.0..=1.0).show_value(false));
+            if response.changed() {
+                *muted = *volume <= f32::EPSILON;
+            }
+            response.on_hover_text(format!("Volume: {:.0}%", *volume * 100.0));
+        },
+    );
+}
+
+fn speaker_button(ui: &mut egui::Ui, muted: bool, volume: f32) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::click());
+    let response = response.on_hover_text(if muted { "Unmute" } else { "Mute" });
+    let fill = if response.hovered() {
+        theme::HOVER
+    } else {
+        theme::SURFACE
+    };
+    ui.painter().rect_filled(rect, 0.0, fill);
+    ui.painter().rect_stroke(
+        rect,
+        0.0,
+        Stroke::new(1.0, theme::BORDER),
+        egui::StrokeKind::Inside,
+    );
+
+    let center = rect.center();
+    let color = if muted { theme::WARNING } else { theme::MUTED };
+    ui.painter().rect_filled(
+        egui::Rect::from_min_max(
+            egui::pos2(center.x - 9.0, center.y - 3.0),
+            egui::pos2(center.x - 5.0, center.y + 3.0),
+        ),
+        0.0,
+        color,
+    );
+    ui.painter().add(egui::Shape::convex_polygon(
+        vec![
+            egui::pos2(center.x - 5.0, center.y - 4.0),
+            egui::pos2(center.x + 1.0, center.y - 8.0),
+            egui::pos2(center.x + 1.0, center.y + 8.0),
+            egui::pos2(center.x - 5.0, center.y + 4.0),
+        ],
+        color,
+        Stroke::NONE,
+    ));
+
+    if muted {
+        ui.painter().line_segment(
+            [
+                egui::pos2(center.x + 5.0, center.y - 4.0),
+                egui::pos2(center.x + 11.0, center.y + 4.0),
+            ],
+            Stroke::new(1.5, color),
+        );
+        ui.painter().line_segment(
+            [
+                egui::pos2(center.x + 11.0, center.y - 4.0),
+                egui::pos2(center.x + 5.0, center.y + 4.0),
+            ],
+            Stroke::new(1.5, color),
+        );
+    } else if volume > f32::EPSILON {
+        ui.painter().line_segment(
+            [
+                egui::pos2(center.x + 5.0, center.y - 4.0),
+                egui::pos2(center.x + 8.0, center.y),
+            ],
+            Stroke::new(1.5, color),
+        );
+        ui.painter().line_segment(
+            [
+                egui::pos2(center.x + 8.0, center.y),
+                egui::pos2(center.x + 5.0, center.y + 4.0),
+            ],
+            Stroke::new(1.5, color),
+        );
+        if volume > 0.5 {
+            ui.painter().line_segment(
+                [
+                    egui::pos2(center.x + 8.0, center.y - 6.0),
+                    egui::pos2(center.x + 12.0, center.y),
+                ],
+                Stroke::new(1.5, color),
+            );
+            ui.painter().line_segment(
+                [
+                    egui::pos2(center.x + 12.0, center.y),
+                    egui::pos2(center.x + 8.0, center.y + 6.0),
+                ],
+                Stroke::new(1.5, color),
+            );
+        }
+    }
+
+    response
 }
 
 impl eframe::App for PlayerApp {
