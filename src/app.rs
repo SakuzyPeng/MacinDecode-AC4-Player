@@ -64,12 +64,11 @@ impl PlayerApp {
             .frame(
                 egui::Frame::NONE
                     .fill(theme::SURFACE)
-                    .stroke(Stroke::new(1.0, theme::BORDER)),
+                    .inner_margin(egui::Margin::symmetric(20, 0)),
             )
             .show(root, |ui| {
                 ui.add_space(14.0);
                 ui.horizontal(|ui| {
-                    ui.add_space(20.0);
                     ui.vertical(|ui| {
                         ui.label(
                             RichText::new("MacinDecode AC-4 Player")
@@ -84,20 +83,32 @@ impl PlayerApp {
                         );
                     });
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.add_space(20.0);
-                        egui::Frame::NONE
-                            .fill(theme::ACCENT_SOFT)
-                            .inner_margin(egui::Margin::symmetric(9, 4))
-                            .show(ui, |ui| {
-                                ui.label(
-                                    RichText::new("SHELL ONLY")
-                                        .size(10.0)
-                                        .strong()
-                                        .color(theme::ACCENT),
+                        egui::ComboBox::from_id_salt("output-device")
+                            .selected_text("No output device")
+                            .width(170.0)
+                            .show_ui(ui, |ui| {
+                                ui.add_enabled(
+                                    false,
+                                    egui::Label::new("No spatial devices available"),
                                 );
                             });
+                        ui.label(
+                            RichText::new("OUTPUT DEVICE")
+                                .size(10.0)
+                                .strong()
+                                .color(theme::MUTED),
+                        );
                     });
                 });
+                let clip = ui.clip_rect();
+                let bottom = ui.max_rect().bottom() - 0.5;
+                ui.painter().line_segment(
+                    [
+                        egui::pos2(clip.left(), bottom),
+                        egui::pos2(clip.right(), bottom),
+                    ],
+                    Stroke::new(1.0, theme::BORDER),
+                );
             });
     }
 
@@ -181,7 +192,7 @@ impl PlayerApp {
                 .color(theme::MUTED),
         );
         ui.separator();
-        key_value(ui, "Device", "No backend connected");
+        key_value(ui, "Stream", "Not created");
         key_value(ui, "Object capacity", "Unknown");
     }
 
@@ -190,7 +201,7 @@ impl PlayerApp {
             .frame(
                 egui::Frame::NONE
                     .fill(theme::BACKGROUND)
-                    .inner_margin(egui::Margin::same(18)),
+                    .inner_margin(egui::Margin::same(20)),
             )
             .show(root, |ui| {
                 ui.horizontal(|ui| {
