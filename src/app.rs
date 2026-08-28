@@ -229,8 +229,8 @@ impl PlayerApp {
             egui::ViewportId::from_hash_of("playback-diagnostics"),
             egui::ViewportBuilder::default()
                 .with_title("MacinDecode AC-4 Diagnostics")
-                .with_inner_size([440.0, 300.0])
-                .with_min_inner_size([380.0, 260.0]),
+                .with_inner_size([460.0, 390.0])
+                .with_min_inner_size([400.0, 300.0]),
             |root, _class| {
                 let close_requested = root.ctx().input(|input| input.viewport().close_requested());
                 draw_diagnostics_content(root);
@@ -450,29 +450,35 @@ fn draw_diagnostics_content(root: &mut egui::Ui) {
                 .inner_margin(egui::Margin::same(22)),
         )
         .show(root, |ui| {
-            ui.heading(RichText::new("Playback diagnostics").color(theme::TEXT));
-            ui.label(
-                RichText::new("Live status for the decoder and native spatial output path.")
-                    .size(11.0)
-                    .color(theme::MUTED),
-            );
-            ui.add_space(16.0);
-            section_title(ui, "SESSION");
-            card(ui, |ui| {
-                key_value(ui, "Container", "Not connected");
-                ui.separator();
-                key_value(ui, "Decoder session", "Not created");
-                ui.separator();
-                key_value(ui, "Spatial stream", "Not created");
-                ui.separator();
-                key_value(ui, "Underruns", "0");
-            });
-            ui.add_space(12.0);
-            ui.label(
-                RichText::new("This shell does not open an audio device.")
-                    .size(10.0)
-                    .color(theme::MUTED),
-            );
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.heading(RichText::new("Playback diagnostics").color(theme::TEXT));
+                    ui.label(
+                        RichText::new(
+                            "Live status for the decoder and native spatial output path.",
+                        )
+                        .size(11.0)
+                        .color(theme::MUTED),
+                    );
+                    ui.add_space(16.0);
+                    section_title(ui, "SESSION");
+                    card(ui, |ui| {
+                        key_value(ui, "Container", "Not connected");
+                        ui.separator();
+                        key_value(ui, "Decoder session", "Not created");
+                        ui.separator();
+                        key_value(ui, "Spatial stream", "Not created");
+                        ui.separator();
+                        key_value(ui, "Underruns", "0");
+                    });
+                    ui.add_space(12.0);
+                    ui.label(
+                        RichText::new("This shell does not open an audio device.")
+                            .size(10.0)
+                            .color(theme::MUTED),
+                    );
+                });
         });
 }
 
