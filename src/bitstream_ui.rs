@@ -29,7 +29,7 @@ pub fn draw_card(
 }
 
 fn draw_empty_card(ui: &mut egui::Ui) -> Option<BitstreamAction> {
-    summary_rows(ui, ["—", "—", "—", "—"]);
+    summary_rows(ui, ["—", "—", "—"]);
     ui.separator();
     ui.label(
         RichText::new("Select a playlist item")
@@ -40,7 +40,7 @@ fn draw_empty_card(ui: &mut egui::Ui) -> Option<BitstreamAction> {
 }
 
 fn draw_pending_card(ui: &mut egui::Ui) -> Option<BitstreamAction> {
-    summary_rows(ui, ["—", "—", "—", "—"]);
+    summary_rows(ui, ["—", "—", "—"]);
     ui.separator();
     ui.horizontal(|ui| {
         ui.spinner();
@@ -55,12 +55,20 @@ fn draw_pending_card(ui: &mut egui::Ui) -> Option<BitstreamAction> {
 
 fn draw_ready_card(ui: &mut egui::Ui, snapshot: &InspectionSnapshot) -> Option<BitstreamAction> {
     let report = &snapshot.report;
-    let bit_rate = preferred_bit_rate(report);
+    let presentation = report.presentations.first();
     let values = [
-        source_kind_text(report.source.kind).to_owned(),
-        field_summary_text(&report.source.duration),
-        field_summary_text(bit_rate),
-        field_summary_text(&report.stream.sample_rate),
+        bit_rate_and_core_text(report),
+        content_summary_text(report),
+        presentation.map_or_else(
+            || "Not present".to_owned(),
+            |presentation| {
+                format!(
+                    "{} · {}",
+                    field_summary_text(&presentation.loudness.loudness),
+                    field_summary_text(&presentation.loudness.maximum_true_peak)
+                )
+            },
+        ),
     ];
     summary_rows(ui, values.iter().map(String::as_str));
     ui.separator();
@@ -94,7 +102,7 @@ fn draw_ready_card(ui: &mut egui::Ui, snapshot: &InspectionSnapshot) -> Option<B
 }
 
 fn draw_failed_card(ui: &mut egui::Ui, error: &str) -> Option<BitstreamAction> {
-    summary_rows(ui, ["—", "—", "—", "—"]);
+    summary_rows(ui, ["—", "—", "—"]);
     ui.separator();
 
     let mut action = None;
@@ -118,7 +126,7 @@ fn draw_failed_card(ui: &mut egui::Ui, error: &str) -> Option<BitstreamAction> {
 }
 
 fn summary_rows<'a>(ui: &mut egui::Ui, values: impl IntoIterator<Item = &'a str>) {
-    const LABELS: [&str; 4] = ["Format", "Duration", "Bit rate", "Sample rate"];
+    const LABELS: [&str; 3] = ["Bit rate / core", "Content", "Loudness / peak"];
     for (label, value) in LABELS.into_iter().zip(values) {
         compact_key_value(ui, label, value);
     }
@@ -139,6 +147,69 @@ fn preferred_bit_rate(report: &InspectReport) -> &ReportedField {
         &report.stream.bit_rate
     } else {
         &report.stream.estimated_average_bit_rate
+    }
+}
+
+fn bit_rate_and_core_text(report: &InspectReport) -> String {
+    let bit_rate = preferred_bit_rate(report);
+    let bit_rate_text = field_summary_text(bit_rate);
+    if !has_object_coded_audio(report) {
+        return bit_rate_text;
+    }
+
+    bit_rate
+        .value
+        .as_ref()
+        .and_then(serde_json::Value::as_u64)
+        .and_then(object_core_layout)
+        .map_or(bit_rate_text.clone(), |layout| {
+            format!("{bit_rate_text} · {layout}")
+        })
+}
+
+fn has_object_coded_audio(report: &InspectReport) -> bool {
+    report.audio_substreams.iter().any(|substream| {
+        substream.object_coded.status == FieldStatus::Present
+            && substream
+                .object_coded
+                .value
+                .as_ref()
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+    })
+}
+
+fn content_summary_text(report: &InspectReport) -> String {
+    let Some(presentation) = report.presentations.first() else {
+        return "Not present".to_owned();
+    };
+    let content = field_summary_text(&presentation.summary).replace(" (single_group)", "");
+    if !has_object_coded_audio(report) {
+        return content;
+    }
+
+    presentation
+        .minimal_compatibility_level
+        .value
+        .as_ref()
+        .and_then(serde_json::Value::as_u64)
+        .and_then(object_profile)
+        .map_or(content.clone(), |profile| format!("{content} · {profile}"))
+}
+
+const fn object_profile(compatibility_level: u64) -> Option<&'static str> {
+    match compatibility_level {
+        3 => Some("16 objects (L3)"),
+        4 => Some("20 objects (L4)"),
+        _ => None,
+    }
+}
+
+const fn object_core_layout(bit_rate_kbps: u64) -> Option<&'static str> {
+    match bit_rate_kbps {
+        768 => Some("5.1.4 (9.1)"),
+        1_500 => Some("7.1.4 (11.1)"),
+        _ => None,
     }
 }
 
@@ -622,4 +693,23 @@ fn detail_frame(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui)) {
         .stroke(Stroke::new(1.0, theme::BORDER))
         .inner_margin(egui::Margin::same(12))
         .show(ui, contents);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{object_core_layout, object_profile};
+
+    #[test]
+    fn maps_only_confirmed_object_core_bit_rate_tiers() {
+        assert_eq!(object_core_layout(768), Some("5.1.4 (9.1)"));
+        assert_eq!(object_core_layout(1_500), Some("7.1.4 (11.1)"));
+        assert_eq!(object_core_layout(1_024), None);
+    }
+
+    #[test]
+    fn maps_object_profiles_from_the_reported_compatibility_level() {
+        assert_eq!(object_profile(3), Some("16 objects (L3)"));
+        assert_eq!(object_profile(4), Some("20 objects (L4)"));
+        assert_eq!(object_profile(2), None);
+    }
 }
