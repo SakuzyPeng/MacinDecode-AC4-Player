@@ -1,19 +1,24 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use eframe::egui::{self, Align, Color32, Layout, RichText, Stroke};
 
 use crate::backend::SpatialBackendKind;
+use crate::bitstream_ui::{self, BitstreamAction};
+use crate::inspection::InspectionController;
 use crate::model::SelectedSource;
 use crate::theme;
 
 pub struct PlayerApp {
     playlist: Vec<SelectedSource>,
     selected_source: Option<usize>,
+    inspection: InspectionController,
     backend: SpatialBackendKind,
     status: StatusLine,
     timeline_preview: f32,
     volume: f32,
     muted: bool,
+    bitstream_details_open: bool,
     diagnostics_open: bool,
 }
 
@@ -23,11 +28,13 @@ impl PlayerApp {
         Self {
             playlist: Vec::new(),
             selected_source: None,
+            inspection: InspectionController::new(),
             backend: SpatialBackendKind::Automatic,
             status: StatusLine::idle("Add or drop AC-4 media files"),
             timeline_preview: 0.0,
             volume: 0.8,
             muted: false,
+            bitstream_details_open: false,
             diagnostics_open: false,
         }
     }
@@ -108,11 +115,49 @@ impl PlayerApp {
             ));
         }
         self.timeline_preview = 0.0;
+        self.inspection
+            .retain_paths(self.playlist.iter().map(SelectedSource::path));
+        if self.selected_source.is_none() {
+            self.bitstream_details_open = false;
+        }
     }
 
     fn has_selected_source(&self) -> bool {
         self.selected_source
             .is_some_and(|index| index < self.playlist.len())
+    }
+
+    fn selected_source(&self) -> Option<&SelectedSource> {
+        self.selected_source
+            .and_then(|index| self.playlist.get(index))
+    }
+
+    fn selected_path(&self) -> Option<&Path> {
+        self.selected_source().map(SelectedSource::path)
+    }
+
+    fn sync_inspection(&mut self, context: &egui::Context) {
+        self.inspection.poll();
+        if let Some(path) = self.selected_path().map(Path::to_path_buf) {
+            self.inspection.ensure_requested(&path);
+        } else {
+            self.bitstream_details_open = false;
+        }
+        if self.inspection.has_pending() {
+            context.request_repaint_after(Duration::from_millis(50));
+        }
+    }
+
+    fn handle_bitstream_action(&mut self, action: Option<BitstreamAction>) {
+        match action {
+            Some(BitstreamAction::OpenDetails) => self.bitstream_details_open = true,
+            Some(BitstreamAction::Retry) => {
+                if let Some(path) = self.selected_path().map(Path::to_path_buf) {
+                    self.inspection.retry(&path);
+                }
+            }
+            None => {}
+        }
     }
 
     fn accept_dropped_files(&mut self, context: &egui::Context) {
@@ -196,19 +241,44 @@ impl PlayerApp {
                     .inner_margin(egui::Margin::same(18)),
             )
             .show(root, |ui| {
-                let playlist_height = (ui.available_height() - 390.0).clamp(120.0, 360.0);
+                const INFO_BLOCK_HEIGHT: f32 = 205.0;
+                const BLOCK_GAP: f32 = 18.0;
 
-                section_title(ui, "SOURCE");
-                card(ui, |ui| self.draw_source_card(ui, playlist_height));
+                let available = ui.available_rect_before_wrap();
+                let info_rect = egui::Rect::from_min_max(
+                    egui::pos2(available.left(), available.bottom() - INFO_BLOCK_HEIGHT),
+                    available.right_bottom(),
+                );
+                let source_rect = egui::Rect::from_min_max(
+                    available.min,
+                    egui::pos2(available.right(), info_rect.top() - BLOCK_GAP),
+                );
 
-                ui.add_space(18.0);
-                section_title(ui, "PRESENTATION");
-                card(ui, |ui| {
-                    key_value(ui, "Selection", "Automatic");
-                    key_value(ui, "Decode mode", "Full A-JOC");
-                    key_value(ui, "Status", "Not inspected");
-                });
+                ui.scope_builder(
+                    egui::UiBuilder::new()
+                        .max_rect(source_rect)
+                        .layout(Layout::top_down(Align::Min)),
+                    |ui| {
+                        section_title(ui, "SOURCE");
+                        let playlist_height = (ui.available_height() - 124.0).max(72.0);
+                        card(ui, |ui| self.draw_source_card(ui, playlist_height));
+                    },
+                );
+                ui.scope_builder(
+                    egui::UiBuilder::new()
+                        .max_rect(info_rect)
+                        .layout(Layout::top_down(Align::Min)),
+                    |ui| self.draw_bitstream_info(ui),
+                );
             });
+    }
+
+    fn draw_bitstream_info(&mut self, ui: &mut egui::Ui) {
+        section_title(ui, "BITSTREAM INFO");
+        let source = self.selected_source();
+        let state = source.and_then(|source| self.inspection.state(source.path()));
+        let action = card(ui, |ui| bitstream_ui::draw_card(ui, source, state));
+        self.handle_bitstream_action(action);
     }
 
     fn draw_source_card(&mut self, ui: &mut egui::Ui, playlist_height: f32) {
@@ -295,6 +365,32 @@ impl PlayerApp {
             },
         );
         self.diagnostics_open = remains_open;
+    }
+
+    fn draw_bitstream_details_window(&mut self, context: &egui::Context) {
+        if !self.bitstream_details_open {
+            return;
+        }
+        let Some(source) = self.selected_source() else {
+            self.bitstream_details_open = false;
+            return;
+        };
+        let state = self.inspection.state(source.path());
+        let mut requested_action = None;
+        let remains_open = context.show_viewport_immediate(
+            egui::ViewportId::from_hash_of("bitstream-details"),
+            egui::ViewportBuilder::default()
+                .with_title("MacinDecode AC-4 Bitstream Details")
+                .with_inner_size([760.0, 680.0])
+                .with_min_inner_size([560.0, 420.0]),
+            |root, _class| {
+                let close_requested = root.ctx().input(|input| input.viewport().close_requested());
+                requested_action = bitstream_ui::draw_details(root, source, state);
+                !close_requested
+            },
+        );
+        self.bitstream_details_open = remains_open;
+        self.handle_bitstream_action(requested_action);
     }
 
     fn draw_transport(&mut self, root: &mut egui::Ui) {
@@ -662,10 +758,12 @@ impl eframe::App for PlayerApp {
     fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let context = root.ctx().clone();
         self.accept_dropped_files(&context);
+        self.sync_inspection(&context);
         Self::draw_header(root);
         self.draw_source_sidebar(root);
         self.draw_transport(root);
         self.draw_scene(root);
+        self.draw_bitstream_details_window(&context);
         self.draw_diagnostics_window(&context);
 
         if context.input(|input| !input.raw.hovered_files.is_empty()) {
@@ -721,12 +819,13 @@ fn section_title(ui: &mut egui::Ui, title: &str) {
     ui.add_space(4.0);
 }
 
-fn card(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui)) {
+fn card<R>(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
     egui::Frame::NONE
         .fill(theme::SURFACE)
         .stroke(Stroke::new(1.0, theme::BORDER))
         .inner_margin(egui::Margin::same(14))
-        .show(ui, contents);
+        .show(ui, contents)
+        .inner
 }
 
 fn key_value(ui: &mut egui::Ui, key: &str, value: &str) {

@@ -8,6 +8,8 @@ compile_error!(
 
 mod app;
 mod backend;
+mod bitstream_ui;
+mod inspection;
 mod model;
 mod theme;
 

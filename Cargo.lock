@@ -1373,6 +1373,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "itoa"
+version = "1.0.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
+
+[[package]]
 name = "jni"
 version = "0.22.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1554,11 +1560,37 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
+name = "macindecode-ac4-bitstream"
+version = "0.1.0"
+source = "git+https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git?rev=eb7c6132072daad3b4312bd23c2d9e8a63fa1265#eb7c6132072daad3b4312bd23c2d9e8a63fa1265"
+
+[[package]]
+name = "macindecode-ac4-inspect"
+version = "0.1.0"
+source = "git+https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git?rev=eb7c6132072daad3b4312bd23c2d9e8a63fa1265#eb7c6132072daad3b4312bd23c2d9e8a63fa1265"
+dependencies = [
+ "macindecode-ac4-bitstream",
+ "macindecode-ac4-mp4",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "macindecode-ac4-mp4"
+version = "0.1.0"
+source = "git+https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git?rev=eb7c6132072daad3b4312bd23c2d9e8a63fa1265#eb7c6132072daad3b4312bd23c2d9e8a63fa1265"
+dependencies = [
+ "macindecode-ac4-bitstream",
+]
+
+[[package]]
 name = "macindecode-ac4-player"
 version = "0.1.0"
 dependencies = [
  "eframe",
+ "macindecode-ac4-inspect",
  "rfd",
+ "serde_json",
 ]
 
 [[package]]
@@ -2541,6 +2573,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.4",
+]
+
+[[package]]
+name = "serde_json"
+version = "1.0.151"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
+dependencies = [
+ "itoa",
+ "memchr",
+ "serde",
+ "serde_core",
+ "zmij",
 ]
 
 [[package]]
@@ -3920,6 +3965,12 @@ dependencies = [
  "quote",
  "syn 2.0.119",
 ]
+
+[[package]]
+name = "zmij"
+version = "1.0.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zune-core"
