@@ -321,12 +321,19 @@ impl SpatialOutputController {
             self.config = Some(config.clone());
             return;
         }
+        #[cfg(target_os = "windows")]
+        let restore_phase = self.snapshot.phase;
         self.reset();
         self.config = Some(config.clone());
         #[cfg(target_os = "windows")]
         match windows::spawn(config, reader) {
             Ok(renderer) => {
                 renderer.set_master_gain(self.master_gain);
+                match restore_phase {
+                    OutputPhase::Playing => renderer.play(),
+                    OutputPhase::Paused => renderer.pause(),
+                    _ => {}
+                }
                 self.renderer = Some(renderer);
                 self.set_snapshot(OutputSnapshot::initializing(
                     config.dynamic_object_count,
