@@ -29,7 +29,7 @@ native crate 看不到 AC-4 bitstream、Core Session 或 Core 的借用类型。
   `windows` crate 会在 `PROPVARIANT` 析构时调用 `PropVariantClear`，因此不得让 BLOB 指向 Rust allocator
   或栈内存。
 - Scene 对象、stream、client、endpoint、event 与 activation backing 的析构顺序受 native crate 控制；
-  Stop/Reset 后先释放对象和 stream，再关闭 event 与 COM apartment。
+  Reset 后先释放对象和 stream，再关闭 event 与 COM apartment。
 
 主程序设置 `unsafe_code = "forbid"`。COM vtable 调用、原始指针和 Windows 对象 buffer 只存在于
 `crates/windows-spatial-audio`。
@@ -65,7 +65,8 @@ native crate 看不到 AC-4 bitstream、Core Session 或 Core 的借用类型。
   文件状态；旧 reader 会把失效 key 视为 EOS。
 - producer 标记 EOS 且 FIFO 排空后，对所有已激活对象调用 `SetEndOfStream`；完成最后一次
   `EndUpdatingAudioObjects` 后立即释放这些对象接口，同时保留已结束的 stream，以免后续 update 复用
-  已失效对象并进入 Failed。Stop 使用同一压缩缓存 seek 到 0 并暂停；签名兼容时直接替换 source。
+  已失效对象并进入 Failed。播放器按顺序、单曲循环、列表循环或随机模式决定重播当前来源、切换
+  来源或结束；同一来源重播使用压缩缓存 seek 到 0，签名兼容时直接替换 source。
 - 若首选 endpoint 消失会临时使用兼容默认设备；没有任何活动 endpoint 能容纳当前 Scene 时，播放器
   保存文件、绝对位置、音量和播放意图，暂停等待设备恢复。
 

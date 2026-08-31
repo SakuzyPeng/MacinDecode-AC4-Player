@@ -39,7 +39,7 @@ FIFO 按每声道时间帧计量，容量为当前采样率的 2 秒。它保存
 
 ## 并发与来源切换
 
-每次打开或关闭来源都会递增 request ID；同一文件内的 seek、Stop、设备恢复和拓扑恢复只递增
+每次打开或关闭来源都会递增 request ID；同一文件内的 seek、结束后重播、设备恢复和拓扑恢复只递增
 playback epoch。两者组成 `PlaybackKey`，FIFO、decode event 和 Scene reader 都拒绝旧 key。worker 在
 AU 之间以及 FIFO 满载等待时检查控制命令，因此快速连续 seek 或切换播放列表时，旧 PCM 不会进入
 当前空间流。
@@ -55,7 +55,7 @@ AU 之间以及 FIFO 满载等待时检查控制命令，因此快速连续 seek
 - 若最近候选在产出目标 PCM 前仍被 Core 音频层拒绝，会在同一 epoch 内退到前一个 Full 候选重试；
   一旦已经产出目标 PCM，后续真实码流错误不会被回退逻辑掩盖。
 - 目标之前没有安全点时拒绝 seek，队列和当前 renderer 保持不变。seek 到精确文件结尾会直接进入 EOS。
-- Stop 等价于 `seek(0)` 后 Pause，不关闭文件、不重新读盘。
+- 播放结束后重播会执行 `seek(0)`，不关闭文件、不重新读盘。
 
 ## 当前限制
 
