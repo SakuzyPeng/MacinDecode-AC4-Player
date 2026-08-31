@@ -50,7 +50,7 @@ AU 之间以及 FIFO 满载等待时检查控制命令，因此快速连续 seek
   `RandomAccess::Full`；两者缺一不可。
 - 裸 `.ac4` 使用 sync-frame 字节范围和 Core 的 `RandomAccess::Full`。索引同时验证整条流采样率
   不变并计算总时长。
-- seek 从目标之前最近的安全 AU 建立 discontinuity Session，解码到目标所在 Scene block；render
+- seek 从目标之前最近的安全 AU 完整重置 Session，解码到目标所在 Scene block；render
   source 以绝对 playhead 在 block 内裁到目标采样。PCM、OAMD 初始状态和 ramp 都按该采样位置对齐。
 - 目标之前没有安全点时拒绝 seek，队列和当前 renderer 保持不变。seek 到精确文件结尾会直接进入 EOS。
 - Stop 等价于 `seek(0)` 后 Pause，不关闭文件、不重新读盘。
