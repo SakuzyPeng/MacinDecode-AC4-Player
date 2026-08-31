@@ -45,4 +45,6 @@ FIFO 按每声道时间帧计量，容量为当前采样率的 2 秒。它保存
 - presentation 使用 `AutoUnique`；多 presentation 文件会得到 Core 的结构化选择错误，尚无 UI 选择器。
 - 仅连接 Full A-JOC；Core 已明确拒绝的 channel-based、direct-object 或未实现工具不会静默回退。
 - Core 当前 MP4 API 接收完整文件切片，所以压缩源会读入内存；PCM 始终受 2 秒 FIFO 限制。
-- 尚无 FIFO consumer、设备流或 seek，因而 transport 控件保持禁用。
+- Windows Spatial Audio 已消费 FIFO；尚无 seek，Stop 会销毁输出流并从头重新启动解码。
+
+原生对象提交与坐标契约见 [WINDOWS_SPATIAL_AUDIO.md](WINDOWS_SPATIAL_AUDIO.md)。

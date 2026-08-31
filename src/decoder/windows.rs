@@ -187,7 +187,7 @@ fn decode_mp4(
             return Ok(control);
         }
     }
-    finish(request_id, path, &metrics, event_sender)
+    finish(request_id, path, &metrics, event_sender, queue)
 }
 
 fn decode_raw(
@@ -247,7 +247,7 @@ fn decode_raw(
 
     let mut metrics = metrics.ok_or_else(|| "Input contains no AC-4 sync frame".to_owned())?;
     metrics.duration_frames = u64::try_from(frame_start).ok();
-    finish(request_id, path, &metrics, event_sender)
+    finish(request_id, path, &metrics, event_sender, queue)
 }
 
 fn new_session() -> Ac4DecoderSession {
@@ -356,10 +356,12 @@ fn finish(
     path: &Path,
     metrics: &DecodeMetrics,
     event_sender: &Sender<WorkerEvent>,
+    queue: &SharedSceneQueue,
 ) -> Result<RunControl, String> {
     if metrics.decoded_scene_frames == 0 {
         return Err("MacinDecode Core produced no scene PCM".to_owned());
     }
+    queue.mark_end_of_stream(request_id);
     send_progress(
         request_id,
         path,
@@ -548,6 +550,18 @@ mod tests {
             }
         }
         let metrics = controller.snapshot().metrics().expect("decode metrics");
+        eprintln!(
+            "container={} sample_rate={} presentation={} objects={} lfe={} access_units={} scene_frames={} decoded_frames={} buffered_frames={}",
+            metrics.container().label(),
+            metrics.sample_rate(),
+            metrics.presentation_index(),
+            metrics.object_count(),
+            metrics.has_lfe(),
+            metrics.decoded_access_units(),
+            metrics.decoded_scene_frames(),
+            metrics.decoded_frames(),
+            metrics.buffered_frames(),
+        );
         assert!(metrics.decoded_access_units() > 0);
         assert!(metrics.decoded_frames() > 0);
         assert!(metrics.object_count() > 0 || metrics.has_lfe());

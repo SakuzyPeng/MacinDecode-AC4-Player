@@ -480,6 +480,7 @@ struct SceneQueueInner {
     sample_rate: u32,
     buffered_frames: u64,
     capacity_frames: u64,
+    end_of_stream: bool,
     blocks: VecDeque<DecodedSceneBlock>,
 }
 
@@ -505,6 +506,7 @@ impl SharedSceneQueue {
                     sample_rate: 0,
                     buffered_frames: 0,
                     capacity_frames: 0,
+                    end_of_stream: false,
                     blocks: VecDeque::new(),
                 }),
                 Condvar::new(),
@@ -519,6 +521,7 @@ impl SharedSceneQueue {
         queue.sample_rate = 0;
         queue.buffered_frames = 0;
         queue.capacity_frames = 0;
+        queue.end_of_stream = false;
         queue.blocks.clear();
         changed.notify_all();
     }
@@ -556,15 +559,34 @@ impl SharedSceneQueue {
         })
     }
 
-    fn try_pop(&self) -> Option<DecodedSceneBlock> {
+    fn try_pop(&self, request_id: u64) -> Option<DecodedSceneBlock> {
         let (mutex, changed) = &*self.state;
         let mut queue = lock_recover(mutex);
+        if queue.request_id != request_id {
+            return None;
+        }
         let block = queue.blocks.pop_front()?;
         queue.buffered_frames = queue
             .buffered_frames
             .saturating_sub(u64::from(block.duration_frames));
         changed.notify_all();
         Some(block)
+    }
+
+    #[cfg(any(target_os = "windows", test))]
+    pub(super) fn mark_end_of_stream(&self, request_id: u64) {
+        let (mutex, changed) = &*self.state;
+        let mut queue = lock_recover(mutex);
+        if queue.request_id == request_id {
+            queue.end_of_stream = true;
+            changed.notify_all();
+        }
+    }
+
+    #[cfg(any(target_os = "windows", test))]
+    fn is_end_of_stream(&self, request_id: u64) -> bool {
+        let queue = lock_recover(&self.state.0);
+        queue.request_id != request_id || (queue.end_of_stream && queue.blocks.is_empty())
     }
 
     #[cfg(target_os = "windows")]
@@ -578,6 +600,31 @@ impl SharedSceneQueue {
 
     fn wake_all(&self) {
         self.state.1.notify_all();
+    }
+}
+
+#[derive(Debug, Clone)]
+#[cfg_attr(
+    not(target_os = "windows"),
+    allow(
+        dead_code,
+        reason = "the Scene reader is consumed only by the Windows output adapter"
+    )
+)]
+pub(crate) struct SceneQueueReader {
+    queue: SharedSceneQueue,
+    request_id: u64,
+}
+
+impl SceneQueueReader {
+    #[cfg(target_os = "windows")]
+    pub(crate) fn try_pop(&self) -> Option<DecodedSceneBlock> {
+        self.queue.try_pop(self.request_id)
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn is_end_of_stream(&self) -> bool {
+        self.queue.is_end_of_stream(self.request_id)
     }
 }
 
@@ -728,7 +775,26 @@ impl DecoderController {
     }
 
     pub fn try_pop_scene_block(&self) -> Option<DecodedSceneBlock> {
-        self.queue.try_pop()
+        self.queue.try_pop(self.request_id)
+    }
+
+    pub(crate) fn scene_reader(&self) -> SceneQueueReader {
+        SceneQueueReader {
+            queue: self.queue.clone(),
+            request_id: self.request_id,
+        }
+    }
+
+    pub const fn request_id(&self) -> u64 {
+        self.request_id
+    }
+
+    pub fn reopen(&mut self) {
+        let Some(path) = self.active_path.clone() else {
+            return;
+        };
+        self.active_path = None;
+        self.ensure_open(&path);
     }
 
     fn advance_request(&mut self) {
@@ -789,10 +855,21 @@ mod tests {
         }
 
         assert_eq!(
-            queue.try_pop().map(|item| item.duration_frames()),
+            queue.try_pop(7).map(|item| item.duration_frames()),
             Some(48_000)
         );
         assert!(queue.try_push(7, block(48_000, 1)).is_ok());
+    }
+
+    #[test]
+    fn scene_reader_reports_end_only_after_queued_blocks_are_drained() {
+        let queue = SharedSceneQueue::new();
+        queue.reset(9);
+        assert!(queue.try_push(9, block(48_000, 2_048)).is_ok());
+        queue.mark_end_of_stream(9);
+        assert!(!queue.is_end_of_stream(9));
+        assert!(queue.try_pop(9).is_some());
+        assert!(queue.is_end_of_stream(9));
     }
 
     #[test]

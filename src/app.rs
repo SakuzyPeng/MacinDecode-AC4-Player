@@ -3,7 +3,9 @@ use std::time::Duration;
 
 use eframe::egui::{self, Align, Color32, Layout, RichText, Stroke};
 
-use crate::backend::SpatialBackendKind;
+use crate::backend::{
+    OutputPhase, OutputSnapshot, OutputStreamConfig, SpatialBackendKind, SpatialOutputController,
+};
 use crate::bitstream_ui::{self, BitstreamAction};
 use crate::decoder::{
     DecodeMetrics, DecodePhase, DecoderController, DecoderSnapshot, PREBUFFER_MILLISECONDS,
@@ -18,6 +20,8 @@ pub struct PlayerApp {
     inspection: InspectionController,
     decoder: DecoderController,
     decoder_revision: u64,
+    output: SpatialOutputController,
+    output_revision: u64,
     backend: SpatialBackendKind,
     status: StatusLine,
     timeline_preview: f32,
@@ -36,6 +40,8 @@ impl PlayerApp {
             inspection: InspectionController::new(),
             decoder: DecoderController::new(),
             decoder_revision: 0,
+            output: SpatialOutputController::new(),
+            output_revision: 0,
             backend: SpatialBackendKind::Automatic,
             status: StatusLine::idle("Add or drop AC-4 media files"),
             timeline_preview: 0.0,
@@ -168,6 +174,57 @@ impl PlayerApp {
         }
     }
 
+    fn sync_output(&mut self, context: &egui::Context) {
+        let config = self.decoder.snapshot().metrics().and_then(|metrics| {
+            matches!(
+                self.decoder.snapshot().phase(),
+                DecodePhase::Ready | DecodePhase::EndOfStream
+            )
+            .then(|| {
+                OutputStreamConfig::new(
+                    self.decoder.request_id(),
+                    metrics.sample_rate(),
+                    metrics.object_count(),
+                    metrics.has_lfe(),
+                )
+            })
+        });
+        match config {
+            Some(Ok(config)) => self
+                .output
+                .ensure_configured(config, self.decoder.scene_reader()),
+            Some(Err(error)) => {
+                self.output.reset();
+                self.status = StatusLine::warning(error);
+            }
+            None => self.output.reset(),
+        }
+
+        let master_gain = if self.muted { 0.0 } else { self.volume };
+        self.output.set_master_gain(master_gain);
+        self.output.poll();
+        if self.output_revision != self.output.revision() {
+            self.output_revision = self.output.revision();
+            self.status = output_status_line(self.output.snapshot(), self.decoder.snapshot());
+        }
+        if let Some(metrics) = self.decoder.snapshot().metrics()
+            && let Some(duration) = metrics.duration_frames()
+            && duration > 0
+        {
+            const TIMELINE_STEPS: u64 = 10_000;
+            let submitted = self.output.snapshot().submitted_frames().min(duration);
+            let scaled = submitted.saturating_mul(TIMELINE_STEPS) / duration;
+            let scaled = u16::try_from(scaled).unwrap_or(u16::MAX);
+            self.timeline_preview = f32::from(scaled) / 10_000.0;
+        }
+        if matches!(
+            self.output.snapshot().phase(),
+            OutputPhase::Initializing | OutputPhase::Playing
+        ) {
+            context.request_repaint_after(Duration::from_millis(50));
+        }
+    }
+
     fn handle_bitstream_action(&mut self, action: Option<BitstreamAction>) {
         match action {
             Some(BitstreamAction::OpenDetails) => self.bitstream_details_open = true,
@@ -197,7 +254,24 @@ impl PlayerApp {
         }
     }
 
-    fn draw_header(root: &mut egui::Ui) {
+    fn draw_header(&self, root: &mut egui::Ui) {
+        let output = self.output.snapshot();
+        let selected_device = match output.phase() {
+            OutputPhase::Unavailable => "Spatial output unavailable",
+            OutputPhase::Idle => "Default Windows endpoint",
+            _ => output.device_label(),
+        };
+        let device_detail = if output.max_dynamic_objects() > 0 {
+            format!(
+                "{} dynamic-object slots available",
+                output.max_dynamic_objects()
+            )
+        } else {
+            output
+                .error()
+                .unwrap_or("Select a decoded AC-4 scene to activate")
+                .to_owned()
+        };
         egui::Panel::top("header")
             .exact_size(72.0)
             .frame(
@@ -223,13 +297,10 @@ impl PlayerApp {
                     });
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         egui::ComboBox::from_id_salt("output-device")
-                            .selected_text("No output device")
+                            .selected_text(selected_device)
                             .width(170.0)
                             .show_ui(ui, |ui| {
-                                ui.add_enabled(
-                                    false,
-                                    egui::Label::new("No spatial devices available"),
-                                );
+                                ui.add_enabled(false, egui::Label::new(device_detail));
                             });
                         ui.label(
                             RichText::new("OUTPUT DEVICE")
@@ -334,6 +405,7 @@ impl PlayerApp {
 
     fn draw_scene(&mut self, root: &mut egui::Ui) {
         let decoder = self.decoder.snapshot().clone();
+        let output = self.output.snapshot().clone();
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::NONE
@@ -364,7 +436,7 @@ impl PlayerApp {
                 metric_strip(ui, &decoder);
 
                 ui.add_space(16.0);
-                scene_placeholder(ui, self.has_selected_source(), &decoder);
+                scene_placeholder(ui, self.has_selected_source(), &decoder, &output);
             });
     }
 
@@ -374,6 +446,7 @@ impl PlayerApp {
         }
 
         let decoder = self.decoder.snapshot().clone();
+        let output = self.output.snapshot().clone();
         let remains_open = context.show_viewport_immediate(
             egui::ViewportId::from_hash_of("playback-diagnostics"),
             egui::ViewportBuilder::default()
@@ -382,7 +455,7 @@ impl PlayerApp {
                 .with_min_inner_size([400.0, 300.0]),
             |root, _class| {
                 let close_requested = root.ctx().input(|input| input.viewport().close_requested());
-                draw_diagnostics_content(root, self.backend, &decoder);
+                draw_diagnostics_content(root, self.backend, &decoder, &output);
                 !close_requested
             },
         );
@@ -416,7 +489,11 @@ impl PlayerApp {
     }
 
     fn draw_transport(&mut self, root: &mut egui::Ui) {
-        egui::Panel::bottom("transport")
+        let output_phase = self.output.snapshot().phase();
+        let can_toggle = self.output.snapshot().can_play();
+        let playing = self.output.snapshot().is_playing();
+        let can_stop = !matches!(output_phase, OutputPhase::Unavailable | OutputPhase::Idle);
+        let action = egui::Panel::bottom("transport")
             .exact_size(136.0)
             .frame(
                 egui::Frame::NONE
@@ -425,6 +502,7 @@ impl PlayerApp {
                     .inner_margin(egui::Margin::symmetric(22, 14)),
             )
             .show(root, |ui| {
+                let mut action = None;
                 let (content, _) =
                     ui.allocate_exact_size(ui.available_size(), egui::Sense::hover());
                 let status_rect =
@@ -455,7 +533,7 @@ impl PlayerApp {
                         .max_rect(control_rect)
                         .layout(Layout::top_down(Align::Center)),
                     |ui| {
-                        transport_buttons(ui);
+                        action = transport_buttons(ui, can_toggle, can_stop, playing);
                         transport_progress(ui, &mut self.timeline_preview, side_reserve);
                     },
                 );
@@ -468,7 +546,21 @@ impl PlayerApp {
                     egui::vec2(volume_width, 28.0),
                 );
                 volume_control(ui, volume_rect, &mut self.volume, &mut self.muted);
-            });
+                action
+            })
+            .inner;
+
+        match action {
+            Some(TransportAction::Toggle) if playing => self.output.pause(),
+            Some(TransportAction::Toggle) => self.output.play(),
+            Some(TransportAction::Stop) => {
+                self.output.reset();
+                self.decoder.reopen();
+                self.timeline_preview = 0.0;
+                self.status = StatusLine::idle("Stopped; rebuffering from the beginning");
+            }
+            None => {}
+        }
     }
 }
 
@@ -584,7 +676,18 @@ fn playlist_actions(
     action
 }
 
-fn transport_buttons(ui: &mut egui::Ui) {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransportAction {
+    Toggle,
+    Stop,
+}
+
+fn transport_buttons(
+    ui: &mut egui::Ui,
+    can_toggle: bool,
+    can_stop: bool,
+    playing: bool,
+) -> Option<TransportAction> {
     let button_size = egui::vec2(44.0, 34.0);
     let group_width = button_size.x * 3.0 + ui.spacing().item_spacing.x * 2.0;
     let (row, _) = ui.allocate_exact_size(
@@ -592,16 +695,41 @@ fn transport_buttons(ui: &mut egui::Ui) {
         egui::Sense::hover(),
     );
     let group = egui::Rect::from_center_size(row.center(), egui::vec2(group_width, button_size.y));
+    let mut action = None;
     ui.scope_builder(
         egui::UiBuilder::new()
             .max_rect(group)
             .layout(Layout::left_to_right(Align::Center)),
         |ui| {
             disabled_transport_button(ui, "◀◀", button_size);
-            disabled_transport_button(ui, "▶", button_size);
-            disabled_transport_button(ui, "■", button_size);
+            let play_glyph = if playing { "Ⅱ" } else { "▶" };
+            if ui
+                .add_enabled(
+                    can_toggle,
+                    egui::Button::new(play_glyph)
+                        .min_size(button_size)
+                        .fill(theme::HOVER),
+                )
+                .on_hover_text(if playing { "Pause" } else { "Play" })
+                .clicked()
+            {
+                action = Some(TransportAction::Toggle);
+            }
+            if ui
+                .add_enabled(
+                    can_stop,
+                    egui::Button::new("■")
+                        .min_size(button_size)
+                        .fill(theme::HOVER),
+                )
+                .on_hover_text("Stop and rewind")
+                .clicked()
+            {
+                action = Some(TransportAction::Stop);
+            }
         },
     );
+    action
 }
 
 fn disabled_transport_button(ui: &mut egui::Ui, glyph: &str, size: egui::Vec2) {
@@ -782,7 +910,8 @@ impl eframe::App for PlayerApp {
         self.accept_dropped_files(&context);
         self.sync_inspection(&context);
         self.sync_decoder(&context);
-        Self::draw_header(root);
+        self.sync_output(&context);
+        self.draw_header(root);
         self.draw_source_sidebar(root);
         self.draw_transport(root);
         self.draw_scene(root);
@@ -885,6 +1014,39 @@ fn decoder_status_line(decoder: &DecoderSnapshot) -> StatusLine {
     }
 }
 
+fn output_status_line(output: &OutputSnapshot, decoder: &DecoderSnapshot) -> StatusLine {
+    match output.phase() {
+        OutputPhase::Unavailable | OutputPhase::Idle => decoder_status_line(decoder),
+        OutputPhase::Initializing => StatusLine::idle(format!(
+            "Opening Windows Spatial Audio for {} dynamic objects",
+            output.reserved_dynamic_objects()
+        )),
+        OutputPhase::Ready => StatusLine::ready(format!(
+            "Windows Spatial Audio ready: {} of {} dynamic slots reserved",
+            output.reserved_dynamic_objects(),
+            output.max_dynamic_objects()
+        )),
+        OutputPhase::Playing => StatusLine::ready(format!(
+            "Spatial playback: {} frames, {} object buffers, {} underruns",
+            output.submitted_frames(),
+            output.object_buffer_submissions(),
+            output.underruns()
+        )),
+        OutputPhase::Paused => StatusLine::idle(format!(
+            "Spatial playback paused at {} frames",
+            output.submitted_frames()
+        )),
+        OutputPhase::Ended => StatusLine::ready(format!(
+            "Spatial playback ended after {} submitted frames",
+            output.submitted_frames()
+        )),
+        OutputPhase::Failed => StatusLine::warning(format!(
+            "Windows Spatial Audio failed: {}",
+            output.error().unwrap_or("unknown native output error")
+        )),
+    }
+}
+
 const fn decode_phase_label(phase: DecodePhase) -> &'static str {
     match phase {
         DecodePhase::Unavailable => "Unavailable",
@@ -894,6 +1056,19 @@ const fn decode_phase_label(phase: DecodePhase) -> &'static str {
         DecodePhase::Ready => "Ready",
         DecodePhase::EndOfStream => "End of stream",
         DecodePhase::Failed => "Failed",
+    }
+}
+
+const fn output_phase_label(phase: OutputPhase) -> &'static str {
+    match phase {
+        OutputPhase::Unavailable => "Unavailable",
+        OutputPhase::Idle => "Idle",
+        OutputPhase::Initializing => "Initializing",
+        OutputPhase::Ready => "Ready",
+        OutputPhase::Playing => "Playing",
+        OutputPhase::Paused => "Paused",
+        OutputPhase::Ended => "End of stream",
+        OutputPhase::Failed => "Failed",
     }
 }
 
@@ -1030,7 +1205,12 @@ fn metric_strip(ui: &mut egui::Ui, decoder: &DecoderSnapshot) {
     }
 }
 
-fn scene_placeholder(ui: &mut egui::Ui, has_source: bool, decoder: &DecoderSnapshot) {
+fn scene_placeholder(
+    ui: &mut egui::Ui,
+    has_source: bool,
+    decoder: &DecoderSnapshot,
+    output: &OutputSnapshot,
+) {
     let available_height = ui.available_height();
     let frame = egui::Frame::NONE
         .fill(theme::STAGE)
@@ -1052,10 +1232,36 @@ fn scene_placeholder(ui: &mut egui::Ui, has_source: bool, decoder: &DecoderSnaps
                     "Decoding object scene",
                     "Core is producing normalized object/LFE PCM into the bounded Scene FIFO.",
                 ),
-                DecodePhase::Ready | DecodePhase::EndOfStream => (
-                    "Decoded scene buffered",
-                    "Full A-JOC PCM and OAMD are ready; Windows spatial submission is the next layer.",
-                ),
+                DecodePhase::Ready | DecodePhase::EndOfStream => match output.phase() {
+                    OutputPhase::Initializing => (
+                        "Opening spatial output",
+                        "Activating the default endpoint and reserving Windows dynamic objects.",
+                    ),
+                    OutputPhase::Playing => (
+                        "Spatial playback active",
+                        "Scene PCM, object positions, gains, and LFE are being submitted to Windows.",
+                    ),
+                    OutputPhase::Paused => (
+                        "Spatial playback paused",
+                        "The native stream remains active and submits silence until playback resumes.",
+                    ),
+                    OutputPhase::Ended => (
+                        "Spatial playback ended",
+                        "The Scene FIFO reached its end and all native objects were finalized.",
+                    ),
+                    OutputPhase::Failed => (
+                        "Spatial output failed",
+                        output.error().unwrap_or("Windows Spatial Audio reported an error."),
+                    ),
+                    OutputPhase::Ready => (
+                        "Spatial scene ready",
+                        "Windows Spatial Audio is active; press Play to consume the Scene FIFO.",
+                    ),
+                    OutputPhase::Unavailable | OutputPhase::Idle => (
+                        "Decoded scene buffered",
+                        "Full A-JOC PCM and OAMD are ready for native spatial submission.",
+                    ),
+                },
                 DecodePhase::Failed => (
                     "Scene decode failed",
                     decoder.detail().unwrap_or("MacinDecode Core reported an error."),
@@ -1086,10 +1292,15 @@ fn scene_placeholder(ui: &mut egui::Ui, has_source: bool, decoder: &DecoderSnaps
     });
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the diagnostics viewport deliberately keeps its ordered key/value layout together"
+)]
 fn draw_diagnostics_content(
     root: &mut egui::Ui,
     backend: SpatialBackendKind,
     decoder: &DecoderSnapshot,
+    output: &OutputSnapshot,
 ) {
     egui::CentralPanel::default()
         .frame(
@@ -1165,18 +1376,54 @@ fn draw_diagnostics_content(
                         key_value(
                             ui,
                             "Native adapters",
-                            &format!("{} planned", SpatialBackendKind::ALL.len() - 1),
+                            &format!("1 active / {} declared", SpatialBackendKind::ALL.len() - 1),
                         );
                         ui.separator();
-                        key_value(ui, "Spatial stream", "Not created");
+                        key_value(ui, "Spatial stream", output_phase_label(output.phase()));
                         ui.separator();
-                        key_value(ui, "Underruns", "0");
+                        key_value(ui, "Endpoint", output.device_label());
+                        ui.separator();
+                        key_value(
+                            ui,
+                            "Dynamic objects",
+                            &format!(
+                                "{} active / {} reserved / {} max",
+                                output.active_dynamic_objects(),
+                                output.reserved_dynamic_objects(),
+                                output.max_dynamic_objects()
+                            ),
+                        );
+                        ui.separator();
+                        key_value(
+                            ui,
+                            "Render updates / frames",
+                            &format!(
+                                "{} / {}",
+                                output.render_updates(),
+                                output.submitted_frames()
+                            ),
+                        );
+                        ui.separator();
+                        key_value(
+                            ui,
+                            "Object buffers / positions",
+                            &format!(
+                                "{} / {}",
+                                output.object_buffer_submissions(),
+                                output.position_updates()
+                            ),
+                        );
+                        ui.separator();
+                        key_value(ui, "Underruns", &output.underruns().to_string());
                     });
                     ui.add_space(12.0);
                     ui.label(
                         RichText::new(format!(
-                            "{} The decoder is connected independently of the output device.",
-                            backend.availability()
+                            "{} Decoder ownership remains independent of the native output stream.{}",
+                            backend.availability(),
+                            output
+                                .error()
+                                .map_or_else(String::new, |error| format!(" Error: {error}"))
                         ))
                         .size(10.0)
                         .color(theme::MUTED),
