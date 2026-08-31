@@ -235,6 +235,33 @@ mod tests {
         assert!(state.object_buffer_submissions() > 0);
         assert!(state.position_updates() > 0);
         assert_eq!(state.underruns(), 0);
+
+        let paused_frame = state.playhead_frames();
+        wait_for_decode_indexed(&mut decoder);
+        let indexed = decoder.snapshot().metrics().expect("indexed metrics");
+        let duration = indexed.duration_frames().expect("indexed duration");
+        let first_safe = indexed
+            .seekable_from_frame()
+            .expect("safe random-access point");
+        let seek_target = paused_frame.max(first_safe).min(duration.saturating_sub(1));
+        decoder.seek(seek_target).expect("paused seek");
+        wait_for_decode_ready(&mut decoder);
+        let seek_metrics = decoder.snapshot().metrics().expect("seek metrics");
+        let replacement = OutputStreamConfig::new(
+            decoder.request_id(),
+            decoder.playback_epoch(),
+            seek_metrics.target_frame(),
+            seek_metrics.sample_rate(),
+            seek_metrics
+                .scene_signature()
+                .cloned()
+                .expect("seek Scene signature"),
+            OutputDeviceSelection::SystemDefault,
+        )
+        .expect("replacement config");
+        output.ensure_configured(&replacement, decoder.scene_reader());
+        wait_for_output_phase(&mut output, OutputPhase::Paused);
+        assert_eq!(output.snapshot().playhead_frames(), seek_target);
     }
 
     fn wait_for_decode_ready(decoder: &mut DecoderController) {
@@ -253,6 +280,24 @@ mod tests {
                 Instant::now() < deadline,
                 "decoder did not prebuffer in time"
             );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn wait_for_decode_indexed(decoder: &mut DecoderController) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            decoder.poll();
+            let metrics = decoder.snapshot().metrics().expect("decode metrics");
+            assert!(
+                metrics.index_error().is_none(),
+                "seek index failed: {}",
+                metrics.index_error().unwrap_or("unknown error")
+            );
+            if !metrics.is_indexing() {
+                return;
+            }
+            assert!(Instant::now() < deadline, "seek index timed out");
             thread::sleep(Duration::from_millis(10));
         }
     }

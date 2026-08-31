@@ -77,6 +77,7 @@ native crate 看不到 AC-4 bitstream、Core Session 或 Core 的借用类型。
 ```bat
 cargo test backend::windows::tests::submits_decoded_scene_to_windows_spatial_audio -- --ignored
 cargo test -p macindecode-windows-spatial-audio ended_renderer_releases_objects_without_entering_failed_state -- --ignored
+cargo test -p macindecode-windows-spatial-audio opens_enumerated_endpoints_by_stable_id -- --ignored
 ```
 
 这两项测试要求默认 endpoint 支持 Spatial Audio：媒体回归检查对象槽位、至少 20 次 render update、

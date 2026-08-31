@@ -1015,6 +1015,41 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires one or more Spatial Audio-capable render endpoints"]
+    fn opens_enumerated_endpoints_by_stable_id() {
+        let devices = enumerate_output_devices().expect("enumerate active render endpoints");
+        let mut ids = HashSet::new();
+        let mut opened = 0usize;
+        for device in &devices {
+            assert!(!device.id.is_empty());
+            assert!(!device.label.is_empty());
+            assert!(ids.insert(device.id.clone()), "duplicate endpoint ID");
+            if device.max_dynamic_objects.unwrap_or(0) < 1 {
+                continue;
+            }
+            let renderer = Renderer::spawn(
+                StreamConfig {
+                    sample_rate: 48_000,
+                    dynamic_object_count: 1,
+                    has_lfe: false,
+                    start_frame: 0,
+                    output_device: OutputDeviceSelection::EndpointId(device.id.clone()),
+                },
+                Box::new(OneQuantumSource),
+            )
+            .unwrap_or_else(|error| panic!("open endpoint {}: {error}", device.label));
+            wait_for_phase(&renderer, RenderPhase::Ready);
+            let state = renderer.snapshot();
+            assert_eq!(state.device_id.as_deref(), Some(device.id.as_str()));
+            renderer.play();
+            wait_for_phase(&renderer, RenderPhase::Ended);
+            opened += 1;
+        }
+        eprintln!("enumerated={} spatial_opened={opened}", devices.len());
+        assert!(opened > 0, "no active endpoint supports one dynamic object");
+    }
+
+    #[test]
     #[ignore = "requires a Spatial Audio-capable default endpoint"]
     fn ended_renderer_releases_objects_without_entering_failed_state() {
         let renderer = Renderer::spawn(

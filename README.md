@@ -95,6 +95,7 @@ cargo run
 cargo test decoder::windows::tests::decodes_local_media_into_a_bounded_scene_buffer -- --ignored
 cargo test backend::windows::tests::submits_decoded_scene_to_windows_spatial_audio -- --ignored
 cargo test -p macindecode-windows-spatial-audio ended_renderer_releases_objects_without_entering_failed_state -- --ignored
+cargo test -p macindecode-windows-spatial-audio opens_enumerated_endpoints_by_stable_id -- --ignored
 ```
 
 真实媒体应只放在仓库根目录被忽略的 `.local-test-media/`，不得提交到 Git。
