@@ -559,7 +559,7 @@ impl LoadedMedia {
             return Ok(RunControl::Complete);
         }
         let start_index = index.seek_start(target_frame)?;
-        self.session.mark_discontinuity();
+        self.session = new_session();
         let target_i64 = i64::try_from(target_frame)
             .map_err(|_| "Seek target exceeds the signed Scene timeline".to_owned())?;
         for unit_index in start_index..index.access_units.len() {
