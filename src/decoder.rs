@@ -37,10 +37,75 @@ pub enum DecodePhase {
     Unavailable,
     Idle,
     Opening,
+    Seeking,
     Buffering,
     Ready,
     EndOfStream,
     Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SceneSignature {
+    configuration_generation: u32,
+    presentation_index: u32,
+    presentation_id: Option<u32>,
+    object_element_ids: Vec<u64>,
+    lfe_element_id: Option<u64>,
+}
+
+impl SceneSignature {
+    pub(crate) fn new(
+        configuration_generation: u32,
+        presentation_index: u32,
+        presentation_id: Option<u32>,
+        mut object_element_ids: Vec<u64>,
+        lfe_element_id: Option<u64>,
+    ) -> Self {
+        object_element_ids.sort_unstable();
+        Self {
+            configuration_generation,
+            presentation_index,
+            presentation_id,
+            object_element_ids,
+            lfe_element_id,
+        }
+    }
+
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub(crate) fn from_block(block: &DecodedSceneBlock) -> Self {
+        let object_element_ids = block
+            .objects()
+            .iter()
+            .map(SceneObjectPcm::element_id)
+            .collect::<Vec<_>>();
+        Self::new(
+            block.configuration_generation(),
+            block.presentation_index(),
+            block.presentation_id(),
+            object_element_ids,
+            block.lfe().map(SceneLfePcm::element_id),
+        )
+    }
+
+    pub const fn configuration_generation(&self) -> u32 {
+        self.configuration_generation
+    }
+
+    pub const fn presentation_index(&self) -> u32 {
+        self.presentation_index
+    }
+
+    pub const fn presentation_id(&self) -> Option<u32> {
+        self.presentation_id
+    }
+
+    pub fn object_element_ids(&self) -> &[u64] {
+        &self.object_element_ids
+    }
+
+    pub const fn lfe_element_id(&self) -> Option<u64> {
+        self.lfe_element_id
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +117,7 @@ pub struct DecodeMetrics {
     pub(super) object_count: usize,
     pub(super) has_lfe: bool,
     pub(super) state_complete: bool,
+    pub(super) scene_signature: Option<SceneSignature>,
     pub(super) decoded_access_units: u64,
     pub(super) decoded_scene_frames: u64,
     pub(super) decoded_frames: u64,
@@ -59,6 +125,10 @@ pub struct DecodeMetrics {
     pub(super) buffer_capacity_frames: u64,
     pub(super) metadata_updates: u64,
     pub(super) duration_frames: Option<u64>,
+    pub(super) seekable_from_frame: Option<u64>,
+    pub(super) indexing: bool,
+    pub(super) index_error: Option<String>,
+    pub(super) target_frame: u64,
 }
 
 impl DecodeMetrics {
@@ -90,6 +160,10 @@ impl DecodeMetrics {
         self.state_complete
     }
 
+    pub const fn scene_signature(&self) -> Option<&SceneSignature> {
+        self.scene_signature.as_ref()
+    }
+
     pub const fn decoded_access_units(&self) -> u64 {
         self.decoded_access_units
     }
@@ -116,6 +190,38 @@ impl DecodeMetrics {
 
     pub const fn duration_frames(&self) -> Option<u64> {
         self.duration_frames
+    }
+
+    pub const fn seekable_from_frame(&self) -> Option<u64> {
+        self.seekable_from_frame
+    }
+
+    pub const fn is_indexing(&self) -> bool {
+        self.indexing
+    }
+
+    pub fn index_error(&self) -> Option<&str> {
+        self.index_error.as_deref()
+    }
+
+    pub const fn target_frame(&self) -> u64 {
+        self.target_frame
+    }
+
+    pub fn can_seek_to(&self, target_frame: u64) -> bool {
+        if self.indexing || self.index_error.is_some() {
+            return false;
+        }
+        let Some(duration) = self.duration_frames else {
+            return false;
+        };
+        if target_frame > duration {
+            return false;
+        }
+        target_frame == duration
+            || self
+                .seekable_from_frame
+                .is_some_and(|first| target_frame >= first)
     }
 
     pub fn buffered_milliseconds(&self) -> u64 {
@@ -166,6 +272,17 @@ impl DecoderSnapshot {
             phase: DecodePhase::Opening,
             path: Some(path),
             metrics: None,
+            detail: None,
+        }
+    }
+
+    fn seeking(path: PathBuf, mut metrics: DecodeMetrics, target_frame: u64) -> Self {
+        metrics.target_frame = target_frame;
+        metrics.buffered_frames = 0;
+        Self {
+            phase: DecodePhase::Seeking,
+            path: Some(path),
+            metrics: Some(metrics),
             detail: None,
         }
     }
@@ -407,6 +524,23 @@ pub struct DecodedSceneBlock {
     metadata_updates: Vec<SceneMetadataUpdate>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PlaybackKey {
+    request_id: u64,
+    epoch: u64,
+}
+
+impl PlaybackKey {
+    const fn new(request_id: u64, epoch: u64) -> Self {
+        Self { request_id, epoch }
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(super) const fn request_id(self) -> u64 {
+        self.request_id
+    }
+}
+
 impl DecodedSceneBlock {
     #[allow(clippy::too_many_arguments)]
     #[cfg(any(target_os = "windows", test))]
@@ -486,7 +620,7 @@ pub(super) struct QueueSnapshot {
 
 #[derive(Debug)]
 struct SceneQueueInner {
-    request_id: u64,
+    key: PlaybackKey,
     sample_rate: u32,
     buffered_frames: u64,
     capacity_frames: u64,
@@ -512,7 +646,7 @@ impl SharedSceneQueue {
         Self {
             state: Arc::new((
                 Mutex::new(SceneQueueInner {
-                    request_id: 0,
+                    key: PlaybackKey::new(0, 0),
                     sample_rate: 0,
                     buffered_frames: 0,
                     capacity_frames: 0,
@@ -524,10 +658,10 @@ impl SharedSceneQueue {
         }
     }
 
-    fn reset(&self, request_id: u64) {
+    fn reset(&self, key: PlaybackKey) {
         let (mutex, changed) = &*self.state;
         let mut queue = lock_recover(mutex);
-        queue.request_id = request_id;
+        queue.key = key;
         queue.sample_rate = 0;
         queue.buffered_frames = 0;
         queue.capacity_frames = 0;
@@ -539,12 +673,12 @@ impl SharedSceneQueue {
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub(super) fn try_push(
         &self,
-        request_id: u64,
+        key: PlaybackKey,
         block: DecodedSceneBlock,
     ) -> Result<QueueSnapshot, QueuePushError> {
         let (mutex, _) = &*self.state;
         let mut queue = lock_recover(mutex);
-        if queue.request_id != request_id {
+        if queue.key != key {
             return Err(QueuePushError::Stale);
         }
         if queue.sample_rate == 0 {
@@ -569,10 +703,10 @@ impl SharedSceneQueue {
         })
     }
 
-    fn try_pop(&self, request_id: u64) -> Option<DecodedSceneBlock> {
+    fn try_pop(&self, key: PlaybackKey) -> Option<DecodedSceneBlock> {
         let (mutex, changed) = &*self.state;
         let mut queue = lock_recover(mutex);
-        if queue.request_id != request_id {
+        if queue.key != key {
             return None;
         }
         let block = queue.blocks.pop_front()?;
@@ -584,19 +718,19 @@ impl SharedSceneQueue {
     }
 
     #[cfg(any(target_os = "windows", test))]
-    pub(super) fn mark_end_of_stream(&self, request_id: u64) {
+    pub(super) fn mark_end_of_stream(&self, key: PlaybackKey) {
         let (mutex, changed) = &*self.state;
         let mut queue = lock_recover(mutex);
-        if queue.request_id == request_id {
+        if queue.key == key {
             queue.end_of_stream = true;
             changed.notify_all();
         }
     }
 
     #[cfg(any(target_os = "windows", test))]
-    fn is_end_of_stream(&self, request_id: u64) -> bool {
+    fn is_end_of_stream(&self, key: PlaybackKey) -> bool {
         let queue = lock_recover(&self.state.0);
-        queue.request_id != request_id || (queue.end_of_stream && queue.blocks.is_empty())
+        queue.key != key || (queue.end_of_stream && queue.blocks.is_empty())
     }
 
     #[cfg(target_os = "windows")]
@@ -623,18 +757,18 @@ impl SharedSceneQueue {
 )]
 pub(crate) struct SceneQueueReader {
     queue: SharedSceneQueue,
-    request_id: u64,
+    key: PlaybackKey,
 }
 
 impl SceneQueueReader {
     #[cfg(target_os = "windows")]
     pub(crate) fn try_pop(&self) -> Option<DecodedSceneBlock> {
-        self.queue.try_pop(self.request_id)
+        self.queue.try_pop(self.key)
     }
 
     #[cfg(target_os = "windows")]
     pub(crate) fn is_end_of_stream(&self) -> bool {
-        self.queue.is_end_of_stream(self.request_id)
+        self.queue.is_end_of_stream(self.key)
     }
 }
 
@@ -647,15 +781,41 @@ fn lock_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[derive(Debug)]
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(super) enum WorkerCommand {
-    Open { request_id: u64, path: PathBuf },
+    Open { key: PlaybackKey, path: PathBuf },
+    Seek { key: PlaybackKey, target_frame: u64 },
     Close,
     Shutdown,
 }
 
 #[derive(Debug)]
 pub(super) struct WorkerEvent {
-    request_id: u64,
-    snapshot: DecoderSnapshot,
+    pub(super) kind: WorkerEventKind,
+}
+
+#[derive(Debug)]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(super) enum WorkerEventKind {
+    Snapshot {
+        key: PlaybackKey,
+        snapshot: Box<DecoderSnapshot>,
+    },
+    IndexFinished {
+        request_id: u64,
+        duration_frames: Option<u64>,
+        seekable_from_frame: Option<u64>,
+        error: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ControllerIndexState {
+    Inactive,
+    Building,
+    Ready {
+        duration_frames: Option<u64>,
+        seekable_from_frame: Option<u64>,
+    },
+    Failed(String),
 }
 
 pub(super) struct WorkerHandle {
@@ -672,6 +832,8 @@ pub struct DecoderController {
     snapshot: DecoderSnapshot,
     active_path: Option<PathBuf>,
     request_id: u64,
+    playback_epoch: u64,
+    index_state: ControllerIndexState,
     revision: u64,
 }
 
@@ -695,6 +857,8 @@ impl DecoderController {
                 snapshot: DecoderSnapshot::idle(),
                 active_path: None,
                 request_id: 0,
+                playback_epoch: 0,
+                index_state: ControllerIndexState::Inactive,
                 revision: 0,
             },
             Err(error) => Self {
@@ -705,6 +869,8 @@ impl DecoderController {
                 snapshot: DecoderSnapshot::unavailable(error),
                 active_path: None,
                 request_id: 0,
+                playback_epoch: 0,
+                index_state: ControllerIndexState::Inactive,
                 revision: 0,
             },
         }
@@ -719,11 +885,14 @@ impl DecoderController {
             return;
         }
         self.advance_request();
-        self.queue.reset(self.request_id);
+        self.playback_epoch = 0;
+        self.index_state = ControllerIndexState::Building;
+        let key = self.playback_key();
+        self.queue.reset(key);
         self.snapshot = DecoderSnapshot::opening(path.to_path_buf());
         self.revision = self.revision.saturating_add(1);
         let command = WorkerCommand::Open {
-            request_id: self.request_id,
+            key,
             path: path.to_path_buf(),
         };
         if self
@@ -744,7 +913,9 @@ impl DecoderController {
             return;
         }
         self.advance_request();
-        self.queue.reset(self.request_id);
+        self.playback_epoch = 0;
+        self.index_state = ControllerIndexState::Inactive;
+        self.queue.reset(self.playback_key());
         if let Some(sender) = self.command_sender.as_ref() {
             let _ = sender.send(WorkerCommand::Close);
             self.snapshot = DecoderSnapshot::idle();
@@ -757,11 +928,37 @@ impl DecoderController {
             return;
         };
         while let Ok(event) = receiver.try_recv() {
-            if event.request_id != self.request_id {
-                continue;
+            match event.kind {
+                WorkerEventKind::Snapshot { key, snapshot } => {
+                    if key != self.playback_key() {
+                        continue;
+                    }
+                    let mut snapshot = *snapshot;
+                    inherit_scene_identity(&self.snapshot, &mut snapshot);
+                    apply_index_state(&self.index_state, &mut snapshot);
+                    self.snapshot = snapshot;
+                    self.revision = self.revision.saturating_add(1);
+                }
+                WorkerEventKind::IndexFinished {
+                    request_id,
+                    duration_frames,
+                    seekable_from_frame,
+                    error,
+                } => {
+                    if request_id != self.request_id {
+                        continue;
+                    }
+                    self.index_state = error.map_or_else(
+                        || ControllerIndexState::Ready {
+                            duration_frames,
+                            seekable_from_frame,
+                        },
+                        ControllerIndexState::Failed,
+                    );
+                    apply_index_state(&self.index_state, &mut self.snapshot);
+                    self.revision = self.revision.saturating_add(1);
+                }
             }
-            self.snapshot = event.snapshot;
-            self.revision = self.revision.saturating_add(1);
         }
     }
 
@@ -780,18 +977,21 @@ impl DecoderController {
     pub fn is_working(&self) -> bool {
         matches!(
             self.snapshot.phase,
-            DecodePhase::Opening | DecodePhase::Buffering | DecodePhase::Ready
+            DecodePhase::Opening
+                | DecodePhase::Seeking
+                | DecodePhase::Buffering
+                | DecodePhase::Ready
         )
     }
 
     pub fn try_pop_scene_block(&self) -> Option<DecodedSceneBlock> {
-        self.queue.try_pop(self.request_id)
+        self.queue.try_pop(self.playback_key())
     }
 
     pub(crate) fn scene_reader(&self) -> SceneQueueReader {
         SceneQueueReader {
             queue: self.queue.clone(),
-            request_id: self.request_id,
+            key: self.playback_key(),
         }
     }
 
@@ -799,17 +999,114 @@ impl DecoderController {
         self.request_id
     }
 
+    pub const fn playback_epoch(&self) -> u64 {
+        self.playback_epoch
+    }
+
+    pub(crate) const fn playback_key(&self) -> PlaybackKey {
+        PlaybackKey::new(self.request_id, self.playback_epoch)
+    }
+
+    /// Starts a new playback epoch at an absolute presentation frame without rereading the file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no source/index is available, the target exceeds the duration, or
+    /// no complete random-access point exists at or before the requested frame.
+    pub fn seek(&mut self, target_frame: u64) -> Result<(), String> {
+        let path = self
+            .active_path
+            .clone()
+            .ok_or_else(|| "No active media is loaded".to_owned())?;
+        let metrics = self
+            .snapshot
+            .metrics()
+            .cloned()
+            .ok_or_else(|| "Media indexing has not completed yet".to_owned())?;
+        if metrics.is_indexing() {
+            return Err("Media indexing has not completed yet".to_owned());
+        }
+        if let Some(error) = metrics.index_error() {
+            return Err(format!("Media seek index failed: {error}"));
+        }
+        if !metrics.can_seek_to(target_frame) {
+            return Err(match metrics.duration_frames() {
+                Some(duration) if target_frame > duration => {
+                    format!("Seek target {target_frame} exceeds duration {duration}")
+                }
+                _ => {
+                    "No complete random-access point exists at or before the seek target".to_owned()
+                }
+            });
+        }
+        let sender = self
+            .command_sender
+            .as_ref()
+            .ok_or_else(|| "The Windows decoder is unavailable".to_owned())?;
+        self.playback_epoch = self.playback_epoch.checked_add(1).unwrap_or(1);
+        let key = self.playback_key();
+        self.queue.reset(key);
+        self.snapshot = DecoderSnapshot::seeking(path, metrics, target_frame);
+        self.revision = self.revision.saturating_add(1);
+        sender
+            .send(WorkerCommand::Seek { key, target_frame })
+            .map_err(|_| "MacinDecode Core worker stopped unexpectedly".to_owned())
+    }
+
     pub fn reopen(&mut self) {
-        let Some(path) = self.active_path.clone() else {
-            return;
-        };
-        self.active_path = None;
-        self.ensure_open(&path);
+        let _ = self.seek(0);
     }
 
     fn advance_request(&mut self) {
         self.request_id = self.request_id.checked_add(1).unwrap_or(1);
     }
+}
+
+fn apply_index_state(state: &ControllerIndexState, snapshot: &mut DecoderSnapshot) {
+    let Some(metrics) = snapshot.metrics.as_mut() else {
+        return;
+    };
+    match state {
+        ControllerIndexState::Inactive => {
+            metrics.indexing = false;
+            metrics.index_error = None;
+        }
+        ControllerIndexState::Building => {
+            metrics.indexing = true;
+            metrics.index_error = None;
+        }
+        ControllerIndexState::Ready {
+            duration_frames,
+            seekable_from_frame,
+        } => {
+            metrics.indexing = false;
+            metrics.index_error = None;
+            if duration_frames.is_some() {
+                metrics.duration_frames = *duration_frames;
+            }
+            metrics.seekable_from_frame = *seekable_from_frame;
+        }
+        ControllerIndexState::Failed(error) => {
+            metrics.indexing = false;
+            metrics.index_error = Some(error.clone());
+            metrics.seekable_from_frame = None;
+        }
+    }
+}
+
+fn inherit_scene_identity(previous: &DecoderSnapshot, next: &mut DecoderSnapshot) {
+    let (Some(previous), Some(next)) = (previous.metrics(), next.metrics.as_mut()) else {
+        return;
+    };
+    if next.scene_signature.is_some() {
+        return;
+    }
+    next.presentation_index = previous.presentation_index;
+    next.presentation_id = previous.presentation_id;
+    next.object_count = previous.object_count;
+    next.has_lfe = previous.has_lfe;
+    next.state_complete = previous.state_complete;
+    next.scene_signature.clone_from(&previous.scene_signature);
 }
 
 impl Default for DecoderController {
@@ -849,56 +1146,85 @@ mod tests {
         )
     }
 
+    fn indexed_metrics() -> DecodeMetrics {
+        DecodeMetrics {
+            container: DecodeContainer::RawAc4,
+            sample_rate: 48_000,
+            presentation_index: 0,
+            presentation_id: None,
+            object_count: 1,
+            has_lfe: false,
+            state_complete: true,
+            scene_signature: None,
+            decoded_access_units: 0,
+            decoded_scene_frames: 0,
+            decoded_frames: 0,
+            buffered_frames: 0,
+            buffer_capacity_frames: 96_000,
+            metadata_updates: 0,
+            duration_frames: Some(480_000),
+            seekable_from_frame: Some(48_000),
+            indexing: false,
+            index_error: None,
+            target_frame: 0,
+        }
+    }
+
     #[test]
     fn scene_queue_is_bounded_to_two_seconds_and_pop_releases_space() {
         let queue = SharedSceneQueue::new();
-        queue.reset(7);
+        let key = PlaybackKey::new(7, 1);
+        queue.reset(key);
         let first = queue
-            .try_push(7, block(48_000, 48_000))
+            .try_push(key, block(48_000, 48_000))
             .expect("first second should fit");
         assert_eq!(first.buffered_frames, 48_000);
         assert_eq!(first.capacity_frames, 96_000);
-        assert!(queue.try_push(7, block(48_000, 48_000)).is_ok());
-        match queue.try_push(7, block(48_000, 1)) {
+        assert!(queue.try_push(key, block(48_000, 48_000)).is_ok());
+        match queue.try_push(key, block(48_000, 1)) {
             Err(QueuePushError::Full(returned)) => assert_eq!(returned.duration_frames(), 1),
             other => panic!("expected a full queue, got {other:?}"),
         }
 
         assert_eq!(
-            queue.try_pop(7).map(|item| item.duration_frames()),
+            queue.try_pop(key).map(|item| item.duration_frames()),
             Some(48_000)
         );
-        assert!(queue.try_push(7, block(48_000, 1)).is_ok());
+        assert!(queue.try_push(key, block(48_000, 1)).is_ok());
     }
 
     #[test]
     fn scene_reader_reports_end_only_after_queued_blocks_are_drained() {
         let queue = SharedSceneQueue::new();
-        queue.reset(9);
-        assert!(queue.try_push(9, block(48_000, 2_048)).is_ok());
-        queue.mark_end_of_stream(9);
-        assert!(!queue.is_end_of_stream(9));
-        assert!(queue.try_pop(9).is_some());
-        assert!(queue.is_end_of_stream(9));
+        let key = PlaybackKey::new(9, 2);
+        queue.reset(key);
+        assert!(queue.try_push(key, block(48_000, 2_048)).is_ok());
+        queue.mark_end_of_stream(key);
+        assert!(!queue.is_end_of_stream(key));
+        assert!(queue.try_pop(key).is_some());
+        assert!(queue.is_end_of_stream(key));
     }
 
     #[test]
-    fn reset_invalidates_frames_from_an_older_decode_request() {
+    fn reset_invalidates_frames_from_an_older_playback_epoch() {
         let queue = SharedSceneQueue::new();
-        queue.reset(2);
+        let old = PlaybackKey::new(2, 4);
+        let current = PlaybackKey::new(2, 5);
+        queue.reset(current);
         assert!(matches!(
-            queue.try_push(1, block(48_000, 2_048)),
+            queue.try_push(old, block(48_000, 2_048)),
             Err(QueuePushError::Stale)
         ));
-        assert!(queue.try_push(2, block(48_000, 2_048)).is_ok());
+        assert!(queue.try_push(current, block(48_000, 2_048)).is_ok());
     }
 
     #[test]
     fn queue_rejects_a_midstream_sample_rate_change() {
         let queue = SharedSceneQueue::new();
-        queue.reset(4);
-        assert!(queue.try_push(4, block(48_000, 2_048)).is_ok());
-        match queue.try_push(4, block(44_100, 2_048)) {
+        let key = PlaybackKey::new(4, 0);
+        queue.reset(key);
+        assert!(queue.try_push(key, block(48_000, 2_048)).is_ok());
+        match queue.try_push(key, block(44_100, 2_048)) {
             Err(QueuePushError::Format(message)) => {
                 assert!(message.contains("48000"));
                 assert!(message.contains("44100"));
@@ -912,5 +1238,40 @@ mod tests {
         assert_eq!(frames_to_milliseconds(14_400, 48_000), 300);
         assert_eq!(frames_to_milliseconds(96_000, 48_000), 2_000);
         assert_eq!(frames_to_milliseconds(1, 0), 0);
+    }
+
+    #[test]
+    fn seekability_requires_a_safe_point_at_or_before_the_target() {
+        let metrics = indexed_metrics();
+        assert!(!metrics.can_seek_to(47_999));
+        assert!(metrics.can_seek_to(48_000));
+        assert!(metrics.can_seek_to(480_000));
+        assert!(!metrics.can_seek_to(480_001));
+    }
+
+    #[test]
+    fn asynchronous_index_state_survives_later_decode_snapshots() {
+        let mut snapshot = DecoderSnapshot {
+            phase: DecodePhase::Ready,
+            path: Some(PathBuf::from("cached.mp4")),
+            metrics: Some(indexed_metrics()),
+            detail: None,
+        };
+        apply_index_state(&ControllerIndexState::Building, &mut snapshot);
+        let metrics = snapshot.metrics().expect("metrics while indexing");
+        assert!(metrics.is_indexing());
+        assert!(!metrics.can_seek_to(48_000));
+
+        apply_index_state(
+            &ControllerIndexState::Ready {
+                duration_frames: Some(960_000),
+                seekable_from_frame: Some(0),
+            },
+            &mut snapshot,
+        );
+        let metrics = snapshot.metrics().expect("metrics after indexing");
+        assert!(!metrics.is_indexing());
+        assert_eq!(metrics.duration_frames(), Some(960_000));
+        assert!(metrics.can_seek_to(1));
     }
 }

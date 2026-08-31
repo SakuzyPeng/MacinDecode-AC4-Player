@@ -1,7 +1,16 @@
-use macindecode_windows_spatial_audio::{RenderPhase, RenderSnapshot, Renderer, StreamConfig};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
+
+use macindecode_windows_spatial_audio::{
+    OutputDeviceSelection as NativeDeviceSelection, RenderPhase, RenderSnapshot, Renderer,
+    StreamConfig,
+};
 
 use super::source::SceneRenderSource;
-use super::{OutputPhase, OutputSnapshot, OutputStreamConfig};
+use super::{
+    OutputDeviceInfo, OutputDeviceSelection, OutputPhase, OutputSnapshot, OutputStreamConfig,
+};
 use crate::decoder::SceneQueueReader;
 
 pub(super) fn spawn(
@@ -13,14 +22,108 @@ pub(super) fn spawn(
             sample_rate: config.sample_rate,
             dynamic_object_count: config.dynamic_object_count,
             has_lfe: config.has_lfe,
+            start_frame: config.start_frame,
+            output_device: native_selection(&config.output_device),
         },
         Box::new(SceneRenderSource::new(
             reader,
             config.sample_rate,
             config.dynamic_object_count,
             config.has_lfe,
+            config.scene_signature.clone(),
+            config.start_frame,
         )),
     )
+}
+
+pub(super) fn replace_source(
+    renderer: &Renderer,
+    config: &OutputStreamConfig,
+    reader: SceneQueueReader,
+) {
+    renderer.replace_source(
+        Box::new(SceneRenderSource::new(
+            reader,
+            config.sample_rate,
+            config.dynamic_object_count,
+            config.has_lfe,
+            config.scene_signature.clone(),
+            config.start_frame,
+        )),
+        config.start_frame,
+    );
+}
+
+fn native_selection(selection: &OutputDeviceSelection) -> NativeDeviceSelection {
+    match selection {
+        OutputDeviceSelection::SystemDefault => NativeDeviceSelection::SystemDefault,
+        OutputDeviceSelection::EndpointId(id) => NativeDeviceSelection::EndpointId(id.clone()),
+    }
+}
+
+pub(super) struct DeviceCatalogWorker {
+    receiver: Receiver<Result<Vec<OutputDeviceInfo>, String>>,
+    stop_sender: Sender<()>,
+    join_handle: Option<JoinHandle<()>>,
+}
+
+impl DeviceCatalogWorker {
+    pub(super) fn spawn() -> Self {
+        let (event_sender, receiver) = mpsc::channel();
+        let (stop_sender, stop_receiver) = mpsc::channel();
+        let join_handle = thread::Builder::new()
+            .name("windows-audio-device-catalog".to_owned())
+            .spawn(move || {
+                loop {
+                    let update = macindecode_windows_spatial_audio::enumerate_output_devices().map(
+                        |devices| {
+                            devices
+                                .into_iter()
+                                .map(|device| OutputDeviceInfo {
+                                    id: device.id,
+                                    label: device.label,
+                                    is_default: device.is_default,
+                                    max_dynamic_objects: device.max_dynamic_objects,
+                                    spatial_error: device.spatial_error,
+                                })
+                                .collect()
+                        },
+                    );
+                    if event_sender.send(update).is_err() {
+                        break;
+                    }
+                    match stop_receiver.recv_timeout(Duration::from_secs(2)) {
+                        Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                        Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    }
+                }
+            })
+            .ok();
+        Self {
+            receiver,
+            stop_sender,
+            join_handle,
+        }
+    }
+
+    pub(super) fn poll(&self) -> Option<Result<Vec<OutputDeviceInfo>, String>> {
+        let mut latest = None;
+        loop {
+            match self.receiver.try_recv() {
+                Ok(update) => latest = Some(update),
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => return latest,
+            }
+        }
+    }
+}
+
+impl Drop for DeviceCatalogWorker {
+    fn drop(&mut self) {
+        let _ = self.stop_sender.send(());
+        if let Some(join_handle) = self.join_handle.take() {
+            let _ = join_handle.join();
+        }
+    }
 }
 
 pub(super) fn snapshot(native: RenderSnapshot) -> OutputSnapshot {
@@ -39,6 +142,7 @@ pub(super) fn snapshot(native: RenderSnapshot) -> OutputSnapshot {
         active_dynamic_objects: native.active_dynamic_objects,
         render_updates: native.render_updates,
         submitted_frames: native.submitted_frames,
+        playhead_frames: native.playhead_frames,
         object_buffer_submissions: native.object_buffer_submissions,
         position_updates: native.position_updates,
         underruns: native.underruns,
@@ -52,7 +156,9 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use super::super::{OutputPhase, OutputStreamConfig, SpatialOutputController};
+    use super::super::{
+        OutputDeviceSelection, OutputPhase, OutputStreamConfig, SpatialOutputController,
+    };
     use crate::decoder::{DecodePhase, DecoderController};
 
     #[test]
@@ -72,13 +178,18 @@ mod tests {
             .clone();
         let config = OutputStreamConfig::new(
             decoder.request_id(),
+            decoder.playback_epoch(),
+            metrics.target_frame(),
             metrics.sample_rate(),
-            metrics.object_count(),
-            metrics.has_lfe(),
+            metrics
+                .scene_signature()
+                .cloned()
+                .expect("ready Scene signature"),
+            OutputDeviceSelection::SystemDefault,
         )
         .expect("valid Spatial Audio config");
         let mut output = SpatialOutputController::new();
-        output.ensure_configured(config, decoder.scene_reader());
+        output.ensure_configured(&config, decoder.scene_reader());
         wait_for_output_ready(&mut output);
         let baseline_updates = output.snapshot().render_updates();
         output.play();

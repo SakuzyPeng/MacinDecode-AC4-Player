@@ -9,7 +9,7 @@ owned Scene FIFO
 SceneRenderSource ── render quantum adapter ── macindecode-windows-spatial-audio
                                                    │
                                                    v
-                                      default ISpatialAudioClient endpoint
+                                      selected ISpatialAudioClient endpoint
                                       dynamic objects + static LFE object
 ```
 
@@ -18,7 +18,10 @@ native crate 看不到 AC-4 bitstream、Core Session 或 Core 的借用类型。
 
 ## 流激活与所有权
 
-- render worker 在 MTA 初始化 COM，打开默认 `eRender` / `eConsole` endpoint；当前没有设备选择 UI。
+- 独立设备目录 worker 在 MTA 枚举活动 `eRender` endpoint，读取稳定 endpoint ID、友好名称、系统默认
+  标记，并通过 `GetMaxDynamicObjectCount` 探测 Spatial Audio 容量；目录约每 2 秒刷新。
+- UI 可选择“系统默认”或明确 endpoint ID。所选 ID 由 eframe 持久化；断开时临时回退到兼容的系统
+  默认设备，恢复后自动回切。选择“系统默认”时会跟随默认 endpoint 的变化。
 - 对象格式固定为 1 声道、32-bit IEEE float、Scene 原始采样率。
 - 激活前检查 `GetMaxDynamicObjectCount`。动态对象最小值和最大值都设为 Scene 对象数；有 LFE 时
   额外申请静态 `AudioObjectType_LowFrequency`。
@@ -44,8 +47,9 @@ native crate 看不到 AC-4 bitstream、Core Session 或 Core 的借用类型。
   因而 quantum 内的 metadata update 会量化到后续 quantum 边界。
 - LFE 使用独立静态对象，不参与动态对象槽位计数；它和动态对象一样遵循 OAMD active、语义完整性、
   linear gain 与 ramp，最终再乘主音量。没有有效状态或 inactive 时以零增益提交。
-- 首个 block 会锁定 configuration generation、对象/LFE 拓扑与所选 presentation。播放中发生变化时
-  adapter 会明确拒绝并要求重新打开来源，避免把 Core 新分配的 element ID 绑定到旧 Windows 对象。
+- 首个 block 会锁定完整 Scene 签名：采样率、configuration generation、presentation、动态对象
+  element ID 集合和 LFE element ID。播放中发生变化时 adapter 报告可恢复边界，协调器在该绝对位置
+  自动重建流，避免把 Core 新分配的 element ID 绑定到旧 Windows 对象。
 
 ## 控制与结束
 
@@ -53,11 +57,17 @@ native crate 看不到 AC-4 bitstream、Core Session 或 Core 的借用类型。
   但保留流；主音量和静音通过每对象 volume 生效。
 - 同一 request 暂时回到 Buffering 时保留已经激活的 native stream；FIFO 恢复供数后继续播放，不因
   一次欠载销毁 renderer。
-- FIFO 的 request ID 防止旧来源进入新流。来源切换会销毁旧 renderer；旧 reader 将其 request 视为 EOS。
+- 同一设备且完整 Scene 签名兼容时，seek 在 render quantum 边界用 `ReplaceSource` 替换 reader，
+  重设绝对 `playhead_frames`，复用现有 Spatial Audio stream。播放/暂停状态和主音量保持不变。
+- 设备、采样率、对象/LFE 或 Scene 签名不兼容时，协调器内部重建原生流并从保留的绝对位置恢复；
+  用户无需重新选择或重新打开文件。
+- FIFO 的 request ID + playback epoch 防止旧来源或旧 seek 进入新流。切换播放列表文件才会销毁当前
+  文件状态；旧 reader 会把失效 key 视为 EOS。
 - producer 标记 EOS 且 FIFO 排空后，对所有已激活对象调用 `SetEndOfStream`；完成最后一次
   `EndUpdatingAudioObjects` 后立即释放这些对象接口，同时保留已结束的 stream，以免后续 update 复用
-  已失效对象并进入 Failed。Stop 会销毁流、清空 FIFO，并让 Core 从文件开头重新预缓冲。
-- 当前没有 seek、上一曲或非默认设备选择。
+  已失效对象并进入 Failed。Stop 使用同一压缩缓存 seek 到 0 并暂停；签名兼容时直接替换 source。
+- 若首选 endpoint 消失会临时使用兼容默认设备；没有任何活动 endpoint 能容纳当前 Scene 时，播放器
+  保存文件、绝对位置、音量和播放意图，暂停等待设备恢复。
 
 ## 本地回归
 

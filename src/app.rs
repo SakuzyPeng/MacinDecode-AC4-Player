@@ -4,7 +4,8 @@ use std::time::Duration;
 use eframe::egui::{self, Align, Color32, Layout, RichText, Stroke};
 
 use crate::backend::{
-    OutputPhase, OutputSnapshot, OutputStreamConfig, SpatialBackendKind, SpatialOutputController,
+    OutputDeviceSelection, OutputPhase, OutputSnapshot, OutputStreamConfig, SpatialBackendKind,
+    SpatialOutputController,
 };
 use crate::bitstream_ui::{self, BitstreamAction};
 use crate::decoder::{
@@ -14,6 +15,10 @@ use crate::inspection::InspectionController;
 use crate::model::SelectedSource;
 use crate::theme;
 
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent UI toggles and pointer interaction flags are not one state machine"
+)]
 pub struct PlayerApp {
     playlist: Vec<SelectedSource>,
     selected_source: Option<usize>,
@@ -25,11 +30,18 @@ pub struct PlayerApp {
     backend: SpatialBackendKind,
     status: StatusLine,
     timeline_preview: f32,
+    timeline_dragging: bool,
+    resume_after_reconfigure: Option<bool>,
+    playback_intent: bool,
+    automatic_reconfigure_guard: Option<(u64, u64)>,
+    waiting_for_device: Option<DeviceWait>,
     volume: f32,
     muted: bool,
     bitstream_details_open: bool,
     diagnostics_open: bool,
 }
+
+const OUTPUT_DEVICE_STORAGE_KEY: &str = "preferred-output-device-v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OutputSyncAction {
@@ -38,15 +50,27 @@ enum OutputSyncAction {
     Reset,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DeviceWait {
+    request_id: u64,
+    frame: u64,
+    resume: bool,
+}
+
 const fn output_sync_action(
     decode_phase: DecodePhase,
-    configured_for_request: bool,
+    configured_for_playback: bool,
 ) -> OutputSyncAction {
-    match (decode_phase, configured_for_request) {
+    match (decode_phase, configured_for_playback) {
         (DecodePhase::Ready | DecodePhase::EndOfStream, false) => OutputSyncAction::Configure,
-        (DecodePhase::Buffering | DecodePhase::Ready | DecodePhase::EndOfStream, true) => {
-            OutputSyncAction::Preserve
-        }
+        (
+            DecodePhase::Seeking
+            | DecodePhase::Buffering
+            | DecodePhase::Ready
+            | DecodePhase::EndOfStream,
+            true,
+        )
+        | (DecodePhase::Seeking | DecodePhase::Buffering, false) => OutputSyncAction::Preserve,
         _ => OutputSyncAction::Reset,
     }
 }
@@ -54,17 +78,28 @@ const fn output_sync_action(
 impl PlayerApp {
     pub fn new(creation_context: &eframe::CreationContext<'_>) -> Self {
         theme::install(&creation_context.egui_ctx);
+        let preferred_device = creation_context
+            .storage
+            .and_then(|storage| eframe::get_value(storage, OUTPUT_DEVICE_STORAGE_KEY))
+            .unwrap_or_default();
+        let mut output = SpatialOutputController::new();
+        output.set_preferred_device(preferred_device);
         Self {
             playlist: Vec::new(),
             selected_source: None,
             inspection: InspectionController::new(),
             decoder: DecoderController::new(),
             decoder_revision: 0,
-            output: SpatialOutputController::new(),
+            output,
             output_revision: 0,
             backend: SpatialBackendKind::Automatic,
             status: StatusLine::idle("Add or drop AC-4 media files"),
             timeline_preview: 0.0,
+            timeline_dragging: false,
+            resume_after_reconfigure: None,
+            playback_intent: false,
+            automatic_reconfigure_guard: None,
+            waiting_for_device: None,
             volume: 0.8,
             muted: false,
             bitstream_details_open: false,
@@ -124,6 +159,10 @@ impl PlayerApp {
             let name = source.display_name().to_owned();
             self.selected_source = Some(index);
             self.timeline_preview = 0.0;
+            self.playback_intent = false;
+            self.resume_after_reconfigure = None;
+            self.automatic_reconfigure_guard = None;
+            self.waiting_for_device = None;
             self.status = StatusLine::ready(format!("Selected {name}; opening MacinDecode Core"));
         }
     }
@@ -145,6 +184,10 @@ impl PlayerApp {
             ));
         }
         self.timeline_preview = 0.0;
+        self.playback_intent = false;
+        self.resume_after_reconfigure = None;
+        self.automatic_reconfigure_guard = None;
+        self.waiting_for_device = None;
         self.inspection
             .retain_paths(self.playlist.iter().map(SelectedSource::path));
         if self.selected_source.is_none() {
@@ -194,10 +237,158 @@ impl PlayerApp {
         }
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "output synchronization keeps decode, device, renderer, and UI revisions atomic"
+    )]
     fn sync_output(&mut self, context: &egui::Context) {
         let request_id = self.decoder.request_id();
-        let configured_for_request = self.output.is_configured_for_request(request_id);
-        match output_sync_action(self.decoder.snapshot().phase(), configured_for_request) {
+        let playback_epoch = self.decoder.playback_epoch();
+        let master_gain = if self.muted { 0.0 } else { self.volume };
+        self.output.set_master_gain(master_gain);
+        self.output.poll();
+
+        let ready_scene = matches!(
+            self.decoder.snapshot().phase(),
+            DecodePhase::Ready | DecodePhase::EndOfStream
+        )
+        .then(|| self.decoder.snapshot().metrics())
+        .flatten()
+        .map(|metrics| {
+            (
+                metrics.object_count(),
+                metrics.duration_frames(),
+                metrics.target_frame(),
+            )
+        });
+        let desired_device = ready_scene
+            .as_ref()
+            .and_then(|(objects, _, _)| self.output.resolved_device(*objects));
+
+        if self
+            .waiting_for_device
+            .is_some_and(|waiting| waiting.request_id != request_id)
+        {
+            self.waiting_for_device = None;
+        }
+        if let Some(waiting) = self.waiting_for_device {
+            if desired_device.is_none() {
+                self.output.pause();
+                self.output.reset();
+                self.status = StatusLine::warning(
+                    "No active audio endpoint can host this Scene; waiting without closing the file",
+                );
+                context.request_repaint_after(Duration::from_secs(2));
+                return;
+            }
+            match self.decoder.seek(waiting.frame) {
+                Ok(()) => {
+                    self.waiting_for_device = None;
+                    self.resume_after_reconfigure = Some(waiting.resume);
+                    self.status = StatusLine::idle("Compatible audio endpoint restored; resuming");
+                    context.request_repaint_after(Duration::from_millis(20));
+                    return;
+                }
+                Err(error) => {
+                    self.status = StatusLine::warning(format!(
+                        "Compatible endpoint restored, but playback cannot resume yet: {error}"
+                    ));
+                    context.request_repaint_after(Duration::from_millis(50));
+                    return;
+                }
+            }
+        }
+        if let Some((_, duration, decoder_target)) = ready_scene
+            && desired_device.is_none()
+        {
+            let frame = if self
+                .output
+                .is_configured_for_playback(request_id, playback_epoch)
+            {
+                self.output.snapshot().playhead_frames()
+            } else {
+                decoder_target
+            }
+            .min(duration.unwrap_or(u64::MAX));
+            self.output.pause();
+            self.output.reset();
+            self.waiting_for_device = Some(DeviceWait {
+                request_id,
+                frame,
+                resume: self.playback_intent,
+            });
+            self.status = StatusLine::warning(
+                "No active audio endpoint can host this Scene; waiting without closing the file",
+            );
+            context.request_repaint_after(Duration::from_secs(2));
+            return;
+        }
+
+        if let Some((guard_request, guard_frame)) = self.automatic_reconfigure_guard
+            && guard_request == request_id
+            && self.output.snapshot().playhead_frames() > guard_frame.saturating_add(2_048)
+            && !matches!(self.output.snapshot().phase(), OutputPhase::Failed)
+        {
+            self.automatic_reconfigure_guard = None;
+        }
+
+        if matches!(self.output.snapshot().phase(), OutputPhase::Failed)
+            && let Some(error) = self.output.snapshot().error()
+            && is_reconfigurable_scene_error(error)
+        {
+            let target = self.output.snapshot().playhead_frames();
+            if self.automatic_reconfigure_guard != Some((request_id, target)) {
+                self.automatic_reconfigure_guard = Some((request_id, target));
+                self.output.reset();
+                match self.decoder.seek(target) {
+                    Ok(()) => {
+                        self.resume_after_reconfigure = Some(self.playback_intent);
+                        self.status = StatusLine::idle(
+                            "Adapting Windows Spatial Audio to a Scene topology change",
+                        );
+                        context.request_repaint_after(Duration::from_millis(20));
+                        return;
+                    }
+                    Err(seek_error) => self.status = StatusLine::warning(seek_error),
+                }
+            }
+        }
+
+        if matches!(
+            self.decoder.snapshot().phase(),
+            DecodePhase::Ready | DecodePhase::EndOfStream
+        ) && self
+            .output
+            .is_configured_for_playback(request_id, playback_epoch)
+            && let Some(metrics) = self.decoder.snapshot().metrics()
+        {
+            let desired_device = self.output.resolved_device(metrics.object_count());
+            if desired_device.as_ref() != self.output.configured_device()
+                && desired_device.is_some()
+            {
+                let resume = self.playback_intent;
+                let target = self
+                    .output
+                    .snapshot()
+                    .playhead_frames()
+                    .min(metrics.duration_frames().unwrap_or(u64::MAX));
+                self.output.pause();
+                match self.decoder.seek(target) {
+                    Ok(()) => {
+                        self.resume_after_reconfigure = Some(resume);
+                        self.status = StatusLine::idle("Switching Windows audio endpoint");
+                        context.request_repaint_after(Duration::from_millis(20));
+                        return;
+                    }
+                    Err(error) => self.status = StatusLine::warning(error),
+                }
+            }
+        }
+
+        let configured_for_playback = self
+            .output
+            .is_configured_for_playback(request_id, playback_epoch);
+        match output_sync_action(self.decoder.snapshot().phase(), configured_for_playback) {
             OutputSyncAction::Configure => {
                 let config = self
                     .decoder
@@ -205,17 +396,37 @@ impl PlayerApp {
                     .metrics()
                     .ok_or_else(|| "Ready decoder state has no Scene metrics".to_owned())
                     .and_then(|metrics| {
+                        let scene_signature =
+                            metrics.scene_signature().cloned().ok_or_else(|| {
+                                "Ready decoder state has no renderable Scene signature".to_owned()
+                            })?;
+                        let output_device = self
+                            .output
+                            .resolved_device(metrics.object_count())
+                            .ok_or_else(|| {
+                                "No active audio endpoint can host this Scene".to_owned()
+                            })?;
                         OutputStreamConfig::new(
                             request_id,
+                            playback_epoch,
+                            metrics.target_frame(),
                             metrics.sample_rate(),
-                            metrics.object_count(),
-                            metrics.has_lfe(),
+                            scene_signature,
+                            output_device,
                         )
                     });
                 match config {
-                    Ok(config) => self
-                        .output
-                        .ensure_configured(config, self.decoder.scene_reader()),
+                    Ok(config) => {
+                        self.output
+                            .ensure_configured(&config, self.decoder.scene_reader());
+                        if let Some(resume) = self.resume_after_reconfigure.take() {
+                            if resume {
+                                self.output.play();
+                            } else {
+                                self.output.pause();
+                            }
+                        }
+                    }
                     Err(error) => {
                         self.output.reset();
                         self.status = StatusLine::warning(error);
@@ -226,19 +437,21 @@ impl PlayerApp {
             OutputSyncAction::Reset => self.output.reset(),
         }
 
-        let master_gain = if self.muted { 0.0 } else { self.volume };
-        self.output.set_master_gain(master_gain);
-        self.output.poll();
         if self.output_revision != self.output.revision() {
             self.output_revision = self.output.revision();
             self.status = output_status_line(self.output.snapshot(), self.decoder.snapshot());
         }
-        if let Some(metrics) = self.decoder.snapshot().metrics()
+        if !self.timeline_dragging
+            && !matches!(self.decoder.snapshot().phase(), DecodePhase::Seeking)
+            && self
+                .output
+                .is_configured_for_playback(request_id, playback_epoch)
+            && let Some(metrics) = self.decoder.snapshot().metrics()
             && let Some(duration) = metrics.duration_frames()
             && duration > 0
         {
             const TIMELINE_STEPS: u64 = 10_000;
-            let submitted = self.output.snapshot().submitted_frames().min(duration);
+            let submitted = self.output.snapshot().playhead_frames().min(duration);
             let scaled = submitted.saturating_mul(TIMELINE_STEPS) / duration;
             let scaled = u16::try_from(scaled).unwrap_or(u16::MAX);
             self.timeline_preview = f32::from(scaled) / 10_000.0;
@@ -249,6 +462,8 @@ impl PlayerApp {
         ) {
             context.request_repaint_after(Duration::from_millis(50));
         }
+        #[cfg(target_os = "windows")]
+        context.request_repaint_after(Duration::from_secs(2));
     }
 
     fn handle_bitstream_action(&mut self, action: Option<BitstreamAction>) {
@@ -280,13 +495,40 @@ impl PlayerApp {
         }
     }
 
-    fn draw_header(&self, root: &mut egui::Ui) {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the endpoint picker and header share one tightly coupled egui panel"
+    )]
+    fn draw_header(&mut self, root: &mut egui::Ui) {
         let output = self.output.snapshot();
-        let selected_device = match output.phase() {
-            OutputPhase::Unavailable => "Spatial output unavailable",
-            OutputPhase::Idle => "Default Windows endpoint",
-            _ => output.device_label(),
+        let devices = self.output.devices().to_vec();
+        let preferred = self.output.preferred_device().clone();
+        let preferred_label = match &preferred {
+            OutputDeviceSelection::SystemDefault => match output.phase() {
+                OutputPhase::Unavailable => "Spatial output unavailable".to_owned(),
+                OutputPhase::Idle => "System default".to_owned(),
+                _ => format!("System default · {}", output.device_label()),
+            },
+            OutputDeviceSelection::EndpointId(id) => {
+                devices.iter().find(|device| device.id() == id).map_or_else(
+                    || format!("Preferred unavailable · {}", output.device_label()),
+                    |device| device.label().to_owned(),
+                )
+            }
         };
+        let required_objects = self
+            .decoder
+            .snapshot()
+            .metrics()
+            .and_then(|metrics| u32::try_from(metrics.object_count()).ok())
+            .unwrap_or(0);
+        let default_device = devices.iter().find(|device| device.is_default());
+        let default_eligible = !self.output.device_catalog_ready()
+            || default_device.is_some_and(|device| {
+                device
+                    .max_dynamic_objects()
+                    .is_some_and(|available| available >= required_objects)
+            });
         let device_detail = if output.max_dynamic_objects() > 0 {
             format!(
                 "{} dynamic-object slots available",
@@ -295,9 +537,11 @@ impl PlayerApp {
         } else {
             output
                 .error()
+                .or_else(|| self.output.device_catalog_error())
                 .unwrap_or("Select a decoded AC-4 scene to activate")
                 .to_owned()
         };
+        let mut selected = preferred.clone();
         egui::Panel::top("header")
             .exact_size(72.0)
             .frame(
@@ -323,9 +567,66 @@ impl PlayerApp {
                     });
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         egui::ComboBox::from_id_salt("output-device")
-                            .selected_text(selected_device)
-                            .width(170.0)
+                            .selected_text(preferred_label)
+                            .width(220.0)
                             .show_ui(ui, |ui| {
+                                let default_response = ui
+                                    .add_enabled_ui(default_eligible, |ui| {
+                                        ui.selectable_value(
+                                            &mut selected,
+                                            OutputDeviceSelection::SystemDefault,
+                                            "System default",
+                                        )
+                                    })
+                                    .inner;
+                                if !default_eligible {
+                                    let reason = default_device
+                                        .and_then(|device| device.spatial_error())
+                                        .map_or_else(
+                                            || {
+                                                format!(
+                                                    "System default cannot provide {required_objects} dynamic objects"
+                                                )
+                                            },
+                                            str::to_owned,
+                                        );
+                                    default_response.on_hover_text(reason);
+                                }
+                                ui.separator();
+                                for device in &devices {
+                                    let capacity = device.max_dynamic_objects();
+                                    let eligible = capacity
+                                        .is_some_and(|available| available >= required_objects);
+                                    let label = if device.is_default() {
+                                        format!("{} · default", device.label())
+                                    } else {
+                                        device.label().to_owned()
+                                    };
+                                    let response = ui
+                                        .add_enabled_ui(eligible, |ui| {
+                                            ui.selectable_value(
+                                                &mut selected,
+                                                OutputDeviceSelection::EndpointId(
+                                                    device.id().to_owned(),
+                                                ),
+                                                label,
+                                            )
+                                        })
+                                        .inner;
+                                    if !eligible {
+                                        let reason = device.spatial_error().map_or_else(
+                                            || {
+                                                format!(
+                                                    "Needs {required_objects} dynamic objects; endpoint provides {}",
+                                                    capacity.unwrap_or(0)
+                                                )
+                                            },
+                                            str::to_owned,
+                                        );
+                                        response.on_hover_text(reason);
+                                    }
+                                }
+                                ui.separator();
                                 ui.add_enabled(false, egui::Label::new(device_detail));
                             });
                         ui.label(
@@ -346,6 +647,9 @@ impl PlayerApp {
                     Stroke::new(1.0, theme::BORDER),
                 );
             });
+        if selected != preferred && self.output.set_preferred_device(selected) {
+            self.status = StatusLine::idle("Changing Windows audio endpoint");
+        }
     }
 
     fn draw_source_sidebar(&mut self, root: &mut egui::Ui) {
@@ -514,12 +818,27 @@ impl PlayerApp {
         self.handle_bitstream_action(requested_action);
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "transport layout and its immediate seek actions are intentionally colocated"
+    )]
     fn draw_transport(&mut self, root: &mut egui::Ui) {
         let output_phase = self.output.snapshot().phase();
         let can_toggle = self.output.snapshot().can_play();
         let playing = self.output.snapshot().is_playing();
         let can_stop = !matches!(output_phase, OutputPhase::Unavailable | OutputPhase::Idle);
-        let action = egui::Panel::bottom("transport")
+        let (duration_frames, sample_rate, seekable) =
+            self.decoder
+                .snapshot()
+                .metrics()
+                .map_or((None, 0, false), |metrics| {
+                    (
+                        metrics.duration_frames(),
+                        metrics.sample_rate(),
+                        metrics.seekable_from_frame().is_some(),
+                    )
+                });
+        let (action, timeline) = egui::Panel::bottom("transport")
             .exact_size(136.0)
             .frame(
                 egui::Frame::NONE
@@ -529,6 +848,7 @@ impl PlayerApp {
             )
             .show(root, |ui| {
                 let mut action = None;
+                let mut timeline = TimelineInteraction::default();
                 let (content, _) =
                     ui.allocate_exact_size(ui.available_size(), egui::Sense::hover());
                 let status_rect =
@@ -560,7 +880,14 @@ impl PlayerApp {
                         .layout(Layout::top_down(Align::Center)),
                     |ui| {
                         action = transport_buttons(ui, can_toggle, can_stop, playing);
-                        transport_progress(ui, &mut self.timeline_preview, side_reserve);
+                        timeline = transport_progress(
+                            ui,
+                            &mut self.timeline_preview,
+                            side_reserve,
+                            duration_frames,
+                            sample_rate,
+                            seekable,
+                        );
                     },
                 );
 
@@ -572,18 +899,55 @@ impl PlayerApp {
                     egui::vec2(volume_width, 28.0),
                 );
                 volume_control(ui, volume_rect, &mut self.volume, &mut self.muted);
-                action
+                (action, timeline)
             })
             .inner;
 
+        self.timeline_dragging = timeline.dragging;
+        if let Some(target_frame) = timeline.seek_target {
+            let resume = self.playback_intent;
+            self.output.pause();
+            match self.decoder.seek(target_frame) {
+                Ok(()) => {
+                    self.resume_after_reconfigure = Some(resume);
+                    self.status = StatusLine::idle(format!(
+                        "Seeking to {}",
+                        format_timestamp(target_frame, sample_rate)
+                    ));
+                }
+                Err(error) => {
+                    self.resume_after_reconfigure = None;
+                    if resume {
+                        self.output.play();
+                    }
+                    self.status = StatusLine::warning(error);
+                }
+            }
+        }
+
         match action {
-            Some(TransportAction::Toggle) if playing => self.output.pause(),
-            Some(TransportAction::Toggle) => self.output.play(),
+            Some(TransportAction::Toggle) if playing => {
+                self.playback_intent = false;
+                self.output.pause();
+            }
+            Some(TransportAction::Toggle) => {
+                self.playback_intent = true;
+                self.output.play();
+            }
             Some(TransportAction::Stop) => {
-                self.output.reset();
-                self.decoder.reopen();
-                self.timeline_preview = 0.0;
-                self.status = StatusLine::idle("Stopped; rebuffering from the beginning");
+                self.playback_intent = false;
+                self.output.pause();
+                self.resume_after_reconfigure = Some(false);
+                match self.decoder.seek(0) {
+                    Ok(()) => {
+                        self.timeline_preview = 0.0;
+                        self.status = StatusLine::idle("Stopped; seeking to the beginning");
+                    }
+                    Err(error) => {
+                        self.resume_after_reconfigure = None;
+                        self.status = StatusLine::warning(error);
+                    }
+                }
             }
             None => {}
         }
@@ -776,7 +1140,20 @@ fn disabled_transport_button(ui: &mut egui::Ui, glyph: &str, size: egui::Vec2) {
     );
 }
 
-fn transport_progress(ui: &mut egui::Ui, timeline_preview: &mut f32, side_reserve: f32) {
+#[derive(Default)]
+struct TimelineInteraction {
+    seek_target: Option<u64>,
+    dragging: bool,
+}
+
+fn transport_progress(
+    ui: &mut egui::Ui,
+    timeline_preview: &mut f32,
+    side_reserve: f32,
+    duration_frames: Option<u64>,
+    sample_rate: u32,
+    seekable: bool,
+) -> TimelineInteraction {
     let row_width = ui.available_width();
     let time_width = 50.0;
     let spacing = ui.spacing().item_spacing.x;
@@ -789,28 +1166,77 @@ fn transport_progress(ui: &mut egui::Ui, timeline_preview: &mut f32, side_reserv
     let (row, _) = ui.allocate_exact_size(egui::vec2(row_width, 20.0), egui::Sense::hover());
     let group = egui::Rect::from_center_size(row.center(), egui::vec2(group_width, row.height()));
 
+    let mut interaction = TimelineInteraction::default();
     ui.scope_builder(
         egui::UiBuilder::new()
             .max_rect(group)
             .layout(Layout::left_to_right(Align::Center)),
         |ui| {
+            let duration = duration_frames.unwrap_or(0);
+            let preview_frame = normalized_frame(*timeline_preview, duration);
             ui.add_sized(
                 [time_width, 18.0],
-                egui::Label::new(RichText::new("00:00").monospace().color(theme::MUTED))
-                    .halign(Align::RIGHT),
+                egui::Label::new(
+                    RichText::new(format_timestamp(preview_frame, sample_rate))
+                        .monospace()
+                        .color(theme::MUTED),
+                )
+                .halign(Align::RIGHT),
             );
-            ui.add_enabled_ui(false, |ui| {
+            ui.add_enabled_ui(seekable && duration > 0, |ui| {
                 ui.spacing_mut().interact_size.y = 18.0;
                 ui.spacing_mut().slider_width = progress_width;
-                ui.add(egui::Slider::new(timeline_preview, 0.0..=1.0).show_value(false));
+                let response =
+                    ui.add(egui::Slider::new(timeline_preview, 0.0..=1.0).show_value(false));
+                interaction.dragging = response.dragged() || response.is_pointer_button_down_on();
+                if response.drag_stopped() || response.clicked() {
+                    interaction.seek_target = Some(normalized_frame(*timeline_preview, duration));
+                }
             });
             ui.add_sized(
                 [time_width, 18.0],
-                egui::Label::new(RichText::new("--:--").monospace().color(theme::MUTED))
-                    .halign(Align::LEFT),
+                egui::Label::new(
+                    RichText::new(if duration > 0 {
+                        format_timestamp(duration, sample_rate)
+                    } else {
+                        "--:--".to_owned()
+                    })
+                    .monospace()
+                    .color(theme::MUTED),
+                )
+                .halign(Align::LEFT),
             );
         },
     );
+    interaction
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    reason = "the normalized UI slider is clamped to a finite 0..=1 range"
+)]
+fn normalized_frame(value: f32, duration_frames: u64) -> u64 {
+    if !value.is_finite() || duration_frames == 0 {
+        return 0;
+    }
+    (f64::from(value.clamp(0.0, 1.0)) * duration_frames as f64).round() as u64
+}
+
+fn format_timestamp(frames: u64, sample_rate: u32) -> String {
+    if sample_rate == 0 {
+        return "--:--".to_owned();
+    }
+    let total_seconds = frames / u64::from(sample_rate);
+    let seconds = total_seconds % 60;
+    let minutes = (total_seconds / 60) % 60;
+    let hours = total_seconds / 3_600;
+    if hours > 0 {
+        format!("{hours:02}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes:02}:{seconds:02}")
+    }
 }
 
 fn volume_control(ui: &mut egui::Ui, rect: egui::Rect, volume: &mut f32, muted: &mut bool) {
@@ -948,6 +1374,14 @@ impl eframe::App for PlayerApp {
             draw_drop_overlay(&context);
         }
     }
+
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        eframe::set_value(
+            storage,
+            OUTPUT_DEVICE_STORAGE_KEY,
+            self.output.preferred_device(),
+        );
+    }
 }
 
 struct StatusLine {
@@ -992,6 +1426,19 @@ enum StatusKind {
     Warning,
 }
 
+fn is_reconfigurable_scene_error(error: &str) -> bool {
+    [
+        "Scene dynamic-object count changed",
+        "Scene LFE layout changed",
+        "Scene configuration generation changed",
+        "Selected Scene presentation changed",
+        "Scene dynamic-object element IDs changed",
+        "Scene LFE element ID changed",
+    ]
+    .iter()
+    .any(|prefix| error.starts_with(prefix))
+}
+
 fn decoder_status_line(decoder: &DecoderSnapshot) -> StatusLine {
     let source = decoder
         .path()
@@ -1006,6 +1453,10 @@ fn decoder_status_line(decoder: &DecoderSnapshot) -> StatusLine {
         ),
         DecodePhase::Idle => StatusLine::idle("Add or select an AC-4 media file"),
         DecodePhase::Opening => StatusLine::idle(format!("Opening {source} with MacinDecode Core")),
+        DecodePhase::Seeking => {
+            let target = decoder.metrics().map_or(0, DecodeMetrics::target_frame);
+            StatusLine::idle(format!("Seeking {source} to frame {target}"))
+        }
         DecodePhase::Buffering => {
             let buffered = decoder
                 .metrics()
@@ -1017,10 +1468,11 @@ fn decoder_status_line(decoder: &DecoderSnapshot) -> StatusLine {
         DecodePhase::Ready => {
             let metrics = decoder.metrics().expect("ready decode state has metrics");
             StatusLine::ready(format!(
-                "MacinDecode Core ready: {} objects + {} LFE, {} ms buffered",
+                "MacinDecode Core ready: {} objects + {} LFE, {} ms buffered{}",
                 metrics.object_count(),
                 u8::from(metrics.has_lfe()),
-                metrics.buffered_milliseconds()
+                metrics.buffered_milliseconds(),
+                seek_index_suffix(decoder)
             ))
         }
         DecodePhase::EndOfStream => {
@@ -1048,23 +1500,25 @@ fn output_status_line(output: &OutputSnapshot, decoder: &DecoderSnapshot) -> Sta
             output.reserved_dynamic_objects()
         )),
         OutputPhase::Ready => StatusLine::ready(format!(
-            "Windows Spatial Audio ready: {} of {} dynamic slots reserved",
+            "Windows Spatial Audio ready: {} of {} dynamic slots reserved{}",
             output.reserved_dynamic_objects(),
-            output.max_dynamic_objects()
+            output.max_dynamic_objects(),
+            seek_index_suffix(decoder)
         )),
         OutputPhase::Playing => StatusLine::ready(format!(
-            "Spatial playback: {} frames, {} object buffers, {} underruns",
-            output.submitted_frames(),
+            "Spatial playback at frame {}: {} object buffers, {} underruns{}",
+            output.playhead_frames(),
             output.object_buffer_submissions(),
-            output.underruns()
+            output.underruns(),
+            seek_index_suffix(decoder)
         )),
         OutputPhase::Paused => StatusLine::idle(format!(
             "Spatial playback paused at {} frames",
-            output.submitted_frames()
+            output.playhead_frames()
         )),
         OutputPhase::Ended => StatusLine::ready(format!(
-            "Spatial playback ended after {} submitted frames",
-            output.submitted_frames()
+            "Spatial playback ended at frame {}",
+            output.playhead_frames()
         )),
         OutputPhase::Failed => StatusLine::warning(format!(
             "Windows Spatial Audio failed: {}",
@@ -1073,11 +1527,25 @@ fn output_status_line(output: &OutputSnapshot, decoder: &DecoderSnapshot) -> Sta
     }
 }
 
+fn seek_index_suffix(decoder: &DecoderSnapshot) -> String {
+    let Some(metrics) = decoder.metrics() else {
+        return String::new();
+    };
+    if metrics.is_indexing() {
+        " · indexing seek map".to_owned()
+    } else {
+        metrics
+            .index_error()
+            .map_or_else(String::new, |error| format!(" · seek unavailable: {error}"))
+    }
+}
+
 const fn decode_phase_label(phase: DecodePhase) -> &'static str {
     match phase {
         DecodePhase::Unavailable => "Unavailable",
         DecodePhase::Idle => "Idle",
         DecodePhase::Opening => "Opening",
+        DecodePhase::Seeking => "Seeking",
         DecodePhase::Buffering => "Buffering",
         DecodePhase::Ready => "Ready",
         DecodePhase::EndOfStream => "End of stream",
@@ -1253,6 +1721,10 @@ fn scene_placeholder(
                 DecodePhase::Opening => (
                     "Opening AC-4 source",
                     "Reading the bounded access-unit timeline for MacinDecode Core.",
+                ),
+                DecodePhase::Seeking => (
+                    "Seeking object scene",
+                    "Core is rebuilding Scene state from the nearest complete random-access point.",
                 ),
                 DecodePhase::Buffering => (
                     "Decoding object scene",
@@ -1497,10 +1969,18 @@ mod tests {
     }
 
     #[test]
-    fn output_sync_resets_unconfigured_buffering_state() {
+    fn output_sync_preserves_renderer_while_a_new_epoch_buffers() {
         assert_eq!(
             output_sync_action(DecodePhase::Buffering, false),
-            OutputSyncAction::Reset
+            OutputSyncAction::Preserve
+        );
+    }
+
+    #[test]
+    fn output_sync_preserves_renderer_while_seeking() {
+        assert_eq!(
+            output_sync_action(DecodePhase::Seeking, false),
+            OutputSyncAction::Preserve
         );
     }
 
@@ -1518,5 +1998,29 @@ mod tests {
             output_sync_action(DecodePhase::Opening, true),
             OutputSyncAction::Reset
         );
+    }
+
+    #[test]
+    fn normalized_timeline_maps_to_absolute_frames() {
+        assert_eq!(normalized_frame(0.0, 480_000), 0);
+        assert_eq!(normalized_frame(0.25, 480_000), 120_000);
+        assert_eq!(normalized_frame(1.0, 480_000), 480_000);
+    }
+
+    #[test]
+    fn timestamp_uses_hours_only_when_needed() {
+        assert_eq!(format_timestamp(48_000 * 65, 48_000), "01:05");
+        assert_eq!(format_timestamp(48_000 * 3_661, 48_000), "01:01:01");
+        assert_eq!(format_timestamp(0, 0), "--:--");
+    }
+
+    #[test]
+    fn only_scene_signature_failures_trigger_automatic_reconfiguration() {
+        assert!(is_reconfigurable_scene_error(
+            "Scene configuration generation changed from 1 to 2"
+        ));
+        assert!(!is_reconfigurable_scene_error(
+            "Windows returned an invalid Spatial Audio object buffer"
+        ));
     }
 }

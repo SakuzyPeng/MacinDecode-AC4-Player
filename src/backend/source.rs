@@ -4,14 +4,16 @@ use macindecode_windows_spatial_audio::{
     DynamicObjectRender, LfeObjectRender, RenderQuantum, SpatialSource,
 };
 
-use crate::decoder::{DecodedSceneBlock, SceneQueueReader, SpatialObjectState, SpatialPosition};
+use crate::decoder::{
+    DecodedSceneBlock, SceneQueueReader, SceneSignature, SpatialObjectState, SpatialPosition,
+};
 
 pub(super) struct SceneRenderSource {
     reader: SceneQueueReader,
     sample_rate: u32,
     dynamic_object_count: u32,
     has_lfe: bool,
-    configuration: Option<SceneConfiguration>,
+    scene_signature: SceneSignature,
     timeline_frame: i64,
     current: Option<BlockCursor>,
 }
@@ -22,14 +24,20 @@ impl SceneRenderSource {
         sample_rate: u32,
         dynamic_object_count: u32,
         has_lfe: bool,
+        scene_signature: SceneSignature,
+        start_frame: u64,
     ) -> Self {
         Self {
             reader,
             sample_rate,
             dynamic_object_count,
             has_lfe,
-            configuration: None,
-            timeline_frame: 0,
+            scene_signature,
+            timeline_frame: if start_frame > i64::MAX as u64 {
+                i64::MAX
+            } else {
+                start_frame as i64
+            },
             current: None,
         }
     }
@@ -115,7 +123,7 @@ impl SceneRenderSource {
                 self.sample_rate,
                 self.dynamic_object_count,
                 self.has_lfe,
-                &mut self.configuration,
+                &self.scene_signature,
             )?;
             let block_end = block
                 .start_frame()
@@ -150,29 +158,12 @@ struct BlockCursor {
     offset_frames: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct SceneConfiguration {
-    generation: u32,
-    presentation_index: u32,
-    presentation_id: Option<u32>,
-}
-
-impl SceneConfiguration {
-    const fn from_block(block: &DecodedSceneBlock) -> Self {
-        Self {
-            generation: block.configuration_generation(),
-            presentation_index: block.presentation_index(),
-            presentation_id: block.presentation_id(),
-        }
-    }
-}
-
 fn validate_block(
     block: &DecodedSceneBlock,
     sample_rate: u32,
     dynamic_object_count: u32,
     stream_has_lfe: bool,
-    configuration: &mut Option<SceneConfiguration>,
+    expected_signature: &SceneSignature,
 ) -> Result<(), String> {
     if block.sample_rate() != sample_rate {
         return Err(format!(
@@ -192,23 +183,29 @@ fn validate_block(
     if block.lfe().is_some() != stream_has_lfe {
         return Err("Scene LFE layout changed after Spatial Audio activation".to_owned());
     }
-    let actual_configuration = SceneConfiguration::from_block(block);
-    if let Some(expected_configuration) = configuration.as_ref() {
-        if expected_configuration.generation != actual_configuration.generation {
-            return Err(format!(
-                "Scene configuration generation changed from {} to {}; dynamic topology changes require reopening the Spatial Audio stream",
-                expected_configuration.generation, actual_configuration.generation
-            ));
-        }
-        if expected_configuration.presentation_index != actual_configuration.presentation_index
-            || expected_configuration.presentation_id != actual_configuration.presentation_id
-        {
-            return Err(
-                "Selected Scene presentation changed during Spatial Audio playback".to_owned(),
-            );
-        }
-    } else {
-        *configuration = Some(actual_configuration);
+    if expected_signature.configuration_generation() != block.configuration_generation() {
+        return Err(format!(
+            "Scene configuration generation changed from {} to {}; the Spatial Audio stream must be reconfigured",
+            expected_signature.configuration_generation(),
+            block.configuration_generation()
+        ));
+    }
+    if expected_signature.presentation_index() != block.presentation_index()
+        || expected_signature.presentation_id() != block.presentation_id()
+    {
+        return Err("Selected Scene presentation changed during Spatial Audio playback".to_owned());
+    }
+    let mut actual_object_ids = block
+        .objects()
+        .iter()
+        .map(|object| object.element_id())
+        .collect::<Vec<_>>();
+    actual_object_ids.sort_unstable();
+    if actual_object_ids != expected_signature.object_element_ids() {
+        return Err("Scene dynamic-object element IDs changed during playback".to_owned());
+    }
+    if block.lfe().map(|component| component.element_id()) != expected_signature.lfe_element_id() {
+        return Err("Scene LFE element ID changed during playback".to_owned());
     }
     for object in block.objects() {
         if object.samples().len() != expected {
@@ -608,13 +605,14 @@ mod tests {
 
     #[test]
     fn rejects_configuration_generation_changes_after_activation() {
-        let mut configuration = None;
-        validate_block(&configured_block(3), 48_000, 1, false, &mut configuration)
+        let initial = configured_block(3);
+        let signature = SceneSignature::from_block(&initial);
+        validate_block(&initial, 48_000, 1, false, &signature)
             .expect("first block establishes the active Scene configuration");
 
-        let error = validate_block(&configured_block(4), 48_000, 1, false, &mut configuration)
+        let error = validate_block(&configured_block(4), 48_000, 1, false, &signature)
             .expect_err("a generation change must not reuse the active object IDs");
         assert!(error.contains("generation changed from 3 to 4"), "{error}");
-        assert!(error.contains("require reopening"), "{error}");
+        assert!(error.contains("must be reconfigured"), "{error}");
     }
 }

@@ -1,11 +1,15 @@
 use std::fs;
+use std::ops::Range;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::Duration;
 
+use macindecode_ac4_bitstream::topology::{Ac4Topology, RandomAccess};
 use macindecode_ac4_bitstream::{Ac4Toc, SyncFrameIter};
-use macindecode_ac4_mp4::Ac4Mp4;
+use macindecode_ac4_mp4::{Ac4Mp4, Ac4Mp4Timeline};
 use macindecode_ac4_scene::{
     Ac4DecoderConfig, Ac4DecoderSession, Ac4SceneFrame, AccessUnit, AccessUnitContext, DecodeMode,
     DecodeStatus, PresentationSelection, SceneObjectState,
@@ -13,9 +17,9 @@ use macindecode_ac4_scene::{
 
 use super::{
     DecodeContainer, DecodeMetrics, DecodePhase, DecodedSceneBlock, DecoderSnapshot,
-    PREBUFFER_MILLISECONDS, QueuePushError, SceneLfePcm, SceneMetadataUpdate, SceneObjectPcm,
-    SharedSceneQueue, SpatialObjectState, SpatialPosition, WorkerCommand, WorkerEvent,
-    WorkerHandle,
+    PREBUFFER_MILLISECONDS, PlaybackKey, QueuePushError, SceneLfePcm, SceneMetadataUpdate,
+    SceneObjectPcm, SharedSceneQueue, SpatialObjectState, SpatialPosition, WorkerCommand,
+    WorkerEvent, WorkerEventKind, WorkerHandle,
 };
 
 const MAX_MP4_EDIT_ENTRIES: usize = 8;
@@ -48,6 +52,7 @@ fn decoder_worker(
     queue: &SharedSceneQueue,
 ) {
     let mut pending = None;
+    let mut loaded: Option<LoadedMedia> = None;
     loop {
         let command = match pending.take() {
             Some(command) => command,
@@ -57,66 +62,49 @@ fn decoder_worker(
             },
         };
         match command {
-            WorkerCommand::Open { request_id, path } => {
-                match decode_path(request_id, &path, command_receiver, event_sender, queue) {
+            WorkerCommand::Open { key, path } => {
+                let failure_path = path.clone();
+                loaded = match LoadedMedia::open(key, path, event_sender) {
+                    Ok(media) => Some(media),
+                    Err(error) => {
+                        send_failure(key, &failure_path, error, event_sender);
+                        None
+                    }
+                };
+                let Some(media) = loaded.as_mut() else {
+                    continue;
+                };
+                match media.decode_from(key, 0, false, command_receiver, event_sender, queue) {
                     RunControl::Complete => {}
                     RunControl::Command(command) => pending = Some(command),
                     RunControl::Shutdown => break,
                 }
             }
-            WorkerCommand::Close => {}
+            WorkerCommand::Seek { key, target_frame } => {
+                let Some(media) = loaded.as_mut() else {
+                    send_failure(
+                        key,
+                        Path::new(""),
+                        "Seek requested without a loaded source".to_owned(),
+                        event_sender,
+                    );
+                    continue;
+                };
+                match media.decode_from(
+                    key,
+                    target_frame,
+                    true,
+                    command_receiver,
+                    event_sender,
+                    queue,
+                ) {
+                    RunControl::Complete => {}
+                    RunControl::Command(command) => pending = Some(command),
+                    RunControl::Shutdown => break,
+                }
+            }
+            WorkerCommand::Close => loaded = None,
             WorkerCommand::Shutdown => break,
-        }
-    }
-}
-
-fn decode_path(
-    request_id: u64,
-    path: &Path,
-    command_receiver: &Receiver<WorkerCommand>,
-    event_sender: &Sender<WorkerEvent>,
-    queue: &SharedSceneQueue,
-) -> RunControl {
-    let bytes = match fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            send_failure(
-                request_id,
-                path,
-                format!("Failed to read AC-4 media: {error}"),
-                event_sender,
-            );
-            return RunControl::Complete;
-        }
-    };
-    if let Some(control) = pending_command(command_receiver) {
-        return control;
-    }
-
-    let result = if is_raw_ac4(&bytes) {
-        decode_raw(
-            request_id,
-            path,
-            &bytes,
-            command_receiver,
-            event_sender,
-            queue,
-        )
-    } else {
-        decode_mp4(
-            request_id,
-            path,
-            &bytes,
-            command_receiver,
-            event_sender,
-            queue,
-        )
-    };
-    match result {
-        Ok(control) => control,
-        Err(error) => {
-            send_failure(request_id, path, error, event_sender);
-            RunControl::Complete
         }
     }
 }
@@ -125,14 +113,163 @@ fn is_raw_ac4(bytes: &[u8]) -> bool {
     matches!(bytes.get(..2), Some([0xAC, 0x40 | 0x41]))
 }
 
-fn decode_mp4(
-    request_id: u64,
-    path: &Path,
-    bytes: &[u8],
-    command_receiver: &Receiver<WorkerCommand>,
-    event_sender: &Sender<WorkerEvent>,
-    queue: &SharedSceneQueue,
-) -> Result<RunControl, String> {
+struct IndexedAccessUnit {
+    range: Range<usize>,
+    index: u64,
+    source_start: i64,
+    presentation_start: i64,
+    priming_samples: Option<u64>,
+    random_access_hint: Option<bool>,
+    safe_random_access: bool,
+}
+
+struct MediaIndex {
+    duration_frames: u64,
+    seekable_from_frame: Option<u64>,
+    access_units: Vec<IndexedAccessUnit>,
+}
+
+impl MediaIndex {
+    fn new(duration_frames: u64, access_units: Vec<IndexedAccessUnit>) -> Result<Self, String> {
+        if access_units.is_empty() {
+            return Err("Input contains no AC-4 access unit".to_owned());
+        }
+        let seekable_from_frame = access_units
+            .iter()
+            .filter(|unit| unit.safe_random_access)
+            .map(|unit| u64::try_from(unit.presentation_start.max(0)).unwrap_or(u64::MAX))
+            .min();
+        Ok(Self {
+            duration_frames,
+            seekable_from_frame,
+            access_units,
+        })
+    }
+
+    fn seek_start(&self, target_frame: u64) -> Result<usize, String> {
+        let target = i64::try_from(target_frame)
+            .map_err(|_| "Seek target exceeds the signed Scene timeline".to_owned())?;
+        self.access_units
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, unit)| unit.safe_random_access && unit.presentation_start <= target)
+            .map(|(index, _)| index)
+            .ok_or_else(|| {
+                "No complete random-access point exists at or before the seek target".to_owned()
+            })
+    }
+}
+
+enum MediaIndexState {
+    Building,
+    Ready(Arc<MediaIndex>),
+    Failed(String),
+}
+
+struct SharedMediaIndex {
+    state: Arc<Mutex<MediaIndexState>>,
+    cancel: Arc<AtomicBool>,
+}
+
+impl SharedMediaIndex {
+    fn spawn(
+        key: PlaybackKey,
+        container: DecodeContainer,
+        bytes: Arc<Vec<u8>>,
+        known_duration: Option<u64>,
+        event_sender: &Sender<WorkerEvent>,
+    ) -> Self {
+        let state = Arc::new(Mutex::new(MediaIndexState::Building));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_state = Arc::clone(&state);
+        let worker_cancel = Arc::clone(&cancel);
+        let worker_events = event_sender.clone();
+        let spawn_result = thread::Builder::new()
+            .name("ac4-seek-index".to_owned())
+            .spawn(move || {
+                let result = match container {
+                    DecodeContainer::IsoBmff => build_mp4_index(&bytes, &worker_cancel),
+                    DecodeContainer::RawAc4 => build_raw_index(&bytes, &worker_cancel),
+                };
+                if worker_cancel.load(Ordering::Acquire) {
+                    return;
+                }
+                let (duration_frames, seekable_from_frame, error, state_update) = match result {
+                    Ok(Some(index)) => {
+                        let index = Arc::new(index);
+                        (
+                            Some(index.duration_frames),
+                            index.seekable_from_frame,
+                            None,
+                            MediaIndexState::Ready(index),
+                        )
+                    }
+                    Ok(None) => return,
+                    Err(error) => (
+                        known_duration,
+                        None,
+                        Some(error.clone()),
+                        MediaIndexState::Failed(error),
+                    ),
+                };
+                *lock_recover(&worker_state) = state_update;
+                let _ = worker_events.send(WorkerEvent {
+                    kind: WorkerEventKind::IndexFinished {
+                        request_id: key.request_id(),
+                        duration_frames,
+                        seekable_from_frame,
+                        error,
+                    },
+                });
+            });
+        if let Err(error) = spawn_result {
+            let error = format!("Failed to start the AC-4 seek index worker: {error}");
+            *lock_recover(&state) = MediaIndexState::Failed(error.clone());
+            let _ = event_sender.send(WorkerEvent {
+                kind: WorkerEventKind::IndexFinished {
+                    request_id: key.request_id(),
+                    duration_frames: known_duration,
+                    seekable_from_frame: None,
+                    error: Some(error),
+                },
+            });
+        }
+        Self { state, cancel }
+    }
+
+    fn ready(&self) -> Result<Arc<MediaIndex>, String> {
+        match &*lock_recover(&self.state) {
+            MediaIndexState::Building => Err("Media indexing has not completed yet".to_owned()),
+            MediaIndexState::Ready(index) => Ok(Arc::clone(index)),
+            MediaIndexState::Failed(error) => Err(format!("Media seek index failed: {error}")),
+        }
+    }
+}
+
+impl Drop for SharedMediaIndex {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Release);
+    }
+}
+
+fn lock_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[derive(Clone, Copy)]
+struct Mp4Timing {
+    sample_rate: u32,
+    priming_samples: u64,
+    presentation_shift: i64,
+    duration_frames: u64,
+}
+
+fn parse_mp4_timing<'a>(
+    bytes: &'a [u8],
+) -> Result<(Ac4Mp4<'a>, Ac4Mp4Timeline<MAX_MP4_EDIT_ENTRIES>, Mp4Timing), String> {
     let source = Ac4Mp4::parse(bytes).map_err(|error| error.to_string())?;
     let timeline = source
         .presentation_timeline::<MAX_MP4_EDIT_ENTRIES>()
@@ -141,113 +278,435 @@ fn decode_mp4(
         return Err("Multiple discontiguous MP4 media edits are not supported yet".to_owned());
     }
     let sample_rate = source.dsi().base_sampling_frequency.hz();
-    let priming = timeline
-        .priming_samples(sample_rate)
-        .map_err(|error| error.to_string())?;
-    let presentation_shift = timeline
-        .presentation_sample_shift(sample_rate)
-        .map_err(|error| error.to_string())?;
-    let duration = timeline
-        .presentation_duration_samples(sample_rate)
-        .map_err(|error| error.to_string())?;
-    let mut metrics = initial_metrics(DecodeContainer::IsoBmff, sample_rate, Some(duration));
-    let mut session = new_session();
-
-    for item in source.access_units() {
-        if let Some(control) = pending_command(command_receiver) {
-            return Ok(control);
-        }
-        let access_unit = item.map_err(|error| error.to_string())?;
-        let info = access_unit.info;
-        let source_start = timeline
-            .media_time_samples(info.composition_time, sample_rate)
-            .map_err(|error| error.to_string())?;
-        let mut context = AccessUnitContext::new(u64::from(info.index))
-            .with_source_sample_start(source_start)
-            .with_priming_samples(priming)
-            .with_random_access_hint(info.is_sync);
-        if let Some(shift) = presentation_shift {
-            let presentation_start = source_start.checked_add(shift).ok_or_else(|| {
-                "MP4 presentation position overflow after applying edits".to_owned()
-            })?;
-            context = context.with_presentation_sample_start(presentation_start);
-        }
-        let control = decode_access_unit(
-            request_id,
-            path,
-            &mut session,
-            access_unit.payload,
-            context,
-            &mut metrics,
-            command_receiver,
-            event_sender,
-            queue,
-        )?;
-        if !matches!(control, RunControl::Complete) {
-            return Ok(control);
-        }
-    }
-    finish(request_id, path, &metrics, event_sender, queue)
+    let timing = Mp4Timing {
+        sample_rate,
+        priming_samples: timeline
+            .priming_samples(sample_rate)
+            .map_err(|error| error.to_string())?,
+        presentation_shift: timeline
+            .presentation_sample_shift(sample_rate)
+            .map_err(|error| error.to_string())?
+            .unwrap_or(0),
+        duration_frames: timeline
+            .presentation_duration_samples(sample_rate)
+            .map_err(|error| error.to_string())?,
+    };
+    Ok((source, timeline, timing))
 }
 
-fn decode_raw(
-    request_id: u64,
-    path: &Path,
-    bytes: &[u8],
-    command_receiver: &Receiver<WorkerCommand>,
-    event_sender: &Sender<WorkerEvent>,
-    queue: &SharedSceneQueue,
-) -> Result<RunControl, String> {
-    let mut session = new_session();
-    let mut metrics = None;
-    let mut frame_start = 0i64;
-    let mut access_unit_index = 0u64;
+fn build_mp4_index(bytes: &[u8], cancel: &AtomicBool) -> Result<Option<MediaIndex>, String> {
+    let (source, timeline, timing) = parse_mp4_timing(bytes)?;
+    let mut access_units =
+        Vec::with_capacity(usize::try_from(source.sample_count()).unwrap_or(usize::MAX));
+    for item in source.access_units() {
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+        let access_unit = item.map_err(|error| error.to_string())?;
+        let source_start = timeline
+            .media_time_samples(access_unit.info.composition_time, timing.sample_rate)
+            .map_err(|error| error.to_string())?;
+        let presentation_start = source_start
+            .checked_add(timing.presentation_shift)
+            .ok_or_else(|| "MP4 presentation position overflow after applying edits".to_owned())?;
+        let full_random_access = Ac4Topology::parse(access_unit.payload)
+            .map_err(|error| error.to_string())?
+            .random_access()
+            == RandomAccess::Full;
+        access_units.push(IndexedAccessUnit {
+            range: access_unit.range,
+            index: u64::from(access_unit.info.index),
+            source_start,
+            presentation_start,
+            priming_samples: Some(timing.priming_samples),
+            random_access_hint: Some(access_unit.info.is_sync),
+            safe_random_access: access_unit.info.is_sync && full_random_access,
+        });
+    }
+    MediaIndex::new(timing.duration_frames, access_units).map(Some)
+}
 
-    for item in SyncFrameIter::new(bytes) {
-        if let Some(control) = pending_command(command_receiver) {
-            return Ok(control);
+fn raw_payload_range(
+    offset: usize,
+    total_size: usize,
+    raw_frame_len: usize,
+    has_crc: bool,
+) -> Result<Range<usize>, String> {
+    let crc_bytes = usize::from(has_crc) * 2;
+    let start = offset
+        .checked_add(total_size)
+        .and_then(|end| end.checked_sub(raw_frame_len + crc_bytes))
+        .ok_or_else(|| "Raw AC-4 sync-frame range underflow".to_owned())?;
+    let end = start
+        .checked_add(raw_frame_len)
+        .ok_or_else(|| "Raw AC-4 sync-frame range overflow".to_owned())?;
+    Ok(start..end)
+}
+
+fn build_raw_index(bytes: &[u8], cancel: &AtomicBool) -> Result<Option<MediaIndex>, String> {
+    let mut access_units = Vec::new();
+    let mut frame_start = 0i64;
+    let mut sample_rate = None;
+    for (index, item) in SyncFrameIter::new(bytes).enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(None);
         }
         let sync_frame = item.map_err(|error| error.to_string())?;
         let toc = Ac4Toc::parse(sync_frame.raw_frame).map_err(|error| error.to_string())?;
-        let sample_rate = toc
+        let current_sample_rate = toc
             .base_sampling_frequency_hz()
             .ok_or_else(|| "Raw AC-4 declares no supported sample rate".to_owned())?;
-        let current_metrics = metrics
-            .get_or_insert_with(|| initial_metrics(DecodeContainer::RawAc4, sample_rate, None));
-        if current_metrics.sample_rate != sample_rate {
+        if sample_rate
+            .replace(current_sample_rate)
+            .is_some_and(|rate| rate != current_sample_rate)
+        {
             return Err("Raw AC-4 changes sample rate midstream".to_owned());
-        }
-        let context = AccessUnitContext::new(access_unit_index)
-            .with_source_sample_start(frame_start)
-            .with_presentation_sample_start(frame_start);
-        let control = decode_access_unit(
-            request_id,
-            path,
-            &mut session,
-            sync_frame.raw_frame,
-            context,
-            current_metrics,
-            command_receiver,
-            event_sender,
-            queue,
-        )?;
-        if !matches!(control, RunControl::Complete) {
-            return Ok(control);
         }
         let frame_len = toc
             .codec_frame_len_base(1)
             .ok_or_else(|| "Cannot derive raw AC-4 frame length".to_owned())?;
+        let range = raw_payload_range(
+            sync_frame.offset,
+            sync_frame.total_size,
+            sync_frame.raw_frame.len(),
+            sync_frame.crc_word.is_some(),
+        )?;
+        let safe_random_access = Ac4Topology::parse(sync_frame.raw_frame)
+            .map_err(|error| error.to_string())?
+            .random_access()
+            == RandomAccess::Full;
+        access_units.push(IndexedAccessUnit {
+            range,
+            index: u64::try_from(index)
+                .map_err(|_| "Raw AC-4 access-unit index overflow".to_owned())?,
+            source_start: frame_start,
+            presentation_start: frame_start,
+            priming_samples: None,
+            random_access_hint: None,
+            safe_random_access,
+        });
         frame_start = frame_start
             .checked_add(i64::from(frame_len))
             .ok_or_else(|| "Raw AC-4 timeline overflow".to_owned())?;
-        access_unit_index = access_unit_index
-            .checked_add(1)
-            .ok_or_else(|| "Raw AC-4 access-unit index overflow".to_owned())?;
+    }
+    let duration_frames =
+        u64::try_from(frame_start).map_err(|_| "Raw AC-4 duration is negative".to_owned())?;
+    MediaIndex::new(duration_frames, access_units).map(Some)
+}
+
+impl IndexedAccessUnit {
+    fn context(&self) -> AccessUnitContext {
+        let mut context = AccessUnitContext::new(self.index)
+            .with_source_sample_start(self.source_start)
+            .with_presentation_sample_start(self.presentation_start);
+        if let Some(priming) = self.priming_samples {
+            context = context.with_priming_samples(priming);
+        }
+        if let Some(hint) = self.random_access_hint {
+            context = context.with_random_access_hint(hint);
+        }
+        context
+    }
+}
+
+struct LoadedMedia {
+    path: std::path::PathBuf,
+    bytes: Arc<Vec<u8>>,
+    container: DecodeContainer,
+    sample_rate: u32,
+    known_duration_frames: Option<u64>,
+    index: SharedMediaIndex,
+    session: Ac4DecoderSession,
+}
+
+impl LoadedMedia {
+    fn open(
+        key: PlaybackKey,
+        path: std::path::PathBuf,
+        event_sender: &Sender<WorkerEvent>,
+    ) -> Result<Self, String> {
+        let bytes = Arc::new(
+            fs::read(&path).map_err(|error| format!("Failed to read AC-4 media: {error}"))?,
+        );
+        if is_raw_ac4(&bytes) {
+            Self::open_raw(key, path, bytes, event_sender)
+        } else {
+            Self::open_mp4(key, path, bytes, event_sender)
+        }
     }
 
-    let mut metrics = metrics.ok_or_else(|| "Input contains no AC-4 sync frame".to_owned())?;
-    metrics.duration_frames = u64::try_from(frame_start).ok();
-    finish(request_id, path, &metrics, event_sender, queue)
+    fn open_mp4(
+        key: PlaybackKey,
+        path: std::path::PathBuf,
+        bytes: Arc<Vec<u8>>,
+        event_sender: &Sender<WorkerEvent>,
+    ) -> Result<Self, String> {
+        let (_, _, timing) = parse_mp4_timing(&bytes)?;
+        let known_duration_frames = Some(timing.duration_frames);
+        let index = SharedMediaIndex::spawn(
+            key,
+            DecodeContainer::IsoBmff,
+            Arc::clone(&bytes),
+            known_duration_frames,
+            event_sender,
+        );
+        Ok(Self {
+            path,
+            bytes,
+            container: DecodeContainer::IsoBmff,
+            sample_rate: timing.sample_rate,
+            known_duration_frames,
+            index,
+            session: new_session(),
+        })
+    }
+
+    fn open_raw(
+        key: PlaybackKey,
+        path: std::path::PathBuf,
+        bytes: Arc<Vec<u8>>,
+        event_sender: &Sender<WorkerEvent>,
+    ) -> Result<Self, String> {
+        let first = SyncFrameIter::new(&bytes)
+            .next()
+            .ok_or_else(|| "Input contains no AC-4 sync frame".to_owned())?
+            .map_err(|error| error.to_string())?;
+        let toc = Ac4Toc::parse(first.raw_frame).map_err(|error| error.to_string())?;
+        let sample_rate = toc
+            .base_sampling_frequency_hz()
+            .ok_or_else(|| "Raw AC-4 declares no supported sample rate".to_owned())?;
+        let index = SharedMediaIndex::spawn(
+            key,
+            DecodeContainer::RawAc4,
+            Arc::clone(&bytes),
+            None,
+            event_sender,
+        );
+        Ok(Self {
+            path,
+            bytes,
+            container: DecodeContainer::RawAc4,
+            sample_rate,
+            known_duration_frames: None,
+            index,
+            session: new_session(),
+        })
+    }
+
+    fn decode_from(
+        &mut self,
+        key: PlaybackKey,
+        target_frame: u64,
+        discontinuity: bool,
+        command_receiver: &Receiver<WorkerCommand>,
+        event_sender: &Sender<WorkerEvent>,
+        queue: &SharedSceneQueue,
+    ) -> RunControl {
+        match self.try_decode_from(
+            key,
+            target_frame,
+            discontinuity,
+            command_receiver,
+            event_sender,
+            queue,
+        ) {
+            Ok(control) => control,
+            Err(error) => {
+                send_failure(key, &self.path, error, event_sender);
+                RunControl::Complete
+            }
+        }
+    }
+
+    fn try_decode_from(
+        &mut self,
+        key: PlaybackKey,
+        target_frame: u64,
+        discontinuity: bool,
+        command_receiver: &Receiver<WorkerCommand>,
+        event_sender: &Sender<WorkerEvent>,
+        queue: &SharedSceneQueue,
+    ) -> Result<RunControl, String> {
+        if !discontinuity {
+            return match self.container {
+                DecodeContainer::IsoBmff => {
+                    self.decode_initial_mp4(key, command_receiver, event_sender, queue)
+                }
+                DecodeContainer::RawAc4 => {
+                    self.decode_initial_raw(key, command_receiver, event_sender, queue)
+                }
+            };
+        }
+
+        let index = self.index.ready()?;
+        let mut metrics = initial_metrics(
+            self.container,
+            self.sample_rate,
+            Some(index.duration_frames),
+            index.seekable_from_frame,
+            false,
+            target_frame,
+        );
+        if target_frame == index.duration_frames {
+            queue.mark_end_of_stream(key);
+            send_progress(
+                key,
+                &self.path,
+                DecodePhase::EndOfStream,
+                &metrics,
+                event_sender,
+            );
+            return Ok(RunControl::Complete);
+        }
+        let start_index = index.seek_start(target_frame)?;
+        self.session.mark_discontinuity();
+        let target_i64 = i64::try_from(target_frame)
+            .map_err(|_| "Seek target exceeds the signed Scene timeline".to_owned())?;
+        for unit_index in start_index..index.access_units.len() {
+            if let Some(control) = pending_command(command_receiver) {
+                return Ok(control);
+            }
+            let unit = index
+                .access_units
+                .get(unit_index)
+                .ok_or_else(|| "Indexed AC-4 access unit disappeared".to_owned())?;
+            let raw_frame = self
+                .bytes
+                .get(unit.range.clone())
+                .ok_or_else(|| "Indexed AC-4 access unit exceeds the cached source".to_owned())?;
+            let control = decode_access_unit(
+                key,
+                &self.path,
+                &mut self.session,
+                raw_frame,
+                unit.context(),
+                target_i64,
+                &mut metrics,
+                command_receiver,
+                event_sender,
+                queue,
+            )?;
+            if !matches!(control, RunControl::Complete) {
+                return Ok(control);
+            }
+        }
+        finish(key, &self.path, &metrics, event_sender, queue)
+    }
+
+    fn decode_initial_mp4(
+        &mut self,
+        key: PlaybackKey,
+        command_receiver: &Receiver<WorkerCommand>,
+        event_sender: &Sender<WorkerEvent>,
+        queue: &SharedSceneQueue,
+    ) -> Result<RunControl, String> {
+        let (source, timeline, timing) = parse_mp4_timing(&self.bytes)?;
+        let mut metrics = initial_metrics(
+            DecodeContainer::IsoBmff,
+            timing.sample_rate,
+            Some(timing.duration_frames),
+            None,
+            true,
+            0,
+        );
+        for item in source.access_units() {
+            if let Some(control) = pending_command(command_receiver) {
+                return Ok(control);
+            }
+            let access_unit = item.map_err(|error| error.to_string())?;
+            let source_start = timeline
+                .media_time_samples(access_unit.info.composition_time, timing.sample_rate)
+                .map_err(|error| error.to_string())?;
+            let presentation_start = source_start
+                .checked_add(timing.presentation_shift)
+                .ok_or_else(|| {
+                    "MP4 presentation position overflow after applying edits".to_owned()
+                })?;
+            let context = AccessUnitContext::new(u64::from(access_unit.info.index))
+                .with_source_sample_start(source_start)
+                .with_presentation_sample_start(presentation_start)
+                .with_priming_samples(timing.priming_samples)
+                .with_random_access_hint(access_unit.info.is_sync);
+            let control = decode_access_unit(
+                key,
+                &self.path,
+                &mut self.session,
+                access_unit.payload,
+                context,
+                0,
+                &mut metrics,
+                command_receiver,
+                event_sender,
+                queue,
+            )?;
+            if !matches!(control, RunControl::Complete) {
+                return Ok(control);
+            }
+        }
+        finish(key, &self.path, &metrics, event_sender, queue)
+    }
+
+    fn decode_initial_raw(
+        &mut self,
+        key: PlaybackKey,
+        command_receiver: &Receiver<WorkerCommand>,
+        event_sender: &Sender<WorkerEvent>,
+        queue: &SharedSceneQueue,
+    ) -> Result<RunControl, String> {
+        let mut metrics = initial_metrics(
+            DecodeContainer::RawAc4,
+            self.sample_rate,
+            self.known_duration_frames,
+            None,
+            true,
+            0,
+        );
+        let mut frame_start = 0i64;
+        for (index, item) in SyncFrameIter::new(&self.bytes).enumerate() {
+            if let Some(control) = pending_command(command_receiver) {
+                return Ok(control);
+            }
+            let sync_frame = item.map_err(|error| error.to_string())?;
+            let toc = Ac4Toc::parse(sync_frame.raw_frame).map_err(|error| error.to_string())?;
+            let sample_rate = toc
+                .base_sampling_frequency_hz()
+                .ok_or_else(|| "Raw AC-4 declares no supported sample rate".to_owned())?;
+            if sample_rate != self.sample_rate {
+                return Err("Raw AC-4 changes sample rate midstream".to_owned());
+            }
+            let context = AccessUnitContext::new(
+                u64::try_from(index)
+                    .map_err(|_| "Raw AC-4 access-unit index overflow".to_owned())?,
+            )
+            .with_source_sample_start(frame_start)
+            .with_presentation_sample_start(frame_start);
+            let control = decode_access_unit(
+                key,
+                &self.path,
+                &mut self.session,
+                sync_frame.raw_frame,
+                context,
+                0,
+                &mut metrics,
+                command_receiver,
+                event_sender,
+                queue,
+            )?;
+            if !matches!(control, RunControl::Complete) {
+                return Ok(control);
+            }
+            let frame_len = toc
+                .codec_frame_len_base(1)
+                .ok_or_else(|| "Cannot derive raw AC-4 frame length".to_owned())?;
+            frame_start = frame_start
+                .checked_add(i64::from(frame_len))
+                .ok_or_else(|| "Raw AC-4 timeline overflow".to_owned())?;
+        }
+        metrics.duration_frames = Some(
+            u64::try_from(frame_start).map_err(|_| "Raw AC-4 duration is negative".to_owned())?,
+        );
+        finish(key, &self.path, &metrics, event_sender, queue)
+    }
 }
 
 fn new_session() -> Ac4DecoderSession {
@@ -258,11 +717,12 @@ fn new_session() -> Ac4DecoderSession {
 
 #[allow(clippy::too_many_arguments)]
 fn decode_access_unit(
-    request_id: u64,
+    key: PlaybackKey,
     path: &Path,
     session: &mut Ac4DecoderSession,
     raw_frame: &[u8],
     context: AccessUnitContext,
+    target_frame: i64,
     metrics: &mut DecodeMetrics,
     command_receiver: &Receiver<WorkerCommand>,
     event_sender: &Sender<WorkerEvent>,
@@ -280,11 +740,6 @@ fn decode_access_unit(
 
     for frame in decoded.frames() {
         let block = own_scene_frame(frame)?;
-        metrics.presentation_index = block.presentation_index;
-        metrics.presentation_id = block.presentation_id;
-        metrics.object_count = block.objects.len();
-        metrics.has_lfe = block.lfe.is_some();
-        metrics.state_complete = block.state_complete;
         metrics.decoded_scene_frames = metrics.decoded_scene_frames.saturating_add(1);
         metrics.decoded_frames = metrics
             .decoded_frames
@@ -293,8 +748,24 @@ fn decode_access_unit(
             .metadata_updates
             .saturating_add(u64::try_from(block.metadata_updates.len()).unwrap_or(u64::MAX));
 
+        let block_end = block
+            .start_frame()
+            .checked_add(i64::from(block.duration_frames()))
+            .ok_or_else(|| "Decoded Scene block timeline overflow".to_owned())?;
+        if block_end <= target_frame {
+            continue;
+        }
+        if metrics.scene_signature.is_none() {
+            metrics.presentation_index = block.presentation_index;
+            metrics.presentation_id = block.presentation_id;
+            metrics.object_count = block.objects.len();
+            metrics.has_lfe = block.lfe.is_some();
+            metrics.state_complete = block.state_complete;
+            metrics.scene_signature = Some(super::SceneSignature::from_block(&block));
+        }
+
         let control = enqueue_block(
-            request_id,
+            key,
             path,
             block,
             metrics,
@@ -311,7 +782,7 @@ fn decode_access_unit(
 
 #[allow(clippy::too_many_arguments)]
 fn enqueue_block(
-    request_id: u64,
+    key: PlaybackKey,
     path: &Path,
     mut block: DecodedSceneBlock,
     metrics: &mut DecodeMetrics,
@@ -320,7 +791,7 @@ fn enqueue_block(
     queue: &SharedSceneQueue,
 ) -> Result<RunControl, String> {
     loop {
-        match queue.try_push(request_id, block) {
+        match queue.try_push(key, block) {
             Ok(snapshot) => {
                 metrics.buffered_frames = snapshot.buffered_frames;
                 metrics.buffer_capacity_frames = snapshot.capacity_frames;
@@ -329,12 +800,12 @@ fn enqueue_block(
                 } else {
                     DecodePhase::Buffering
                 };
-                send_progress(request_id, path, phase, metrics, event_sender);
+                send_progress(key, path, phase, metrics, event_sender);
                 return Ok(RunControl::Complete);
             }
             Err(QueuePushError::Full(returned)) => {
                 block = *returned;
-                send_progress(request_id, path, DecodePhase::Ready, metrics, event_sender);
+                send_progress(key, path, DecodePhase::Ready, metrics, event_sender);
                 match command_receiver.recv_timeout(COMMAND_POLL_INTERVAL) {
                     Ok(WorkerCommand::Shutdown) | Err(RecvTimeoutError::Disconnected) => {
                         return Ok(RunControl::Shutdown);
@@ -352,7 +823,7 @@ fn enqueue_block(
 }
 
 fn finish(
-    request_id: u64,
+    key: PlaybackKey,
     path: &Path,
     metrics: &DecodeMetrics,
     event_sender: &Sender<WorkerEvent>,
@@ -361,14 +832,8 @@ fn finish(
     if metrics.decoded_scene_frames == 0 {
         return Err("MacinDecode Core produced no scene PCM".to_owned());
     }
-    queue.mark_end_of_stream(request_id);
-    send_progress(
-        request_id,
-        path,
-        DecodePhase::EndOfStream,
-        metrics,
-        event_sender,
-    );
+    queue.mark_end_of_stream(key);
+    send_progress(key, path, DecodePhase::EndOfStream, metrics, event_sender);
     Ok(RunControl::Complete)
 }
 
@@ -376,6 +841,9 @@ fn initial_metrics(
     container: DecodeContainer,
     sample_rate: u32,
     duration_frames: Option<u64>,
+    seekable_from_frame: Option<u64>,
+    indexing: bool,
+    target_frame: u64,
 ) -> DecodeMetrics {
     DecodeMetrics {
         container,
@@ -385,6 +853,7 @@ fn initial_metrics(
         object_count: 0,
         has_lfe: false,
         state_complete: false,
+        scene_signature: None,
         decoded_access_units: 0,
         decoded_scene_frames: 0,
         decoded_frames: 0,
@@ -392,6 +861,10 @@ fn initial_metrics(
         buffer_capacity_frames: u64::from(sample_rate).saturating_mul(super::MAX_BUFFER_SECONDS),
         metadata_updates: 0,
         duration_frames,
+        seekable_from_frame,
+        indexing,
+        index_error: None,
+        target_frame,
     }
 }
 
@@ -502,54 +975,87 @@ fn pending_command(receiver: &Receiver<WorkerCommand>) -> Option<RunControl> {
 }
 
 fn send_progress(
-    request_id: u64,
+    key: PlaybackKey,
     path: &Path,
     phase: DecodePhase,
     metrics: &DecodeMetrics,
     sender: &Sender<WorkerEvent>,
 ) {
     let _ = sender.send(WorkerEvent {
-        request_id,
-        snapshot: DecoderSnapshot::progress(phase, path.to_path_buf(), metrics.clone()),
+        kind: WorkerEventKind::Snapshot {
+            key,
+            snapshot: Box::new(DecoderSnapshot::progress(
+                phase,
+                path.to_path_buf(),
+                metrics.clone(),
+            )),
+        },
     });
 }
 
-fn send_failure(request_id: u64, path: &Path, error: String, sender: &Sender<WorkerEvent>) {
+fn send_failure(key: PlaybackKey, path: &Path, error: String, sender: &Sender<WorkerEvent>) {
     let _ = sender.send(WorkerEvent {
-        request_id,
-        snapshot: DecoderSnapshot::failed(path.to_path_buf(), error),
+        kind: WorkerEventKind::Snapshot {
+            key,
+            snapshot: Box::new(DecoderSnapshot::failed(path.to_path_buf(), error)),
+        },
     });
 }
 
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::sync::atomic::AtomicBool;
     use std::thread;
     use std::time::{Duration, Instant};
 
     use super::super::{DecodePhase, DecoderController};
+    use super::{build_raw_index, parse_mp4_timing};
+
+    fn local_media_path() -> PathBuf {
+        std::env::var_os("MACINDECODE_AC4_TEST_MEDIA")
+            .map(PathBuf::from)
+            .expect("set MACINDECODE_AC4_TEST_MEDIA")
+    }
+
+    fn wait_for_decoder(
+        controller: &mut DecoderController,
+        predicate: impl Fn(&DecoderController) -> bool,
+        description: &str,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            controller.poll();
+            if matches!(controller.snapshot().phase(), DecodePhase::Failed) {
+                panic!(
+                    "decode failed: {}",
+                    controller.snapshot().detail().unwrap_or("unknown error")
+                );
+            }
+            if predicate(controller) {
+                return;
+            }
+            assert!(Instant::now() < deadline, "{description}");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
 
     #[test]
     #[ignore = "requires MACINDECODE_AC4_TEST_MEDIA with local AC-4 media"]
     fn decodes_local_media_into_a_bounded_scene_buffer() {
-        let path = std::env::var_os("MACINDECODE_AC4_TEST_MEDIA")
-            .map(PathBuf::from)
-            .expect("set MACINDECODE_AC4_TEST_MEDIA");
+        let path = local_media_path();
         let mut controller = DecoderController::new();
         controller.ensure_open(&path);
-        let deadline = Instant::now() + Duration::from_secs(30);
-        loop {
-            controller.poll();
-            match controller.snapshot().phase() {
-                DecodePhase::Ready | DecodePhase::EndOfStream => break,
-                DecodePhase::Failed => panic!(
-                    "decode failed: {}",
-                    controller.snapshot().detail().unwrap_or("unknown error")
-                ),
-                _ if Instant::now() >= deadline => panic!("decode did not prebuffer in time"),
-                _ => thread::sleep(Duration::from_millis(10)),
-            }
-        }
+        wait_for_decoder(
+            &mut controller,
+            |controller| {
+                matches!(
+                    controller.snapshot().phase(),
+                    DecodePhase::Ready | DecodePhase::EndOfStream
+                )
+            },
+            "decode did not prebuffer in time",
+        );
         let metrics = controller.snapshot().metrics().expect("decode metrics");
         eprintln!(
             "container={} sample_rate={} presentation={} objects={} lfe={} access_units={} scene_frames={} decoded_frames={} buffered_frames={}",
@@ -568,5 +1074,117 @@ mod tests {
         assert!(metrics.object_count() > 0 || metrics.has_lfe());
         assert!(metrics.buffered_frames() <= metrics.buffer_capacity_frames());
         assert!(controller.try_pop_scene_block().is_some());
+    }
+
+    #[test]
+    #[ignore = "requires MACINDECODE_AC4_TEST_MEDIA with local AC-4 MP4 media"]
+    fn seeks_real_media_across_epochs_without_rereading_the_file() {
+        let path = local_media_path();
+        let mut controller = DecoderController::new();
+        controller.ensure_open(&path);
+        wait_for_decoder(
+            &mut controller,
+            |controller| {
+                controller.snapshot().metrics().is_some_and(|metrics| {
+                    !metrics.is_indexing()
+                        && metrics.index_error().is_none()
+                        && matches!(
+                            controller.snapshot().phase(),
+                            DecodePhase::Ready | DecodePhase::EndOfStream
+                        )
+                })
+            },
+            "seek index did not complete in time",
+        );
+        let metrics = controller.snapshot().metrics().expect("indexed metrics");
+        let duration = metrics.duration_frames().expect("indexed duration");
+        let first_safe = metrics
+            .seekable_from_frame()
+            .expect("safe random access point");
+        assert!(first_safe < duration, "test media has no seekable interval");
+        let first_target = first_safe.saturating_add((duration - first_safe) / 3);
+        let second_target = first_safe.saturating_add((duration - first_safe) * 2 / 3);
+
+        let initial_epoch = controller.playback_epoch();
+        controller.seek(first_target).expect("first seek");
+        controller
+            .seek(second_target)
+            .expect("rapid replacement seek");
+        assert_eq!(controller.playback_epoch(), initial_epoch + 2);
+        wait_for_decoder(
+            &mut controller,
+            |controller| {
+                controller.snapshot().metrics().is_some_and(|metrics| {
+                    metrics.target_frame() == second_target
+                        && matches!(
+                            controller.snapshot().phase(),
+                            DecodePhase::Ready | DecodePhase::EndOfStream
+                        )
+                })
+            },
+            "replacement seek did not prebuffer in time",
+        );
+        let first_block = controller
+            .try_pop_scene_block()
+            .expect("seek should produce a Scene block");
+        let block_end = first_block
+            .start_frame()
+            .saturating_add(i64::from(first_block.duration_frames()));
+        assert!(block_end > i64::try_from(second_target).unwrap_or(i64::MAX));
+
+        controller.seek(duration).expect("seek to EOS");
+        wait_for_decoder(
+            &mut controller,
+            |controller| matches!(controller.snapshot().phase(), DecodePhase::EndOfStream),
+            "seek to EOS did not complete",
+        );
+        controller
+            .seek(first_target)
+            .expect("seek backward from EOS");
+        wait_for_decoder(
+            &mut controller,
+            |controller| {
+                controller.snapshot().metrics().is_some_and(|metrics| {
+                    metrics.target_frame() == first_target
+                        && matches!(controller.snapshot().phase(), DecodePhase::Ready)
+                })
+            },
+            "backward seek from EOS did not prebuffer",
+        );
+    }
+
+    #[test]
+    #[ignore = "requires MACINDECODE_AC4_TEST_MEDIA with local AC-4 MP4 media"]
+    fn indexes_an_in_memory_raw_sync_stream_built_from_mp4_access_units() {
+        let bytes = std::fs::read(local_media_path()).expect("read local media once for test");
+        let (source, _, _) = parse_mp4_timing(&bytes).expect("parse AC-4 MP4");
+        let mut sync_stream = Vec::new();
+        let mut access_unit_count = 0usize;
+        for item in source.access_units() {
+            let access_unit = item.expect("bounded MP4 access unit");
+            append_plain_sync_frame(&mut sync_stream, access_unit.payload);
+            access_unit_count += 1;
+        }
+        let index = build_raw_index(&sync_stream, &AtomicBool::new(false))
+            .expect("index raw sync stream")
+            .expect("index was not cancelled");
+        assert_eq!(index.access_units.len(), access_unit_count);
+        assert!(index.duration_frames > 0);
+        assert!(index.seekable_from_frame.is_some());
+    }
+
+    fn append_plain_sync_frame(stream: &mut Vec<u8>, raw_frame: &[u8]) {
+        stream.extend_from_slice(&[0xAC, 0x40]);
+        if let Ok(short) = u16::try_from(raw_frame.len())
+            && short != u16::MAX
+        {
+            stream.extend_from_slice(&short.to_be_bytes());
+        } else {
+            let extended = u32::try_from(raw_frame.len()).expect("AC-4 AU length fits u32");
+            assert!(extended <= 0x00FF_FFFF, "AC-4 AU length fits 24 bits");
+            stream.extend_from_slice(&u16::MAX.to_be_bytes());
+            stream.extend_from_slice(&extended.to_be_bytes()[1..]);
+        }
+        stream.extend_from_slice(raw_frame);
     }
 }

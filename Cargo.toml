@@ -15,6 +15,7 @@ resolver = "3"
 eframe = { version = "=0.36.1", default-features = false, features = [
     "accesskit",
     "default_fonts",
+    "persistence",
     "wayland",
     "wgpu",
     "x11",
@@ -26,6 +27,7 @@ rfd = { version = "=0.17.2", default-features = false, features = [
     "xdg-portal",
 ] }
 serde_json = "1"
+serde = { version = "1", features = ["derive"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 macindecode-ac4-bitstream = { git = "https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git", rev = "eb7c6132072daad3b4312bd23c2d9e8a63fa1265" }

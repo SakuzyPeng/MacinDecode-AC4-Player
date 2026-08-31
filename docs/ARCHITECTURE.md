@@ -31,14 +31,18 @@ GUI、播放协调器和解码适配器均留在 Rust 进程内，直接依赖
   `macindecode-ac4-bitstream` 与 `macindecode-ac4-scene(audio-decode)`；
 - `decoder::windows` 把 Core 的借用 Scene view 复制为播放器自有的对象/LFE PCM、稳定元素 ID、
   起点状态与 ramp 更新，Core 类型不会越过该适配边界；
-- Scene FIFO 最多保存 2 秒 PCM，300 ms 即可进入 ready。切换来源会递增 request generation，
-  清空旧 FIFO，并使旧 worker 输出无法重新进入新来源；
+- 活动压缩文件只读一次并保存在当前 request；初始顺序解码立即开始，独立 worker 并行建立 AU 时间线
+  与 Full random-access 索引；
+- Scene FIFO 最多保存 2 秒 PCM，300 ms 即可进入 ready。切换来源递增 request ID，seek、Stop 和
+  自动恢复递增 playback epoch；组合 key 使旧 worker 输出无法重新进入当前来源；
 - `backend::source` 在任意 Windows render quantum 上消费 Scene FIFO，裁剪负时间和重叠、为空隙补零，
   并在 quantum 起点计算 OAMD ramp 状态；
 - `backend::windows` 把播放器语义适配为独立 native crate 的安全接口，不把 COM 类型泄漏到播放器；
-- `crates/windows-spatial-audio` 是唯一允许 `unsafe` 的边界，负责默认端点、COM 对象流、动态对象、
-  静态 LFE、事件等待和原始 `f32` buffer；主程序仍设置 `unsafe_code = "forbid"`；
-- `app` 连接 Play/Pause、Stop 回到开头、音量/静音和真实输出诊断。seek 与设备切换仍未实现。
+- `crates/windows-spatial-audio` 是唯一允许 `unsafe` 的边界，负责 endpoint 枚举/选择、COM 对象流、
+  动态对象、静态 LFE、事件等待、source replacement 和原始 `f32` buffer；主程序仍设置
+  `unsafe_code = "forbid"`；
+- `app` 连接 Play/Pause、精确 seek、Stop、持久化设备选择、断开回退/恢复、拓扑自动重建、音量/静音
+  和真实输出诊断。
 
 Core 的 MP4 入口当前要求完整文件切片，因此 decode worker 会先把压缩源读入内存；有界约束针对
 解码后的对象 PCM。后续若 Core 增加 seekable source API，可替换容器读取层而不改变 Scene FIFO
@@ -50,4 +54,5 @@ Core 的 MP4 入口当前要求完整文件切片，因此 decode worker 会先�
 2. 接入 Scene/Decode crate，增加 Windows decode worker 与有界 FIFO（已完成首版）。
 3. 让 Windows Spatial Audio 后端消费 FIFO，并保持另一后端的能力协商契约（已完成首版）。
 4. 增加 Play/Pause、Stop、欠载诊断与真实文件回归（已完成首版）。
-5. 增加 seek、设备切换与 macOS AU Spatial Mixer。
+5. 增加 seek、Windows 设备切换与无重开恢复（已完成）。
+6. 接入 macOS AU Spatial Mixer。

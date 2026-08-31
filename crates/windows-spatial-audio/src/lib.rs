@@ -6,22 +6,23 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 
+use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows::Win32::Media::Audio::{
     AudioCategory_Media, AudioObjectType_Dynamic, AudioObjectType_LowFrequency,
-    AudioObjectType_None, IMMDevice, IMMDeviceEnumerator, ISpatialAudioClient, ISpatialAudioObject,
-    ISpatialAudioObjectRenderStream, MMDeviceEnumerator,
+    AudioObjectType_None, DEVICE_STATE_ACTIVE, IMMDevice, IMMDeviceEnumerator, ISpatialAudioClient,
+    ISpatialAudioObject, ISpatialAudioObjectRenderStream, MMDeviceEnumerator,
     SpatialAudioObjectRenderStreamActivationParams, WAVEFORMATEX, eConsole, eRender,
 };
 use windows::Win32::Media::Multimedia::WAVE_FORMAT_IEEE_FLOAT;
 use windows::Win32::System::Com::StructuredStorage::{PROPVARIANT, PROPVARIANT_0_0};
 use windows::Win32::System::Com::{
     CLSCTX_ALL, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
-    CoTaskMemAlloc, CoUninitialize,
+    CoTaskMemAlloc, CoTaskMemFree, CoUninitialize, STGM_READ,
 };
 use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 use windows::Win32::System::Variant::VT_BLOB;
-use windows::core::Error as WindowsError;
+use windows::core::{Error as WindowsError, HSTRING};
 
 const COMMAND_WAIT_MILLISECONDS: u32 = 50;
 
@@ -38,12 +39,14 @@ pub enum RenderPhase {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderSnapshot {
     pub phase: RenderPhase,
+    pub device_id: Option<String>,
     pub device_label: String,
     pub max_dynamic_objects: u32,
     pub reserved_dynamic_objects: u32,
     pub active_dynamic_objects: u32,
     pub render_updates: u64,
     pub submitted_frames: u64,
+    pub playhead_frames: u64,
     pub object_buffer_submissions: u64,
     pub position_updates: u64,
     pub underruns: u64,
@@ -54,12 +57,14 @@ impl RenderSnapshot {
     fn initializing(reserved_dynamic_objects: u32) -> Self {
         Self {
             phase: RenderPhase::Initializing,
+            device_id: None,
             device_label: "Default Windows audio endpoint".to_owned(),
             max_dynamic_objects: 0,
             reserved_dynamic_objects,
             active_dynamic_objects: 0,
             render_updates: 0,
             submitted_frames: 0,
+            playhead_frames: 0,
             object_buffer_submissions: 0,
             position_updates: 0,
             underruns: 0,
@@ -68,11 +73,28 @@ impl RenderSnapshot {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OutputDeviceSelection {
+    SystemDefault,
+    EndpointId(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioDeviceInfo {
+    pub id: String,
+    pub label: String,
+    pub is_default: bool,
+    pub max_dynamic_objects: Option<u32>,
+    pub spatial_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamConfig {
     pub sample_rate: u32,
     pub dynamic_object_count: u32,
     pub has_lfe: bool,
+    pub start_frame: u64,
+    pub output_device: OutputDeviceSelection,
 }
 
 #[derive(Debug)]
@@ -109,11 +131,14 @@ pub trait SpatialSource: Send + 'static {
     fn render(&mut self, frame_count: u32) -> Result<RenderQuantum, String>;
 }
 
-#[derive(Debug)]
 enum Command {
     Play,
     Pause,
     SetMasterGain(f32),
+    ReplaceSource {
+        source: Box<dyn SpatialSource>,
+        start_frame: u64,
+    },
     Shutdown,
 }
 
@@ -130,7 +155,7 @@ impl Renderer {
     ///
     /// Returns an error when the stream configuration is empty or the worker thread cannot start.
     pub fn spawn(config: StreamConfig, source: Box<dyn SpatialSource>) -> Result<Self, String> {
-        validate_config(config)?;
+        validate_config(&config)?;
         let (command_sender, command_receiver) = mpsc::channel();
         let snapshot = Arc::new(Mutex::new(RenderSnapshot::initializing(
             config.dynamic_object_count,
@@ -161,6 +186,13 @@ impl Renderer {
             .send(Command::SetMasterGain(sanitize_gain(gain)));
     }
 
+    pub fn replace_source(&self, source: Box<dyn SpatialSource>, start_frame: u64) {
+        let _ = self.command_sender.send(Command::ReplaceSource {
+            source,
+            start_frame,
+        });
+    }
+
     #[must_use]
     pub fn snapshot(&self) -> RenderSnapshot {
         lock_recover(&self.snapshot).clone()
@@ -176,7 +208,7 @@ impl Drop for Renderer {
     }
 }
 
-fn validate_config(config: StreamConfig) -> Result<(), String> {
+fn validate_config(config: &StreamConfig) -> Result<(), String> {
     if config.sample_rate == 0 {
         return Err("Windows Spatial Audio requires a nonzero sample rate".to_owned());
     }
@@ -186,14 +218,105 @@ fn validate_config(config: StreamConfig) -> Result<(), String> {
     Ok(())
 }
 
+/// Enumerates active Windows render endpoints and probes their Spatial Audio capacity.
+///
+/// # Errors
+///
+/// Returns an error when COM or the Windows endpoint enumerator cannot be initialized.
+pub fn enumerate_output_devices() -> Result<Vec<AudioDeviceInfo>, String> {
+    let _apartment = ComApartment::initialize()?;
+    let enumerator = create_device_enumerator()?;
+    let default_id = unsafe { enumerator.GetDefaultAudioEndpoint(eRender, eConsole) }
+        .ok()
+        .and_then(|endpoint| endpoint_id(&endpoint).ok());
+    let collection = unsafe { enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE) }
+        .map_err(|error| format_windows_error("Enumerating active audio endpoints", &error))?;
+    let count = unsafe { collection.GetCount() }
+        .map_err(|error| format_windows_error("Reading the audio endpoint count", &error))?;
+    let mut devices = Vec::with_capacity(usize::try_from(count).unwrap_or(usize::MAX));
+    for index in 0..count {
+        let endpoint = unsafe { collection.Item(index) }.map_err(|error| {
+            format_windows_error("Opening an enumerated audio endpoint", &error)
+        })?;
+        let id = endpoint_id(&endpoint)?;
+        let label = endpoint_label(&endpoint).unwrap_or_else(|| id.clone());
+        let capacity =
+            unsafe { endpoint.Activate::<ISpatialAudioClient>(CLSCTX_INPROC_SERVER, None) }
+                .and_then(|client| unsafe { client.GetMaxDynamicObjectCount() });
+        let (max_dynamic_objects, spatial_error) = match capacity {
+            Ok(value) => (Some(value), None),
+            Err(error) => (
+                None,
+                Some(format_windows_error(
+                    "Probing Spatial Audio support",
+                    &error,
+                )),
+            ),
+        };
+        devices.push(AudioDeviceInfo {
+            is_default: default_id.as_deref() == Some(id.as_str()),
+            id,
+            label,
+            max_dynamic_objects,
+            spatial_error,
+        });
+    }
+    devices.sort_by(|left, right| {
+        left.label
+            .to_lowercase()
+            .cmp(&right.label.to_lowercase())
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    Ok(devices)
+}
+
+fn create_device_enumerator() -> Result<IMMDeviceEnumerator, String> {
+    unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }
+        .map_err(|error| format_windows_error("Creating the audio device enumerator", &error))
+}
+
+fn selected_endpoint(
+    enumerator: &IMMDeviceEnumerator,
+    selection: &OutputDeviceSelection,
+) -> Result<IMMDevice, String> {
+    match selection {
+        OutputDeviceSelection::SystemDefault => {
+            unsafe { enumerator.GetDefaultAudioEndpoint(eRender, eConsole) }
+                .map_err(|error| format_windows_error("Opening the default audio endpoint", &error))
+        }
+        OutputDeviceSelection::EndpointId(id) => {
+            let id = HSTRING::from(id.as_str());
+            unsafe { enumerator.GetDevice(&id) }.map_err(|error| {
+                format_windows_error("Opening the selected audio endpoint", &error)
+            })
+        }
+    }
+}
+
+fn endpoint_id(endpoint: &IMMDevice) -> Result<String, String> {
+    let value = unsafe { endpoint.GetId() }
+        .map_err(|error| format_windows_error("Reading the audio endpoint ID", &error))?;
+    let result = unsafe { value.to_string() }
+        .map_err(|error| format!("Audio endpoint ID is not valid UTF-16: {error}"));
+    unsafe { CoTaskMemFree(Some(value.as_ptr().cast())) };
+    result
+}
+
+fn endpoint_label(endpoint: &IMMDevice) -> Option<String> {
+    let store = unsafe { endpoint.OpenPropertyStore(STGM_READ) }.ok()?;
+    let value = unsafe { store.GetValue(&raw const PKEY_Device_FriendlyName) }.ok()?;
+    let label = value.to_string();
+    (!label.trim().is_empty()).then_some(label)
+}
+
 fn render_worker(
     config: StreamConfig,
-    mut source: Box<dyn SpatialSource>,
+    source: Box<dyn SpatialSource>,
     commands: &Receiver<Command>,
     snapshot: &Arc<Mutex<RenderSnapshot>>,
 ) {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        run_render_loop(config, source.as_mut(), commands, snapshot)
+        run_render_loop(config, source, commands, snapshot)
     }));
     match result {
         Ok(Ok(())) => {}
@@ -204,22 +327,31 @@ fn render_worker(
 
 fn run_render_loop(
     config: StreamConfig,
-    source: &mut dyn SpatialSource,
+    mut source: Box<dyn SpatialSource>,
     commands: &Receiver<Command>,
     snapshot: &Arc<Mutex<RenderSnapshot>>,
 ) -> Result<(), String> {
     let _apartment = ComApartment::initialize()?;
-    let mut context = SpatialContext::open(config)?;
+    let mut context = SpatialContext::open(&config)?;
     {
         let mut state = lock_recover(snapshot);
         state.phase = RenderPhase::Ready;
+        state.device_id = Some(context.device_id.clone());
+        state.device_label.clone_from(&context.device_label);
         state.max_dynamic_objects = context.max_dynamic_objects;
+        state.playhead_frames = config.start_frame;
     }
 
     let mut playing = false;
     let mut master_gain = 1.0f32;
     loop {
-        if process_commands(commands, &mut playing, &mut master_gain, snapshot) {
+        if process_commands(
+            commands,
+            &mut playing,
+            &mut master_gain,
+            &mut source,
+            snapshot,
+        ) {
             return Ok(());
         }
 
@@ -257,6 +389,9 @@ fn run_render_loop(
             state.submitted_frames = state
                 .submitted_frames
                 .saturating_add(u64::from(outcome.frames_written));
+            state.playhead_frames = state
+                .playhead_frames
+                .saturating_add(u64::from(outcome.frames_written));
             state.object_buffer_submissions = state
                 .object_buffer_submissions
                 .saturating_add(u64::from(outcome.object_buffer_submissions));
@@ -293,6 +428,7 @@ fn process_commands(
     commands: &Receiver<Command>,
     playing: &mut bool,
     master_gain: &mut f32,
+    source: &mut Box<dyn SpatialSource>,
     snapshot: &Arc<Mutex<RenderSnapshot>>,
 ) -> bool {
     loop {
@@ -306,6 +442,21 @@ fn process_commands(
                 lock_recover(snapshot).phase = RenderPhase::Paused;
             }
             Ok(Command::SetMasterGain(gain)) => *master_gain = sanitize_gain(gain),
+            Ok(Command::ReplaceSource {
+                source: replacement,
+                start_frame,
+            }) => {
+                *source = replacement;
+                let mut state = lock_recover(snapshot);
+                state.playhead_frames = start_frame;
+                state.active_dynamic_objects = 0;
+                state.error = None;
+                state.phase = if *playing {
+                    RenderPhase::Playing
+                } else {
+                    RenderPhase::Paused
+                };
+            }
             Ok(Command::Shutdown) | Err(TryRecvError::Disconnected) => return true,
             Err(TryRecvError::Empty) => return false,
         }
@@ -380,23 +531,23 @@ struct SpatialContext {
     has_lfe: bool,
     reserved_dynamic_objects: u32,
     max_dynamic_objects: u32,
+    device_id: String,
+    device_label: String,
     _activation: PROPVARIANT,
     _params: Box<SpatialAudioObjectRenderStreamActivationParams>,
     _format: Box<WAVEFORMATEX>,
 }
 
 impl SpatialContext {
-    fn open(config: StreamConfig) -> Result<Self, String> {
-        let enumerator: IMMDeviceEnumerator =
-            unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }.map_err(
-                |error| format_windows_error("Creating the audio device enumerator", &error),
-            )?;
-        let endpoint = unsafe { enumerator.GetDefaultAudioEndpoint(eRender, eConsole) }
-            .map_err(|error| format_windows_error("Opening the default audio endpoint", &error))?;
+    fn open(config: &StreamConfig) -> Result<Self, String> {
+        let enumerator = create_device_enumerator()?;
+        let endpoint = selected_endpoint(&enumerator, &config.output_device)?;
+        let device_id = endpoint_id(&endpoint)?;
+        let device_label = endpoint_label(&endpoint).unwrap_or_else(|| device_id.clone());
         let client: ISpatialAudioClient = unsafe { endpoint.Activate(CLSCTX_INPROC_SERVER, None) }
             .map_err(|error| {
                 format_windows_error(
-                    "Activating ISpatialAudioClient on the default endpoint",
+                    "Activating ISpatialAudioClient on the selected endpoint",
                     &error,
                 )
             })?;
@@ -404,7 +555,7 @@ impl SpatialContext {
             .map_err(|error| format_windows_error("Reading dynamic-object capacity", &error))?;
         if max_dynamic_objects < config.dynamic_object_count {
             return Err(format!(
-                "Default endpoint provides {max_dynamic_objects} dynamic objects, but the scene requires {}",
+                "Selected endpoint provides {max_dynamic_objects} dynamic objects, but the scene requires {}",
                 config.dynamic_object_count
             ));
         }
@@ -449,6 +600,8 @@ impl SpatialContext {
             has_lfe: config.has_lfe,
             reserved_dynamic_objects: config.dynamic_object_count,
             max_dynamic_objects,
+            device_id,
+            device_label,
             _activation: activation,
             _params: params,
             _format: format,
@@ -783,6 +936,14 @@ mod tests {
 
     struct OneQuantumSource;
 
+    struct EmptySource;
+
+    impl SpatialSource for EmptySource {
+        fn render(&mut self, _frame_count: u32) -> Result<RenderQuantum, String> {
+            Err("old source must have been replaced".to_owned())
+        }
+    }
+
     impl SpatialSource for OneQuantumSource {
         fn render(&mut self, frame_count: u32) -> Result<RenderQuantum, String> {
             let samples = usize::try_from(frame_count)
@@ -820,6 +981,39 @@ mod tests {
     }
 
     #[test]
+    fn replacing_a_source_resets_the_absolute_playhead_and_preserves_play_state() {
+        let (sender, receiver) = mpsc::channel();
+        let snapshot = Arc::new(Mutex::new(RenderSnapshot::initializing(1)));
+        let mut source: Box<dyn SpatialSource> = Box::new(EmptySource);
+        let mut playing = true;
+        let mut gain = 0.5;
+        sender
+            .send(Command::ReplaceSource {
+                source: Box::new(OneQuantumSource),
+                start_frame: 96_000,
+            })
+            .expect("queue source replacement");
+
+        assert!(!process_commands(
+            &receiver,
+            &mut playing,
+            &mut gain,
+            &mut source,
+            &snapshot,
+        ));
+        let state = lock_recover(&snapshot).clone();
+        assert_eq!(state.playhead_frames, 96_000);
+        assert_eq!(state.phase, RenderPhase::Playing);
+        assert_eq!(
+            source
+                .render(32)
+                .expect("replacement source")
+                .frames_written,
+            32
+        );
+    }
+
+    #[test]
     #[ignore = "requires a Spatial Audio-capable default endpoint"]
     fn ended_renderer_releases_objects_without_entering_failed_state() {
         let renderer = Renderer::spawn(
@@ -827,6 +1021,8 @@ mod tests {
                 sample_rate: 48_000,
                 dynamic_object_count: 1,
                 has_lfe: false,
+                start_frame: 0,
+                output_device: OutputDeviceSelection::SystemDefault,
             },
             Box::new(OneQuantumSource),
         )
