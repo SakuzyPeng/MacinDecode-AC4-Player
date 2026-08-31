@@ -146,18 +146,14 @@ impl MediaIndex {
         })
     }
 
-    fn seek_start(&self, target_frame: u64) -> Result<usize, String> {
-        let target = i64::try_from(target_frame)
-            .map_err(|_| "Seek target exceeds the signed Scene timeline".to_owned())?;
+    fn seek_start_before(&self, target_frame: i64, before_index: usize) -> Option<usize> {
         self.access_units
             .iter()
             .enumerate()
+            .take(before_index)
             .rev()
-            .find(|(_, unit)| unit.safe_random_access && unit.presentation_start <= target)
+            .find(|(_, unit)| unit.safe_random_access && unit.presentation_start <= target_frame)
             .map(|(index, _)| index)
-            .ok_or_else(|| {
-                "No complete random-access point exists at or before the seek target".to_owned()
-            })
     }
 }
 
@@ -539,15 +535,15 @@ impl LoadedMedia {
         }
 
         let index = self.index.ready()?;
-        let mut metrics = initial_metrics(
-            self.container,
-            self.sample_rate,
-            Some(index.duration_frames),
-            index.seekable_from_frame,
-            false,
-            target_frame,
-        );
         if target_frame == index.duration_frames {
+            let metrics = initial_metrics(
+                self.container,
+                self.sample_rate,
+                Some(index.duration_frames),
+                index.seekable_from_frame,
+                false,
+                target_frame,
+            );
             queue.mark_end_of_stream(key);
             send_progress(
                 key,
@@ -558,39 +554,67 @@ impl LoadedMedia {
             );
             return Ok(RunControl::Complete);
         }
-        let start_index = index.seek_start(target_frame)?;
-        self.session.reset();
         let target_i64 = i64::try_from(target_frame)
             .map_err(|_| "Seek target exceeds the signed Scene timeline".to_owned())?;
-        for unit_index in start_index..index.access_units.len() {
-            if let Some(control) = pending_command(command_receiver) {
-                return Ok(control);
-            }
-            let unit = index
-                .access_units
-                .get(unit_index)
-                .ok_or_else(|| "Indexed AC-4 access unit disappeared".to_owned())?;
-            let raw_frame = self
-                .bytes
-                .get(unit.range.clone())
-                .ok_or_else(|| "Indexed AC-4 access unit exceeds the cached source".to_owned())?;
-            let control = decode_access_unit(
-                key,
-                &self.path,
-                &mut self.session,
-                raw_frame,
-                unit.context(),
-                target_i64,
-                &mut metrics,
-                command_receiver,
-                event_sender,
-                queue,
-            )?;
-            if !matches!(control, RunControl::Complete) {
-                return Ok(control);
+        let mut before_index = index.access_units.len();
+        loop {
+            let start_index = index
+                .seek_start_before(target_i64, before_index)
+                .ok_or_else(|| {
+                    "No usable complete random-access point exists at or before the seek target"
+                        .to_owned()
+                })?;
+            self.session.reset();
+            let mut metrics = initial_metrics(
+                self.container,
+                self.sample_rate,
+                Some(index.duration_frames),
+                index.seekable_from_frame,
+                false,
+                target_frame,
+            );
+            let attempt = (|| {
+                for unit_index in start_index..index.access_units.len() {
+                    if let Some(control) = pending_command(command_receiver) {
+                        return Ok(control);
+                    }
+                    let unit = index
+                        .access_units
+                        .get(unit_index)
+                        .ok_or_else(|| "Indexed AC-4 access unit disappeared".to_owned())?;
+                    let raw_frame = self.bytes.get(unit.range.clone()).ok_or_else(|| {
+                        "Indexed AC-4 access unit exceeds the cached source".to_owned()
+                    })?;
+                    let control = decode_access_unit(
+                        key,
+                        &self.path,
+                        &mut self.session,
+                        raw_frame,
+                        unit.context(),
+                        target_i64,
+                        &mut metrics,
+                        command_receiver,
+                        event_sender,
+                        queue,
+                    )?;
+                    if !matches!(control, RunControl::Complete) {
+                        return Ok(control);
+                    }
+                }
+                finish(key, &self.path, &metrics, event_sender, queue)
+            })();
+            match attempt {
+                Ok(control) => return Ok(control),
+                Err(error) if metrics.buffered_frames == 0 => {
+                    if index.seek_start_before(target_i64, start_index).is_none() {
+                        return Err(error);
+                    }
+                    before_index = start_index;
+                    queue.reset(key);
+                }
+                Err(error) => return Err(error),
             }
         }
-        finish(key, &self.path, &metrics, event_sender, queue)
     }
 
     fn decode_initial_mp4(
