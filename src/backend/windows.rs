@@ -14,7 +14,7 @@ use super::{
 use crate::decoder::SceneQueueReader;
 
 pub(super) fn spawn(
-    config: OutputStreamConfig,
+    config: &OutputStreamConfig,
     reader: SceneQueueReader,
 ) -> Result<Renderer, String> {
     Renderer::spawn(

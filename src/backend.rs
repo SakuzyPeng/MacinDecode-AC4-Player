@@ -324,7 +324,7 @@ impl SpatialOutputController {
         self.reset();
         self.config = Some(config.clone());
         #[cfg(target_os = "windows")]
-        match windows::spawn(config.clone(), reader) {
+        match windows::spawn(config, reader) {
             Ok(renderer) => {
                 renderer.set_master_gain(self.master_gain);
                 self.renderer = Some(renderer);

@@ -267,9 +267,9 @@ struct Mp4Timing {
     duration_frames: u64,
 }
 
-fn parse_mp4_timing<'a>(
-    bytes: &'a [u8],
-) -> Result<(Ac4Mp4<'a>, Ac4Mp4Timeline<MAX_MP4_EDIT_ENTRIES>, Mp4Timing), String> {
+fn parse_mp4_timing(
+    bytes: &[u8],
+) -> Result<(Ac4Mp4<'_>, Ac4Mp4Timeline<MAX_MP4_EDIT_ENTRIES>, Mp4Timing), String> {
     let source = Ac4Mp4::parse(bytes).map_err(|error| error.to_string())?;
     let timeline = source
         .presentation_timeline::<MAX_MP4_EDIT_ENTRIES>()

@@ -5,7 +5,8 @@ use macindecode_windows_spatial_audio::{
 };
 
 use crate::decoder::{
-    DecodedSceneBlock, SceneQueueReader, SceneSignature, SpatialObjectState, SpatialPosition,
+    DecodedSceneBlock, SceneLfePcm, SceneObjectPcm, SceneQueueReader, SceneSignature,
+    SpatialObjectState, SpatialPosition,
 };
 
 pub(super) struct SceneRenderSource {
@@ -36,7 +37,7 @@ impl SceneRenderSource {
             timeline_frame: if start_frame > i64::MAX as u64 {
                 i64::MAX
             } else {
-                start_frame as i64
+                start_frame.cast_signed()
             },
             current: None,
         }
@@ -198,13 +199,13 @@ fn validate_block(
     let mut actual_object_ids = block
         .objects()
         .iter()
-        .map(|object| object.element_id())
+        .map(SceneObjectPcm::element_id)
         .collect::<Vec<_>>();
     actual_object_ids.sort_unstable();
     if actual_object_ids != expected_signature.object_element_ids() {
         return Err("Scene dynamic-object element IDs changed during playback".to_owned());
     }
-    if block.lfe().map(|component| component.element_id()) != expected_signature.lfe_element_id() {
+    if block.lfe().map(SceneLfePcm::element_id) != expected_signature.lfe_element_id() {
         return Err("Scene LFE element ID changed during playback".to_owned());
     }
     for object in block.objects() {
