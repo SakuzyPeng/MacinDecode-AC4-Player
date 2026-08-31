@@ -1,37 +1,54 @@
 # MacinDecode AC-4 Player
 
-一个纯 Rust、原生桌面的 AC-4 空间音频播放器。当前 Windows 路径已串联
-`MacinDecode-AC4-Core` Full A-JOC 解码、有限 Scene FIFO 与 Windows Spatial Audio，
-并保持解码、播放协调和平台输出之间的窄边界。
+一个用于打开、检查和播放 AC-4 空间音频文件的原生桌面应用。Windows 版本支持实际播放，
+macOS 版本目前用于查看文件信息。
 
-## 当前能力
+## 使用
 
-- Windows、macOS 原生窗口，基于 `egui`/`eframe` 的 Winit + WGPU 后端。
-- 多选或拖入 `.m4a`、`.mp4`、`.ac4` 文件，组成可选择、可移除的播放列表。
-- 后台检查当前条目的容器与 AC-4 元数据，展示紧凑摘要和分区详情。
-- Windows 后台按 MP4 sample table 或裸流 sync frame 把有界 AU 交给
-  `Ac4DecoderSession(audio-decode)`，取得 normalized planar `f32` 对象/LFE PCM 与 OAMD。
-- 解码 PCM 进入最多 2 秒的有界 Scene FIFO；达到 300 ms 后报告可用，不把整段 PCM 累积到内存。
-- 展示真实对象数、LFE、元数据完整性、解码 AU/Scene frame 和缓冲状态。
-- Windows 默认输出端点通过 `ISpatialAudioClient` 创建事件驱动的对象流；Scene 对象映射为动态对象，
-  LFE 映射为一个静态 Low Frequency 对象。
-- Play/Pause、Stop 回到开头、主音量与静音已连接真实空间流；诊断窗口展示端点容量、对象提交、
-  render update、位置更新和欠载计数。
-- 主程序继续 `forbid(unsafe_code)`；Windows COM、原始对象缓冲区和 `PROPVARIANT` 生命周期封装在
-  独立的 `windows-spatial-audio` crate 中。
+1. 启动应用，点击添加文件或直接把文件拖入窗口。
+2. 从播放列表中选择要播放的内容。
+3. 在 Windows 上使用播放、暂停、停止、音量和静音控制。
+4. 如需排查文件或播放问题，可打开详情与诊断窗口。
 
-## 当前限制
+支持 `.m4a`、`.mp4` 和 `.ac4` 文件；文件本身需要包含 AC-4 音频。
 
-- 暂不实现 macOS 音频解码；macOS 仍保留 GUI 与 inspection。
-- Windows 只使用系统默认 render endpoint，尚无设备选择；尚无 seek 和上一曲控制。
-- OAMD ramp 会在每个 Windows render quantum 起点取样并插值，quantum 内不做逐采样位置变化。
-- 播放中若 Scene configuration generation、对象/LFE 拓扑或所选 presentation 改变，当前 Windows
-  对象流会明确报错；需要重新打开来源后按新配置激活，暂不支持流内动态重配置。
-- 不应用响度、DRC、Dialogue Enhancement 或额外 downmix；Scene PCM 保持 Core 的 normalized 输出。
-- 不调用 Windows 系统媒体解码器；压缩 AC-4 始终交给锁定版本的 `MacinDecode-AC4-Core`。
-- 不包含 WebView、HTML、CSS、JavaScript 或 WebAssembly 构建入口。
+## 主要功能
 
-## 开发
+- 一次添加多个文件，并在播放列表中选择或移除内容。
+- 查看容器、节目、对象数量、低频声道和其他 AC-4 信息。
+- 在 Windows 默认音频设备上播放 Full A-JOC 空间音频。
+- 显示缓冲、解码和输出状态，便于判断文件是否可播放。
+
+## Windows 播放要求
+
+- 回放能力取决于当前 Windows 空间声音格式可提供的动态音频对象数量。
+- AC-4 L3 最多包含 16 个对象，可在 Windows 10 的 Dolby Atmos 耳机或内置扬声器路径上回放。
+- AC-4 L4 需要 20 个对象；上述 Dolby Atmos 路径需要更新后的 Windows 11，较早版本只提供 16 个对象。
+  Dolby Atmos 家庭影院（HDMI）路径在较早的 Windows 版本上也可提供 20 个对象。
+- 使用 Dolby Atmos 时需要安装 Dolby Access，并在 Windows 中启用对应的空间声音格式；
+  Windows Spatial Audio API 本身不强制使用 Dolby Atmos。
+
+对象数量限制见 Microsoft 的
+[Spatial Sound runtime resource limits](https://github.com/MicrosoftDocs/win32/blob/docs/desktop-src/CoreAudio/spatial-sound.md#microsoft-spatial-sound-runtime-resource-implications)。
+
+## 平台与限制
+
+- Windows：支持文件检查、解码和空间音频播放。
+- macOS：目前仅支持界面和文件检查，不支持音频解码与播放。
+- 当前聚焦 Full A-JOC 内容，其他 AC-4 编码形式可能无法播放。
+- 目前只能使用 Windows 默认音频设备，尚不支持进度跳转和上一曲。
+- 停止播放会回到文件开头；播放中音频布局发生变化时，可能需要重新打开文件。
+- 不自动应用响度调整、动态范围控制、对白增强或额外降混。
+
+实际空间音频效果取决于文件内容、Windows 版本和输出设备能力。
+
+## 后续计划
+
+- 增加面向扬声器系统的空间音频渲染。
+- 在 Apple 平台接入 AU Spatial Mixer。
+- 适配头部追踪交互；Windows 版本也会提供对应功能，但使用鼠标或其他指针输入模拟头部朝向。
+
+## 构建与开发
 
 ```bash
 cargo run
@@ -40,8 +57,8 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 ```
 
-Windows 的完整解码 feature 需要用户从官方 ETSI 规范在本地准备三份锁定表。播放器不会提交或
-分发这些文件。先在与 `Cargo.lock` 相同提交的 `MacinDecode-AC4-Core` 检出中运行：
+Windows 的完整解码功能需要从官方 ETSI 规范在本地生成三份锁定表。本仓库不会提交或分发这些文件。
+在与 `Cargo.lock` 锁定版本一致的 `MacinDecode-AC4-Core` 检出中运行：
 
 ```text
 python -m pip install -r scripts/requirements-spec.txt
@@ -49,7 +66,7 @@ python scripts/fetch_specs.py
 python scripts/generate_spec_tables.py
 ```
 
-再为 Windows 构建设置两个本机环境变量；路径示例故意留空，避免把开发机路径写入仓库：
+随后设置构建环境并运行项目：
 
 ```bat
 set "PATH=<Rust-1.98-bin>;%PATH%"
@@ -65,7 +82,7 @@ cargo run
 - `ts_103190_tables.c`
 - `ts_103190_tables_part2.c`
 
-本地端到端回归可额外设置 `MACINDECODE_AC4_TEST_MEDIA`，再运行被忽略的媒体测试：
+本地端到端回归可额外设置 `MACINDECODE_AC4_TEST_MEDIA`，再运行：
 
 ```bat
 cargo test decoder::windows::tests::decodes_local_media_into_a_bounded_scene_buffer -- --ignored
@@ -75,9 +92,9 @@ cargo test -p macindecode-windows-spatial-audio ended_renderer_releases_objects_
 
 真实媒体应只放在仓库根目录被忽略的 `.local-test-media/`，不得提交到 Git。
 
-本项目采用 [MIT License](LICENSE) 发布。第三方依赖的许可证需在引入和发布前持续审计；
-GUI 栈使用 MIT/Apache-2.0 的 `egui`/`eframe`，`rfd` 与 MacinDecode inspection 使用 MIT。
+开发者文档：[架构](docs/ARCHITECTURE.md) · [Windows 解码](docs/WINDOWS_DECODE.md) ·
+[Windows Spatial Audio](docs/WINDOWS_SPATIAL_AUDIO.md)
 
-架构边界见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，Windows 解码契约见
-[docs/WINDOWS_DECODE.md](docs/WINDOWS_DECODE.md)，原生输出契约见
-[docs/WINDOWS_SPATIAL_AUDIO.md](docs/WINDOWS_SPATIAL_AUDIO.md)。
+## 许可证
+
+本项目采用 [MIT License](LICENSE)。
