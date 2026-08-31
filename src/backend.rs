@@ -285,6 +285,18 @@ pub struct SpatialOutputController {
     device_catalog_error: Option<String>,
 }
 
+#[cfg(any(target_os = "windows", test))]
+const fn output_phase_allows_source_replacement(phase: OutputPhase) -> bool {
+    matches!(
+        phase,
+        OutputPhase::Initializing
+            | OutputPhase::Ready
+            | OutputPhase::Playing
+            | OutputPhase::Paused
+            | OutputPhase::Ended
+    )
+}
+
 impl SpatialOutputController {
     pub fn new() -> Self {
         #[cfg(target_os = "windows")]
@@ -310,24 +322,33 @@ impl SpatialOutputController {
     }
 
     pub fn ensure_configured(&mut self, config: &OutputStreamConfig, reader: SceneQueueReader) {
+        #[cfg(target_os = "windows")]
+        if self.config.as_ref() == Some(config)
+            && self.renderer.is_some()
+            && output_phase_allows_source_replacement(self.snapshot.phase)
+        {
+            return;
+        }
+        #[cfg(not(target_os = "windows"))]
         if self.config.as_ref() == Some(config) {
             return;
         }
         #[cfg(target_os = "windows")]
-        if let (Some(current), Some(renderer)) = (self.config.as_ref(), self.renderer.as_ref())
+        if output_phase_allows_source_replacement(self.snapshot.phase)
+            && let (Some(current), Some(renderer)) = (self.config.as_ref(), self.renderer.as_ref())
             && current.stream_compatible(config)
+            && windows::replace_source(renderer, config, reader.clone()).is_ok()
         {
-            windows::replace_source(renderer, config, reader);
             self.config = Some(config.clone());
             return;
         }
         #[cfg(target_os = "windows")]
         let restore_phase = self.snapshot.phase;
         self.reset();
-        self.config = Some(config.clone());
         #[cfg(target_os = "windows")]
         match windows::spawn(config, reader) {
             Ok(renderer) => {
+                self.config = Some(config.clone());
                 renderer.set_master_gain(self.master_gain);
                 match restore_phase {
                     OutputPhase::Playing => renderer.play(),
@@ -344,6 +365,7 @@ impl SpatialOutputController {
         }
         #[cfg(not(target_os = "windows"))]
         {
+            self.config = Some(config.clone());
             drop(reader);
         }
     }
@@ -618,6 +640,12 @@ mod tests {
         .expect("changed config");
         assert!(first.stream_compatible(&same_scene_new_epoch));
         assert!(!first.stream_compatible(&changed_ids));
+    }
+
+    #[test]
+    fn failed_output_is_not_eligible_for_source_replacement() {
+        assert!(!output_phase_allows_source_replacement(OutputPhase::Failed));
+        assert!(output_phase_allows_source_replacement(OutputPhase::Ended));
     }
 
     #[test]

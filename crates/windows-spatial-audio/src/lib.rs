@@ -186,11 +186,24 @@ impl Renderer {
             .send(Command::SetMasterGain(sanitize_gain(gain)));
     }
 
-    pub fn replace_source(&self, source: Box<dyn SpatialSource>, start_frame: u64) {
-        let _ = self.command_sender.send(Command::ReplaceSource {
-            source,
-            start_frame,
-        });
+    /// Replaces the Scene source without rebuilding a compatible native stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the render worker has already stopped.
+    pub fn replace_source(
+        &self,
+        source: Box<dyn SpatialSource>,
+        start_frame: u64,
+    ) -> Result<(), String> {
+        self.command_sender
+            .send(Command::ReplaceSource {
+                source,
+                start_frame,
+            })
+            .map_err(|_| {
+                "Windows Spatial Audio worker stopped before source replacement".to_owned()
+            })
     }
 
     #[must_use]
@@ -1012,6 +1025,22 @@ mod tests {
                 .frames_written,
             32
         );
+    }
+
+    #[test]
+    fn source_replacement_reports_a_stopped_worker() {
+        let (command_sender, command_receiver) = mpsc::channel();
+        drop(command_receiver);
+        let renderer = Renderer {
+            command_sender,
+            snapshot: Arc::new(Mutex::new(RenderSnapshot::initializing(1))),
+            join_handle: None,
+        };
+
+        let error = renderer
+            .replace_source(Box::new(EmptySource), 0)
+            .expect_err("a disconnected render worker must reject source replacement");
+        assert!(error.contains("worker stopped"), "{error}");
     }
 
     #[test]

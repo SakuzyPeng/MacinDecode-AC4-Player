@@ -40,7 +40,7 @@ pub(super) fn replace_source(
     renderer: &Renderer,
     config: &OutputStreamConfig,
     reader: SceneQueueReader,
-) {
+) -> Result<(), String> {
     renderer.replace_source(
         Box::new(SceneRenderSource::new(
             reader,
@@ -51,7 +51,7 @@ pub(super) fn replace_source(
             config.start_frame,
         )),
         config.start_frame,
-    );
+    )
 }
 
 fn native_selection(selection: &OutputDeviceSelection) -> NativeDeviceSelection {

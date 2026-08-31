@@ -31,7 +31,7 @@ pub struct PlayerApp {
     status: StatusLine,
     timeline_preview: f32,
     timeline_dragging: bool,
-    resume_after_reconfigure: Option<bool>,
+    playback_restore_pending: bool,
     playback_intent: bool,
     automatic_reconfigure_guard: Option<(u64, u64)>,
     waiting_for_device: Option<DeviceWait>,
@@ -53,8 +53,14 @@ enum OutputSyncAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DeviceWait {
     request_id: u64,
+    playback_epoch: u64,
     frame: u64,
-    resume: bool,
+}
+
+impl DeviceWait {
+    const fn belongs_to(self, request_id: u64, playback_epoch: u64) -> bool {
+        self.request_id == request_id && self.playback_epoch == playback_epoch
+    }
 }
 
 const fn output_sync_action(
@@ -73,6 +79,10 @@ const fn output_sync_action(
         | (DecodePhase::Seeking | DecodePhase::Buffering, false) => OutputSyncAction::Preserve,
         _ => OutputSyncAction::Reset,
     }
+}
+
+fn take_playback_restore(pending: &mut bool, playback_intent: bool) -> Option<bool> {
+    std::mem::take(pending).then_some(playback_intent)
 }
 
 impl PlayerApp {
@@ -96,7 +106,7 @@ impl PlayerApp {
             status: StatusLine::idle("Add or drop AC-4 media files"),
             timeline_preview: 0.0,
             timeline_dragging: false,
-            resume_after_reconfigure: None,
+            playback_restore_pending: false,
             playback_intent: false,
             automatic_reconfigure_guard: None,
             waiting_for_device: None,
@@ -160,7 +170,7 @@ impl PlayerApp {
             self.selected_source = Some(index);
             self.timeline_preview = 0.0;
             self.playback_intent = false;
-            self.resume_after_reconfigure = None;
+            self.playback_restore_pending = false;
             self.automatic_reconfigure_guard = None;
             self.waiting_for_device = None;
             self.status = StatusLine::ready(format!("Selected {name}; opening MacinDecode Core"));
@@ -185,7 +195,7 @@ impl PlayerApp {
         }
         self.timeline_preview = 0.0;
         self.playback_intent = false;
-        self.resume_after_reconfigure = None;
+        self.playback_restore_pending = false;
         self.automatic_reconfigure_guard = None;
         self.waiting_for_device = None;
         self.inspection
@@ -267,7 +277,7 @@ impl PlayerApp {
 
         if self
             .waiting_for_device
-            .is_some_and(|waiting| waiting.request_id != request_id)
+            .is_some_and(|waiting| !waiting.belongs_to(request_id, playback_epoch))
         {
             self.waiting_for_device = None;
         }
@@ -284,7 +294,7 @@ impl PlayerApp {
             match self.decoder.seek(waiting.frame) {
                 Ok(()) => {
                     self.waiting_for_device = None;
-                    self.resume_after_reconfigure = Some(waiting.resume);
+                    self.playback_restore_pending = true;
                     self.status = StatusLine::idle("Compatible audio endpoint restored; resuming");
                     context.request_repaint_after(Duration::from_millis(20));
                     return;
@@ -314,8 +324,8 @@ impl PlayerApp {
             self.output.reset();
             self.waiting_for_device = Some(DeviceWait {
                 request_id,
+                playback_epoch,
                 frame,
-                resume: self.playback_intent,
             });
             self.status = StatusLine::warning(
                 "No active audio endpoint can host this Scene; waiting without closing the file",
@@ -342,7 +352,7 @@ impl PlayerApp {
                 self.output.reset();
                 match self.decoder.seek(target) {
                     Ok(()) => {
-                        self.resume_after_reconfigure = Some(self.playback_intent);
+                        self.playback_restore_pending = true;
                         self.status = StatusLine::idle(
                             "Adapting Windows Spatial Audio to a Scene topology change",
                         );
@@ -366,7 +376,6 @@ impl PlayerApp {
             if desired_device.as_ref() != self.output.configured_device()
                 && desired_device.is_some()
             {
-                let resume = self.playback_intent;
                 let target = self
                     .output
                     .snapshot()
@@ -375,7 +384,7 @@ impl PlayerApp {
                 self.output.pause();
                 match self.decoder.seek(target) {
                     Ok(()) => {
-                        self.resume_after_reconfigure = Some(resume);
+                        self.playback_restore_pending = true;
                         self.status = StatusLine::idle("Switching Windows audio endpoint");
                         context.request_repaint_after(Duration::from_millis(20));
                         return;
@@ -419,7 +428,14 @@ impl PlayerApp {
                     Ok(config) => {
                         self.output
                             .ensure_configured(&config, self.decoder.scene_reader());
-                        if let Some(resume) = self.resume_after_reconfigure.take() {
+                        if self
+                            .output
+                            .is_configured_for_playback(request_id, playback_epoch)
+                            && let Some(resume) = take_playback_restore(
+                                &mut self.playback_restore_pending,
+                                self.playback_intent,
+                            )
+                        {
                             if resume {
                                 self.output.play();
                             } else {
@@ -905,19 +921,18 @@ impl PlayerApp {
 
         self.timeline_dragging = timeline.dragging;
         if let Some(target_frame) = timeline.seek_target {
-            let resume = self.playback_intent;
             self.output.pause();
             match self.decoder.seek(target_frame) {
                 Ok(()) => {
-                    self.resume_after_reconfigure = Some(resume);
+                    self.playback_restore_pending = true;
                     self.status = StatusLine::idle(format!(
                         "Seeking to {}",
                         format_timestamp(target_frame, sample_rate)
                     ));
                 }
                 Err(error) => {
-                    self.resume_after_reconfigure = None;
-                    if resume {
+                    self.playback_restore_pending = false;
+                    if self.playback_intent {
                         self.output.play();
                     }
                     self.status = StatusLine::warning(error);
@@ -937,14 +952,14 @@ impl PlayerApp {
             Some(TransportAction::Stop) => {
                 self.playback_intent = false;
                 self.output.pause();
-                self.resume_after_reconfigure = Some(false);
+                self.playback_restore_pending = true;
                 match self.decoder.seek(0) {
                     Ok(()) => {
                         self.timeline_preview = 0.0;
                         self.status = StatusLine::idle("Stopped; seeking to the beginning");
                     }
                     Err(error) => {
-                        self.resume_after_reconfigure = None;
+                        self.playback_restore_pending = false;
                         self.status = StatusLine::warning(error);
                     }
                 }
@@ -1998,6 +2013,28 @@ mod tests {
             output_sync_action(DecodePhase::Opening, true),
             OutputSyncAction::Reset
         );
+    }
+
+    #[test]
+    fn playback_restore_uses_the_latest_transport_intent() {
+        let mut pending = true;
+        assert_eq!(take_playback_restore(&mut pending, true), Some(true));
+        assert!(!pending);
+
+        let mut pending = true;
+        assert_eq!(take_playback_restore(&mut pending, false), Some(false));
+    }
+
+    #[test]
+    fn device_wait_is_scoped_to_the_playback_epoch() {
+        let waiting = DeviceWait {
+            request_id: 7,
+            playback_epoch: 3,
+            frame: 96_000,
+        };
+        assert!(waiting.belongs_to(7, 3));
+        assert!(!waiting.belongs_to(7, 4));
+        assert!(!waiting.belongs_to(8, 3));
     }
 
     #[test]
