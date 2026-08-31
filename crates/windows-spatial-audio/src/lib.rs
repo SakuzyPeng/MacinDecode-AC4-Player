@@ -163,7 +163,7 @@ impl Renderer {
         let worker_snapshot = Arc::clone(&snapshot);
         let join_handle = thread::Builder::new()
             .name("windows-spatial-audio".to_owned())
-            .spawn(move || render_worker(config, source, &command_receiver, &worker_snapshot))
+            .spawn(move || render_worker(&config, source, &command_receiver, &worker_snapshot))
             .map_err(|error| format!("Failed to start Windows Spatial Audio worker: {error}"))?;
         Ok(Self {
             command_sender,
@@ -311,13 +311,13 @@ fn endpoint_label(endpoint: &IMMDevice) -> Option<String> {
 }
 
 fn render_worker(
-    config: StreamConfig,
+    config: &StreamConfig,
     source: Box<dyn SpatialSource>,
     commands: &Receiver<Command>,
     snapshot: &Arc<Mutex<RenderSnapshot>>,
 ) {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        run_render_loop(&config, source, commands, snapshot)
+        run_render_loop(config, source, commands, snapshot)
     }));
     match result {
         Ok(Ok(())) => {}
