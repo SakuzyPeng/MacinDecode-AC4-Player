@@ -1107,17 +1107,18 @@ fn transport_buttons(
             .layout(Layout::left_to_right(Align::Center)),
         |ui| {
             disabled_transport_button(ui, "◀◀", button_size);
-            let play_glyph = if playing { "Ⅱ" } else { "▶" };
-            if ui
+            let toggle_response = ui
                 .add_enabled(
                     can_toggle,
-                    egui::Button::new(play_glyph)
+                    egui::Button::new(if playing { "" } else { "▶" })
                         .min_size(button_size)
                         .fill(theme::HOVER),
                 )
-                .on_hover_text(if playing { "Pause" } else { "Play" })
-                .clicked()
-            {
+                .on_hover_text(if playing { "Pause" } else { "Play" });
+            if playing {
+                paint_pause_icon(ui, toggle_response.rect, can_toggle);
+            }
+            if toggle_response.clicked() {
                 action = Some(TransportAction::Toggle);
             }
             if ui
@@ -1135,6 +1136,20 @@ fn transport_buttons(
         },
     );
     action
+}
+
+fn paint_pause_icon(ui: &egui::Ui, button_rect: egui::Rect, enabled: bool) {
+    let color = if enabled { theme::TEXT } else { theme::MUTED };
+    let center = button_rect.center();
+    let bar_size = egui::vec2(3.0, 14.0);
+    for offset in [-3.5, 3.5] {
+        let bar_center = egui::pos2(center.x + offset, center.y);
+        ui.painter().rect_filled(
+            egui::Rect::from_center_size(bar_center, bar_size),
+            0.0,
+            color,
+        );
+    }
 }
 
 fn disabled_transport_button(ui: &mut egui::Ui, glyph: &str, size: egui::Vec2) {
