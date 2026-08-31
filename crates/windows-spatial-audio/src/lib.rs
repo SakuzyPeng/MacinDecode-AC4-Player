@@ -304,7 +304,8 @@ fn endpoint_id(endpoint: &IMMDevice) -> Result<String, String> {
 
 fn endpoint_label(endpoint: &IMMDevice) -> Option<String> {
     let store = unsafe { endpoint.OpenPropertyStore(STGM_READ) }.ok()?;
-    let value = unsafe { store.GetValue(&raw const PKEY_Device_FriendlyName) }.ok()?;
+    let friendly_name = PKEY_Device_FriendlyName;
+    let value = unsafe { store.GetValue(&raw const friendly_name) }.ok()?;
     let label = value.to_string();
     (!label.trim().is_empty()).then_some(label)
 }
