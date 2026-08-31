@@ -9,6 +9,7 @@ compile_error!(
 mod app;
 mod backend;
 mod bitstream_ui;
+pub mod decoder;
 mod inspection;
 mod model;
 mod theme;

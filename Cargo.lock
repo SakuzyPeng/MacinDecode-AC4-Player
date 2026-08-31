@@ -1565,6 +1565,15 @@ version = "0.1.0"
 source = "git+https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git?rev=eb7c6132072daad3b4312bd23c2d9e8a63fa1265#eb7c6132072daad3b4312bd23c2d9e8a63fa1265"
 
 [[package]]
+name = "macindecode-ac4-decode"
+version = "0.1.0"
+source = "git+https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git?rev=eb7c6132072daad3b4312bd23c2d9e8a63fa1265#eb7c6132072daad3b4312bd23c2d9e8a63fa1265"
+dependencies = [
+ "libm",
+ "macindecode-ac4-bitstream",
+]
+
+[[package]]
 name = "macindecode-ac4-inspect"
 version = "0.1.0"
 source = "git+https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git?rev=eb7c6132072daad3b4312bd23c2d9e8a63fa1265#eb7c6132072daad3b4312bd23c2d9e8a63fa1265"
@@ -1588,9 +1597,21 @@ name = "macindecode-ac4-player"
 version = "0.1.0"
 dependencies = [
  "eframe",
+ "macindecode-ac4-bitstream",
  "macindecode-ac4-inspect",
+ "macindecode-ac4-mp4",
+ "macindecode-ac4-scene",
  "rfd",
  "serde_json",
+]
+
+[[package]]
+name = "macindecode-ac4-scene"
+version = "0.1.0"
+source = "git+https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git?rev=eb7c6132072daad3b4312bd23c2d9e8a63fa1265#eb7c6132072daad3b4312bd23c2d9e8a63fa1265"
+dependencies = [
+ "macindecode-ac4-bitstream",
+ "macindecode-ac4-decode",
 ]
 
 [[package]]

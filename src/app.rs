@@ -5,6 +5,9 @@ use eframe::egui::{self, Align, Color32, Layout, RichText, Stroke};
 
 use crate::backend::SpatialBackendKind;
 use crate::bitstream_ui::{self, BitstreamAction};
+use crate::decoder::{
+    DecodeMetrics, DecodePhase, DecoderController, DecoderSnapshot, PREBUFFER_MILLISECONDS,
+};
 use crate::inspection::InspectionController;
 use crate::model::SelectedSource;
 use crate::theme;
@@ -13,6 +16,8 @@ pub struct PlayerApp {
     playlist: Vec<SelectedSource>,
     selected_source: Option<usize>,
     inspection: InspectionController,
+    decoder: DecoderController,
+    decoder_revision: u64,
     backend: SpatialBackendKind,
     status: StatusLine,
     timeline_preview: f32,
@@ -29,6 +34,8 @@ impl PlayerApp {
             playlist: Vec::new(),
             selected_source: None,
             inspection: InspectionController::new(),
+            decoder: DecoderController::new(),
+            decoder_revision: 0,
             backend: SpatialBackendKind::Automatic,
             status: StatusLine::idle("Add or drop AC-4 media files"),
             timeline_preview: 0.0,
@@ -78,9 +85,7 @@ impl PlayerApp {
 
         if added > 0 {
             let noun = if added == 1 { "file" } else { "files" };
-            self.status = StatusLine::ready(format!(
-                "Added {added} {noun} to the playlist; decoder is not connected yet"
-            ));
+            self.status = StatusLine::ready(format!("Added {added} {noun} to the playlist"));
         } else if duplicates > 0 && rejected == 0 {
             self.status = StatusLine::idle("Selected files are already in the playlist");
         } else if rejected > 0 {
@@ -93,8 +98,7 @@ impl PlayerApp {
             let name = source.display_name().to_owned();
             self.selected_source = Some(index);
             self.timeline_preview = 0.0;
-            self.status =
-                StatusLine::ready(format!("Selected {name}; decoder is not connected yet"));
+            self.status = StatusLine::ready(format!("Selected {name}; opening MacinDecode Core"));
         }
     }
 
@@ -144,6 +148,22 @@ impl PlayerApp {
             self.bitstream_details_open = false;
         }
         if self.inspection.has_pending() {
+            context.request_repaint_after(Duration::from_millis(50));
+        }
+    }
+
+    fn sync_decoder(&mut self, context: &egui::Context) {
+        if let Some(path) = self.selected_path().map(Path::to_path_buf) {
+            self.decoder.ensure_open(&path);
+        } else {
+            self.decoder.close();
+        }
+        self.decoder.poll();
+        if self.decoder_revision != self.decoder.revision() {
+            self.decoder_revision = self.decoder.revision();
+            self.status = decoder_status_line(self.decoder.snapshot());
+        }
+        if self.decoder.is_working() {
             context.request_repaint_after(Duration::from_millis(50));
         }
     }
@@ -313,6 +333,7 @@ impl PlayerApp {
     }
 
     fn draw_scene(&mut self, root: &mut egui::Ui) {
+        let decoder = self.decoder.snapshot().clone();
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::NONE
@@ -331,19 +352,19 @@ impl PlayerApp {
                             self.diagnostics_open = true;
                         }
                         ui.add_space(4.0);
-                        ui.label(
-                            RichText::new("48 kHz · planar f32")
-                                .size(11.0)
-                                .color(theme::MUTED),
+                        let format = decoder.metrics().map_or_else(
+                            || "48 kHz · planar f32".to_owned(),
+                            |metrics| format!("{} Hz · planar f32", metrics.sample_rate()),
                         );
+                        ui.label(RichText::new(format).size(11.0).color(theme::MUTED));
                     });
                 });
                 ui.add_space(10.0);
 
-                metric_strip(ui);
+                metric_strip(ui, &decoder);
 
                 ui.add_space(16.0);
-                scene_placeholder(ui, self.has_selected_source());
+                scene_placeholder(ui, self.has_selected_source(), &decoder);
             });
     }
 
@@ -352,6 +373,7 @@ impl PlayerApp {
             return;
         }
 
+        let decoder = self.decoder.snapshot().clone();
         let remains_open = context.show_viewport_immediate(
             egui::ViewportId::from_hash_of("playback-diagnostics"),
             egui::ViewportBuilder::default()
@@ -360,7 +382,7 @@ impl PlayerApp {
                 .with_min_inner_size([400.0, 300.0]),
             |root, _class| {
                 let close_requested = root.ctx().input(|input| input.viewport().close_requested());
-                draw_diagnostics_content(root, self.backend);
+                draw_diagnostics_content(root, self.backend, &decoder);
                 !close_requested
             },
         );
@@ -759,6 +781,7 @@ impl eframe::App for PlayerApp {
         let context = root.ctx().clone();
         self.accept_dropped_files(&context);
         self.sync_inspection(&context);
+        self.sync_decoder(&context);
         Self::draw_header(root);
         self.draw_source_sidebar(root);
         self.draw_transport(root);
@@ -814,6 +837,66 @@ enum StatusKind {
     Warning,
 }
 
+fn decoder_status_line(decoder: &DecoderSnapshot) -> StatusLine {
+    let source = decoder
+        .path()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .unwrap_or("AC-4 source");
+    match decoder.phase() {
+        DecodePhase::Unavailable => StatusLine::idle(
+            decoder
+                .detail()
+                .unwrap_or("The Windows decode worker is unavailable"),
+        ),
+        DecodePhase::Idle => StatusLine::idle("Add or select an AC-4 media file"),
+        DecodePhase::Opening => StatusLine::idle(format!("Opening {source} with MacinDecode Core")),
+        DecodePhase::Buffering => {
+            let buffered = decoder
+                .metrics()
+                .map_or(0, DecodeMetrics::buffered_milliseconds);
+            StatusLine::idle(format!(
+                "MacinDecode Core buffered {buffered} / {PREBUFFER_MILLISECONDS} ms"
+            ))
+        }
+        DecodePhase::Ready => {
+            let metrics = decoder.metrics().expect("ready decode state has metrics");
+            StatusLine::ready(format!(
+                "MacinDecode Core ready: {} objects + {} LFE, {} ms buffered",
+                metrics.object_count(),
+                u8::from(metrics.has_lfe()),
+                metrics.buffered_milliseconds()
+            ))
+        }
+        DecodePhase::EndOfStream => {
+            let metrics = decoder
+                .metrics()
+                .expect("end-of-stream decode state has metrics");
+            StatusLine::ready(format!(
+                "Decoded {source} to end: {} AUs, {} ms of scene PCM",
+                metrics.decoded_access_units(),
+                metrics.decoded_milliseconds()
+            ))
+        }
+        DecodePhase::Failed => StatusLine::warning(format!(
+            "MacinDecode Core failed for {source}: {}",
+            decoder.detail().unwrap_or("unknown decode error")
+        )),
+    }
+}
+
+const fn decode_phase_label(phase: DecodePhase) -> &'static str {
+    match phase {
+        DecodePhase::Unavailable => "Unavailable",
+        DecodePhase::Idle => "Idle",
+        DecodePhase::Opening => "Opening",
+        DecodePhase::Buffering => "Buffering",
+        DecodePhase::Ready => "Ready",
+        DecodePhase::EndOfStream => "End of stream",
+        DecodePhase::Failed => "Failed",
+    }
+}
+
 fn section_title(ui: &mut egui::Ui, title: &str) {
     ui.label(RichText::new(title).size(11.0).strong().color(theme::MUTED));
     ui.add_space(4.0);
@@ -837,13 +920,66 @@ fn key_value(ui: &mut egui::Ui, key: &str, value: &str) {
     });
 }
 
-fn metric_strip(ui: &mut egui::Ui) {
-    const METRICS: [(&str, &str, &str); 4] = [
-        ("OBJECTS", "—", "Decoder pending"),
-        ("LFE", "—", "Single native bed"),
-        ("POSITION", "—", "OAMD pending"),
-        ("BUFFER", "—", "Render queue offline"),
-    ];
+fn decode_metric_values(decoder: &DecoderSnapshot) -> [(&'static str, String, String); 4] {
+    let metrics = decoder.metrics();
+    let phase = decode_phase_label(decoder.phase());
+    [
+        (
+            "OBJECTS",
+            metrics.map_or_else(|| "—".to_owned(), |value| value.object_count().to_string()),
+            metrics.map_or_else(
+                || phase.to_owned(),
+                |value| format!("presentation {}", value.presentation_index()),
+            ),
+        ),
+        (
+            "LFE",
+            metrics.map_or_else(
+                || "—".to_owned(),
+                |value| if value.has_lfe() { "1" } else { "0" }.to_owned(),
+            ),
+            "Native bed component".to_owned(),
+        ),
+        (
+            "POSITION",
+            metrics.map_or_else(
+                || "—".to_owned(),
+                |value| {
+                    if value.state_complete() {
+                        "READY"
+                    } else {
+                        "WAIT"
+                    }
+                    .to_owned()
+                },
+            ),
+            metrics.map_or_else(
+                || "OAMD pending".to_owned(),
+                |value| format!("{} in-frame updates", value.metadata_updates()),
+            ),
+        ),
+        (
+            "BUFFER",
+            metrics.map_or_else(
+                || "—".to_owned(),
+                |value| format!("{} ms", value.buffered_milliseconds()),
+            ),
+            metrics.map_or_else(
+                || "Scene FIFO offline".to_owned(),
+                |value| {
+                    format!(
+                        "{} / {} frames",
+                        value.buffered_frames(),
+                        value.buffer_capacity_frames()
+                    )
+                },
+            ),
+        ),
+    ]
+}
+
+fn metric_strip(ui: &mut egui::Ui, decoder: &DecoderSnapshot) {
+    let values = decode_metric_values(decoder);
 
     let (rect, _) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 96.0), egui::Sense::hover());
@@ -860,8 +996,9 @@ fn metric_strip(ui: &mut egui::Ui) {
     );
 
     let mut left = rect.left();
-    for (index, (title, value, detail)) in METRICS.into_iter().enumerate() {
-        let right = if index + 1 == METRICS.len() {
+    let value_count = values.len();
+    for (index, (title, value, detail)) in values.into_iter().enumerate() {
+        let right = if index + 1 == value_count {
             rect.right()
         } else {
             left + cell_width
@@ -885,15 +1022,15 @@ fn metric_strip(ui: &mut egui::Ui) {
                 .layout(Layout::top_down(Align::Min)),
             |ui| {
                 ui.label(RichText::new(title).size(10.0).strong().color(theme::MUTED));
-                ui.label(RichText::new(value).size(21.0).strong().color(theme::TEXT));
-                ui.label(RichText::new(detail).size(10.0).color(theme::MUTED));
+                ui.label(RichText::new(&value).size(21.0).strong().color(theme::TEXT));
+                ui.label(RichText::new(&detail).size(10.0).color(theme::MUTED));
             },
         );
         left = right;
     }
 }
 
-fn scene_placeholder(ui: &mut egui::Ui, has_source: bool) {
+fn scene_placeholder(ui: &mut egui::Ui, has_source: bool, decoder: &DecoderSnapshot) {
     let available_height = ui.available_height();
     let frame = egui::Frame::NONE
         .fill(theme::STAGE)
@@ -906,10 +1043,34 @@ fn scene_placeholder(ui: &mut egui::Ui, has_source: bool) {
         ui.set_min_height(content_height);
         ui.vertical_centered(|ui| {
             ui.add_space(((content_height - 62.0) / 2.0).max(24.0));
-            let headline = if has_source {
-                "Ready for decoder integration"
-            } else {
-                "No object scene"
+            let (headline, detail) = match decoder.phase() {
+                DecodePhase::Opening => (
+                    "Opening AC-4 source",
+                    "Reading the bounded access-unit timeline for MacinDecode Core.",
+                ),
+                DecodePhase::Buffering => (
+                    "Decoding object scene",
+                    "Core is producing normalized object/LFE PCM into the bounded Scene FIFO.",
+                ),
+                DecodePhase::Ready | DecodePhase::EndOfStream => (
+                    "Decoded scene buffered",
+                    "Full A-JOC PCM and OAMD are ready; Windows spatial submission is the next layer.",
+                ),
+                DecodePhase::Failed => (
+                    "Scene decode failed",
+                    decoder.detail().unwrap_or("MacinDecode Core reported an error."),
+                ),
+                DecodePhase::Unavailable => (
+                    "Windows decoder path",
+                    decoder
+                        .detail()
+                        .unwrap_or("Audio decoding is unavailable on this platform."),
+                ),
+                DecodePhase::Idle if has_source => (
+                    "Waiting for decoder",
+                    "The selected source has not entered the decode worker yet.",
+                ),
+                DecodePhase::Idle => ("No object scene", "Add an AC-4 source to begin inspection."),
             };
             ui.label(
                 RichText::new(headline)
@@ -919,16 +1080,17 @@ fn scene_placeholder(ui: &mut egui::Ui, has_source: bool) {
             );
             ui.add_space(6.0);
             ui.label(
-                RichText::new(
-                    "This shell does not parse metadata, decode PCM, or open an audio device.",
-                )
-                .color(theme::MUTED),
+                RichText::new(detail).color(theme::MUTED),
             );
         });
     });
 }
 
-fn draw_diagnostics_content(root: &mut egui::Ui, backend: SpatialBackendKind) {
+fn draw_diagnostics_content(
+    root: &mut egui::Ui,
+    backend: SpatialBackendKind,
+    decoder: &DecoderSnapshot,
+) {
     egui::CentralPanel::default()
         .frame(
             egui::Frame::NONE
@@ -950,9 +1112,53 @@ fn draw_diagnostics_content(root: &mut egui::Ui, backend: SpatialBackendKind) {
                     ui.add_space(16.0);
                     section_title(ui, "SESSION");
                     card(ui, |ui| {
-                        key_value(ui, "Container", "Not connected");
+                        let metrics = decoder.metrics();
+                        key_value(
+                            ui,
+                            "Container",
+                            metrics.map_or("Not connected", |value| value.container().label()),
+                        );
                         ui.separator();
-                        key_value(ui, "Decoder session", "Not created");
+                        key_value(ui, "Decoder session", decode_phase_label(decoder.phase()));
+                        ui.separator();
+                        key_value(
+                            ui,
+                            "Scene elements",
+                            &metrics.map_or_else(
+                                || "—".to_owned(),
+                                |value| {
+                                    format!(
+                                        "{} objects + {} LFE",
+                                        value.object_count(),
+                                        u8::from(value.has_lfe())
+                                    )
+                                },
+                            ),
+                        );
+                        ui.separator();
+                        key_value(
+                            ui,
+                            "Decoded AUs / frames",
+                            &metrics.map_or_else(
+                                || "0 / 0".to_owned(),
+                                |value| {
+                                    format!(
+                                        "{} / {}",
+                                        value.decoded_access_units(),
+                                        value.decoded_scene_frames()
+                                    )
+                                },
+                            ),
+                        );
+                        ui.separator();
+                        key_value(
+                            ui,
+                            "Scene buffer",
+                            &metrics.map_or_else(
+                                || "0 ms".to_owned(),
+                                |value| format!("{} ms", value.buffered_milliseconds()),
+                            ),
+                        );
                         ui.separator();
                         key_value(ui, "Backend policy", backend.label());
                         ui.separator();
@@ -969,7 +1175,7 @@ fn draw_diagnostics_content(root: &mut egui::Ui, backend: SpatialBackendKind) {
                     ui.add_space(12.0);
                     ui.label(
                         RichText::new(format!(
-                            "{} This shell does not open an audio device.",
+                            "{} The decoder is connected independently of the output device.",
                             backend.availability()
                         ))
                         .size(10.0)
