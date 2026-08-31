@@ -85,9 +85,16 @@ pub struct DynamicObjectRender {
 }
 
 #[derive(Debug)]
+pub struct LfeObjectRender {
+    pub active: bool,
+    pub gain: f32,
+    pub samples: Vec<f32>,
+}
+
+#[derive(Debug)]
 pub struct RenderQuantum {
     pub objects: Vec<DynamicObjectRender>,
-    pub lfe: Option<Vec<f32>>,
+    pub lfe: Option<LfeObjectRender>,
     pub frames_written: u32,
     pub end_of_stream: bool,
     pub underrun: bool,
@@ -240,6 +247,9 @@ fn run_render_loop(
         let end_result = context.end_update();
         let outcome = submit_result?;
         end_result?;
+        if outcome.end_of_stream {
+            context.release_ended_objects();
+        }
 
         {
             let mut state = lock_recover(snapshot);
@@ -253,7 +263,11 @@ fn run_render_loop(
             state.position_updates = state
                 .position_updates
                 .saturating_add(u64::from(outcome.position_updates));
-            state.active_dynamic_objects = outcome.active_dynamic_objects;
+            state.active_dynamic_objects = if outcome.end_of_stream {
+                0
+            } else {
+                outcome.active_dynamic_objects
+            };
             if outcome.underrun {
                 state.underruns = state.underruns.saturating_add(1);
             }
@@ -501,9 +515,17 @@ impl SpatialContext {
         }
 
         if let Some(object) = self.lfe_object.as_ref() {
-            unsafe { object.SetVolume(master_gain) }
+            let (gain, samples) = quantum.lfe.as_ref().map_or((0.0, None), |render| {
+                let gain = if render.active {
+                    sanitize_gain(render.gain) * master_gain
+                } else {
+                    0.0
+                };
+                (gain, Some(render.samples.as_slice()))
+            });
+            unsafe { object.SetVolume(gain) }
                 .map_err(|error| format_windows_error("Setting the LFE object volume", &error))?;
-            write_object_buffer(object, quantum.lfe.as_deref(), frame_count)?;
+            write_object_buffer(object, samples, frame_count)?;
             buffer_submissions = buffer_submissions.saturating_add(1);
         }
 
@@ -528,6 +550,11 @@ impl SpatialContext {
             underrun: quantum.underrun,
             end_of_stream: quantum.end_of_stream,
         })
+    }
+
+    fn release_ended_objects(&mut self) {
+        self.dynamic_objects.clear();
+        self.lfe_object = None;
     }
 
     fn activate_objects_for_quantum(
@@ -683,11 +710,11 @@ fn validate_quantum(
             ));
         }
     }
-    match quantum.lfe.as_deref() {
-        Some(samples)
+    match quantum.lfe.as_ref() {
+        Some(render)
             if !stream_has_lfe
-                || samples.len() != expected
-                || samples.iter().any(|sample| !sample.is_finite()) =>
+                || render.samples.len() != expected
+                || render.samples.iter().any(|sample| !sample.is_finite()) =>
         {
             Err("Scene source returned invalid or unexpected LFE PCM".to_owned())
         }
@@ -750,7 +777,31 @@ fn format_hresult(operation: &str, result: windows::core::HRESULT) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use super::*;
+
+    struct OneQuantumSource;
+
+    impl SpatialSource for OneQuantumSource {
+        fn render(&mut self, frame_count: u32) -> Result<RenderQuantum, String> {
+            let samples = usize::try_from(frame_count)
+                .map_err(|_| "test frame count exceeds usize".to_owned())?;
+            Ok(RenderQuantum {
+                objects: vec![DynamicObjectRender {
+                    element_id: 1,
+                    active: true,
+                    position: [0.0, 0.0, -1.0],
+                    gain: 1.0,
+                    samples: vec![0.0; samples],
+                }],
+                lfe: None,
+                frames_written: frame_count,
+                end_of_stream: true,
+                underrun: false,
+            })
+        }
+    }
 
     #[test]
     fn activation_blob_has_com_owned_drop_storage() {
@@ -766,5 +817,40 @@ mod tests {
         let activation = activation_variant(&params).expect("owned activation blob");
         assert_eq!(activation.vt(), VT_BLOB);
         drop(activation);
+    }
+
+    #[test]
+    #[ignore = "requires a Spatial Audio-capable default endpoint"]
+    fn ended_renderer_releases_objects_without_entering_failed_state() {
+        let renderer = Renderer::spawn(
+            StreamConfig {
+                sample_rate: 48_000,
+                dynamic_object_count: 1,
+                has_lfe: false,
+            },
+            Box::new(OneQuantumSource),
+        )
+        .expect("spawn renderer");
+        wait_for_phase(&renderer, RenderPhase::Ready);
+        renderer.play();
+        wait_for_phase(&renderer, RenderPhase::Ended);
+        thread::sleep(Duration::from_millis(150));
+        let state = renderer.snapshot();
+        assert_eq!(state.phase, RenderPhase::Ended, "{state:?}");
+        assert_eq!(state.active_dynamic_objects, 0);
+        assert!(state.error.is_none());
+    }
+
+    fn wait_for_phase(renderer: &Renderer, expected: RenderPhase) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let state = renderer.snapshot();
+            assert_ne!(state.phase, RenderPhase::Failed, "{state:?}");
+            if state.phase == expected {
+                return;
+            }
+            assert!(Instant::now() < deadline, "{state:?}");
+            thread::sleep(Duration::from_millis(5));
+        }
     }
 }

@@ -17,6 +17,7 @@ pub(super) fn spawn(
         Box::new(SceneRenderSource::new(
             reader,
             config.sample_rate,
+            config.dynamic_object_count,
             config.has_lfe,
         )),
     )

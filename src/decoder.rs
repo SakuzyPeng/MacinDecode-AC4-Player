@@ -314,20 +314,30 @@ impl SceneObjectPcm {
 #[derive(Debug)]
 pub struct SceneLfePcm {
     element_id: u64,
+    initial_state: Option<SpatialObjectState>,
     samples: Vec<f32>,
 }
 
 impl SceneLfePcm {
     #[cfg(target_os = "windows")]
-    pub(super) fn new(element_id: u64, samples: Vec<f32>) -> Self {
+    pub(super) fn new(
+        element_id: u64,
+        initial_state: Option<SpatialObjectState>,
+        samples: Vec<f32>,
+    ) -> Self {
         Self {
             element_id,
+            initial_state,
             samples,
         }
     }
 
     pub const fn element_id(&self) -> u64 {
         self.element_id
+    }
+
+    pub const fn initial_state(&self) -> Option<SpatialObjectState> {
+        self.initial_state
     }
 
     pub fn samples(&self) -> &[f32] {
@@ -492,7 +502,7 @@ pub(super) struct SharedSceneQueue {
 #[derive(Debug)]
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(super) enum QueuePushError {
-    Full(DecodedSceneBlock),
+    Full(Box<DecodedSceneBlock>),
     Stale,
     Format(String),
 }
@@ -549,7 +559,7 @@ impl SharedSceneQueue {
 
         let duration = u64::from(block.duration_frames);
         if queue.buffered_frames.saturating_add(duration) > queue.capacity_frames {
-            return Err(QueuePushError::Full(block));
+            return Err(QueuePushError::Full(Box::new(block)));
         }
         queue.buffered_frames = queue.buffered_frames.saturating_add(duration);
         queue.blocks.push_back(block);

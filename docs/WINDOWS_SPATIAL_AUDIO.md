@@ -42,15 +42,21 @@ native crate 看不到 AC-4 bitstream、Core Session 或 Core 的借用类型。
   坐标不完整或语义不完整的对象以零增益提交。
 - OAMD ramp 在每个 Windows quantum 起点插值。Windows 一个对象在单个 quantum 只接受一组位置/音量，
   因而 quantum 内的 metadata update 会量化到后续 quantum 边界。
-- LFE 使用独立静态对象，不参与动态对象槽位计数。
+- LFE 使用独立静态对象，不参与动态对象槽位计数；它和动态对象一样遵循 OAMD active、语义完整性、
+  linear gain 与 ramp，最终再乘主音量。没有有效状态或 inactive 时以零增益提交。
+- 首个 block 会锁定 configuration generation、对象/LFE 拓扑与所选 presentation。播放中发生变化时
+  adapter 会明确拒绝并要求重新打开来源，避免把 Core 新分配的 element ID 绑定到旧 Windows 对象。
 
 ## 控制与结束
 
 - native stream 配置完成后保持运行并在非播放状态提交静音。Play 才消费 Scene FIFO；Pause 停止消费
   但保留流；主音量和静音通过每对象 volume 生效。
+- 同一 request 暂时回到 Buffering 时保留已经激活的 native stream；FIFO 恢复供数后继续播放，不因
+  一次欠载销毁 renderer。
 - FIFO 的 request ID 防止旧来源进入新流。来源切换会销毁旧 renderer；旧 reader 将其 request 视为 EOS。
-- producer 标记 EOS 且 FIFO 排空后，对所有已激活对象调用 `SetEndOfStream`。Stop 会销毁流、清空 FIFO，
-  并让 Core 从文件开头重新预缓冲。
+- producer 标记 EOS 且 FIFO 排空后，对所有已激活对象调用 `SetEndOfStream`；完成最后一次
+  `EndUpdatingAudioObjects` 后立即释放这些对象接口，同时保留已结束的 stream，以免后续 update 复用
+  已失效对象并进入 Failed。Stop 会销毁流、清空 FIFO，并让 Core 从文件开头重新预缓冲。
 - 当前没有 seek、上一曲或非默认设备选择。
 
 ## 本地回归
@@ -60,7 +66,9 @@ native crate 看不到 AC-4 bitstream、Core Session 或 Core 的借用类型。
 
 ```bat
 cargo test backend::windows::tests::submits_decoded_scene_to_windows_spatial_audio -- --ignored
+cargo test -p macindecode-windows-spatial-audio ended_renderer_releases_objects_without_entering_failed_state -- --ignored
 ```
 
-该测试要求默认 endpoint 支持 Spatial Audio，并检查对象槽位、至少 20 次 render update、PCM/object
-buffer、位置提交、Pause 和零欠载。普通 `cargo test` 不依赖本地媒体或音频设备。
+这两项测试要求默认 endpoint 支持 Spatial Audio：媒体回归检查对象槽位、至少 20 次 render update、
+PCM/object buffer、位置提交、Pause 和零欠载；EOS 回归检查对象释放后 renderer 稳定停留在 Ended。
+普通 `cargo test` 不依赖本地媒体或音频设备。

@@ -326,6 +326,11 @@ impl SpatialOutputController {
         self.revision
     }
 
+    pub fn is_configured_for_request(&self, request_id: u64) -> bool {
+        self.config
+            .is_some_and(|config| config.request_id == request_id)
+    }
+
     #[cfg(target_os = "windows")]
     fn set_snapshot(&mut self, snapshot: OutputSnapshot) {
         if self.snapshot != snapshot {

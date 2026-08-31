@@ -25,6 +25,8 @@
 - 暂不实现 macOS 音频解码；macOS 仍保留 GUI 与 inspection。
 - Windows 只使用系统默认 render endpoint，尚无设备选择；尚无 seek 和上一曲控制。
 - OAMD ramp 会在每个 Windows render quantum 起点取样并插值，quantum 内不做逐采样位置变化。
+- 播放中若 Scene configuration generation、对象/LFE 拓扑或所选 presentation 改变，当前 Windows
+  对象流会明确报错；需要重新打开来源后按新配置激活，暂不支持流内动态重配置。
 - 不应用响度、DRC、Dialogue Enhancement 或额外 downmix；Scene PCM 保持 Core 的 normalized 输出。
 - 不调用 Windows 系统媒体解码器；压缩 AC-4 始终交给锁定版本的 `MacinDecode-AC4-Core`。
 - 不包含 WebView、HTML、CSS、JavaScript 或 WebAssembly 构建入口。
@@ -68,6 +70,7 @@ cargo run
 ```bat
 cargo test decoder::windows::tests::decodes_local_media_into_a_bounded_scene_buffer -- --ignored
 cargo test backend::windows::tests::submits_decoded_scene_to_windows_spatial_audio -- --ignored
+cargo test -p macindecode-windows-spatial-audio ended_renderer_releases_objects_without_entering_failed_state -- --ignored
 ```
 
 真实媒体应只放在仓库根目录被忽略的 `.local-test-media/`，不得提交到 Git。

@@ -1,25 +1,34 @@
 use std::collections::BTreeMap;
 
-use macindecode_windows_spatial_audio::{DynamicObjectRender, RenderQuantum, SpatialSource};
-
-use crate::decoder::{
-    DecodedSceneBlock, SceneObjectPcm, SceneQueueReader, SpatialObjectState, SpatialPosition,
+use macindecode_windows_spatial_audio::{
+    DynamicObjectRender, LfeObjectRender, RenderQuantum, SpatialSource,
 };
+
+use crate::decoder::{DecodedSceneBlock, SceneQueueReader, SpatialObjectState, SpatialPosition};
 
 pub(super) struct SceneRenderSource {
     reader: SceneQueueReader,
     sample_rate: u32,
+    dynamic_object_count: u32,
     has_lfe: bool,
+    configuration: Option<SceneConfiguration>,
     timeline_frame: i64,
     current: Option<BlockCursor>,
 }
 
 impl SceneRenderSource {
-    pub(super) const fn new(reader: SceneQueueReader, sample_rate: u32, has_lfe: bool) -> Self {
+    pub(super) const fn new(
+        reader: SceneQueueReader,
+        sample_rate: u32,
+        dynamic_object_count: u32,
+        has_lfe: bool,
+    ) -> Self {
         Self {
             reader,
             sample_rate,
+            dynamic_object_count,
             has_lfe,
+            configuration: None,
             timeline_frame: 0,
             current: None,
         }
@@ -29,7 +38,7 @@ impl SceneRenderSource {
         let requested = usize::try_from(frame_count)
             .map_err(|_| "Windows Spatial Audio frame count exceeds usize".to_owned())?;
         let mut objects = BTreeMap::<u64, DynamicObjectRender>::new();
-        let mut lfe = self.has_lfe.then(|| vec![0.0; requested]);
+        let mut lfe = self.has_lfe.then(|| LfeQuantumAccumulator::new(requested));
         let mut written = 0usize;
         let mut underrun = false;
 
@@ -89,7 +98,7 @@ impl SceneRenderSource {
         let end_of_stream = self.current.is_none() && self.reader.is_end_of_stream();
         Ok(RenderQuantum {
             objects: objects.into_values().collect(),
-            lfe,
+            lfe: lfe.map(LfeQuantumAccumulator::finish),
             frames_written: u32::try_from(written).unwrap_or(u32::MAX),
             end_of_stream,
             underrun,
@@ -101,7 +110,13 @@ impl SceneRenderSource {
             let Some(block) = self.reader.try_pop() else {
                 return Ok(false);
             };
-            validate_block(&block, self.sample_rate, self.has_lfe)?;
+            validate_block(
+                &block,
+                self.sample_rate,
+                self.dynamic_object_count,
+                self.has_lfe,
+                &mut self.configuration,
+            )?;
             let block_end = block
                 .start_frame()
                 .checked_add(i64::from(block.duration_frames()))
@@ -135,10 +150,29 @@ struct BlockCursor {
     offset_frames: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SceneConfiguration {
+    generation: u32,
+    presentation_index: u32,
+    presentation_id: Option<u32>,
+}
+
+impl SceneConfiguration {
+    const fn from_block(block: &DecodedSceneBlock) -> Self {
+        Self {
+            generation: block.configuration_generation(),
+            presentation_index: block.presentation_index(),
+            presentation_id: block.presentation_id(),
+        }
+    }
+}
+
 fn validate_block(
     block: &DecodedSceneBlock,
     sample_rate: u32,
+    dynamic_object_count: u32,
     stream_has_lfe: bool,
+    configuration: &mut Option<SceneConfiguration>,
 ) -> Result<(), String> {
     if block.sample_rate() != sample_rate {
         return Err(format!(
@@ -148,6 +182,34 @@ fn validate_block(
     }
     let expected = usize::try_from(block.duration_frames())
         .map_err(|_| "Scene block duration exceeds usize".to_owned())?;
+    let actual_dynamic_objects = u32::try_from(block.objects().len())
+        .map_err(|_| "Scene object count exceeds the Windows API range".to_owned())?;
+    if actual_dynamic_objects != dynamic_object_count {
+        return Err(format!(
+            "Scene dynamic-object count changed from {dynamic_object_count} to {actual_dynamic_objects} after Spatial Audio activation"
+        ));
+    }
+    if block.lfe().is_some() != stream_has_lfe {
+        return Err("Scene LFE layout changed after Spatial Audio activation".to_owned());
+    }
+    let actual_configuration = SceneConfiguration::from_block(block);
+    if let Some(expected_configuration) = configuration.as_ref() {
+        if expected_configuration.generation != actual_configuration.generation {
+            return Err(format!(
+                "Scene configuration generation changed from {} to {}; dynamic topology changes require reopening the Spatial Audio stream",
+                expected_configuration.generation, actual_configuration.generation
+            ));
+        }
+        if expected_configuration.presentation_index != actual_configuration.presentation_index
+            || expected_configuration.presentation_id != actual_configuration.presentation_id
+        {
+            return Err(
+                "Selected Scene presentation changed during Spatial Audio playback".to_owned(),
+            );
+        }
+    } else {
+        *configuration = Some(actual_configuration);
+    }
     for object in block.objects() {
         if object.samples().len() != expected {
             return Err(format!(
@@ -157,9 +219,9 @@ fn validate_block(
         }
     }
     if let Some(component) = block.lfe()
-        && (!stream_has_lfe || component.samples().len() != expected)
+        && component.samples().len() != expected
     {
-        return Err("Scene LFE layout changed after Spatial Audio activation".to_owned());
+        return Err("Scene LFE PCM length does not match its block".to_owned());
     }
     Ok(())
 }
@@ -181,7 +243,12 @@ fn copy_object_pcm(
         .ok_or_else(|| "Spatial Audio object slice overflow".to_owned())?;
 
     for object in cursor.block.objects() {
-        let state = object_state_at(&cursor.block, object, cursor.offset_frames);
+        let state = element_state_at(
+            &cursor.block,
+            object.element_id(),
+            object.initial_state(),
+            cursor.offset_frames,
+        );
         let render = renders.entry(object.element_id()).or_insert_with(|| {
             let (active, position, gain) = windows_render_state(state);
             DynamicObjectRender {
@@ -202,11 +269,21 @@ fn copy_lfe_pcm(
     cursor: &BlockCursor,
     destination_offset: usize,
     take: usize,
-    destination: Option<&mut Vec<f32>>,
+    destination: Option<&mut LfeQuantumAccumulator>,
 ) -> Result<(), String> {
     let (Some(source), Some(destination)) = (cursor.block.lfe(), destination) else {
         return Ok(());
     };
+    if !destination.state_initialized {
+        let state = element_state_at(
+            &cursor.block,
+            source.element_id(),
+            source.initial_state(),
+            cursor.offset_frames,
+        );
+        (destination.render.active, destination.render.gain) = lfe_render_state(state);
+        destination.state_initialized = true;
+    }
     let source_start = usize::try_from(cursor.offset_frames)
         .map_err(|_| "Scene LFE offset exceeds usize".to_owned())?;
     let source_end = source_start
@@ -215,44 +292,73 @@ fn copy_lfe_pcm(
     let destination_end = destination_offset
         .checked_add(take)
         .ok_or_else(|| "Spatial Audio LFE slice overflow".to_owned())?;
-    destination[destination_offset..destination_end]
+    destination.render.samples[destination_offset..destination_end]
         .copy_from_slice(&source.samples()[source_start..source_end]);
     Ok(())
 }
 
-fn object_state_at(
+struct LfeQuantumAccumulator {
+    render: LfeObjectRender,
+    state_initialized: bool,
+}
+
+impl LfeQuantumAccumulator {
+    fn new(frame_count: usize) -> Self {
+        Self {
+            render: LfeObjectRender {
+                active: false,
+                gain: 0.0,
+                samples: vec![0.0; frame_count],
+            },
+            state_initialized: false,
+        }
+    }
+
+    fn finish(self) -> LfeObjectRender {
+        self.render
+    }
+}
+
+fn element_state_at(
     block: &DecodedSceneBlock,
-    object: &SceneObjectPcm,
+    element_id: u64,
+    initial_state: Option<SpatialObjectState>,
     offset_frames: u32,
 ) -> Option<SpatialObjectState> {
-    let mut state = object.initial_state()?;
-    let mut ramp = None;
+    let mut state = initial_state;
+    let mut ramp: Option<MetadataRamp> = None;
     for update in block
         .metadata_updates()
         .iter()
         .copied()
-        .filter(|update| update.element_id() == object.element_id())
+        .filter(|update| update.element_id() == element_id)
     {
         if update.offset_frames() > offset_frames {
             break;
         }
-        let from = ramp.map_or(state, |active: MetadataRamp| {
-            active.state_at(update.offset_frames())
-        });
+        let from = ramp
+            .map(|active| active.state_at(update.offset_frames()))
+            .or(state);
         if update.ramp_frames() == 0 {
-            state = update.state();
+            state = Some(update.state());
             ramp = None;
-        } else {
-            state = update.state();
+        } else if let Some(from) = from {
+            state = Some(update.state());
             ramp = Some(MetadataRamp {
                 start_frame: update.offset_frames(),
                 duration_frames: update.ramp_frames(),
                 from,
                 to: update.state(),
             });
+        } else {
+            // With no state before the first complete update there is no valid ramp origin.
+            // Establish the first known state at its update boundary instead of muting the
+            // remainder of the Scene block.
+            state = Some(update.state());
+            ramp = None;
         }
     }
-    ramp.map_or(Some(state), |active| Some(active.state_at(offset_frames)))
+    ramp.map(|active| active.state_at(offset_frames)).or(state)
 }
 
 #[derive(Clone, Copy)]
@@ -287,6 +393,12 @@ fn interpolate_state(
     amount: f32,
 ) -> SpatialObjectState {
     let amount = amount.clamp(0.0, 1.0);
+    if amount <= 0.0 {
+        return from;
+    }
+    if amount >= 1.0 {
+        return to;
+    }
     let position = match (from.position(), to.position()) {
         (Some(from), Some(to)) => Some(SpatialPosition::new(
             lerp(from.x(), to.x(), amount),
@@ -331,9 +443,49 @@ fn windows_render_state(state: Option<SpatialObjectState>) -> (bool, [f32; 3], f
     )
 }
 
+fn lfe_render_state(state: Option<SpatialObjectState>) -> (bool, f32) {
+    let Some(state) = state else {
+        return (false, 0.0);
+    };
+    (
+        state.metadata_active() && state.semantic_complete(),
+        state.linear_gain().unwrap_or(1.0),
+    )
+}
+
 #[cfg(test)]
 mod tests {
+    use crate::decoder::{SceneLfePcm, SceneMetadataUpdate, SceneObjectPcm};
+
     use super::*;
+
+    fn complete_state(gain: f32) -> SpatialObjectState {
+        SpatialObjectState::new(
+            true,
+            Some(SpatialPosition::new(0.25, -0.5, 0.75)),
+            Some(gain),
+            true,
+        )
+    }
+
+    fn configured_block(generation: u32) -> DecodedSceneBlock {
+        DecodedSceneBlock::new(
+            48_000,
+            0,
+            4,
+            generation,
+            2,
+            Some(7),
+            true,
+            vec![SceneObjectPcm::new(
+                42,
+                Some(complete_state(1.0)),
+                vec![0.0; 4],
+            )],
+            None,
+            Vec::new(),
+        )
+    }
 
     #[test]
     fn maps_core_adm_axes_to_windows_listener_coordinates() {
@@ -368,5 +520,101 @@ mod tests {
         let middle = interpolate_state(from, to, 0.5);
         assert_eq!(middle.position(), Some(SpatialPosition::new(0.0, 0.0, 0.5)));
         assert_eq!(middle.linear_gain(), Some(0.5));
+    }
+
+    #[test]
+    fn later_update_establishes_state_when_initial_state_is_missing() {
+        let target = complete_state(0.6);
+        let block = DecodedSceneBlock::new(
+            48_000,
+            0,
+            16,
+            1,
+            0,
+            None,
+            true,
+            vec![SceneObjectPcm::new(42, None, vec![0.0; 16])],
+            None,
+            vec![SceneMetadataUpdate::new(42, 4, 8, u32::MAX, target)],
+        );
+
+        assert_eq!(element_state_at(&block, 42, None, 3), None);
+        assert_eq!(element_state_at(&block, 42, None, 4), Some(target));
+        assert_eq!(element_state_at(&block, 42, None, 12), Some(target));
+    }
+
+    #[test]
+    fn ramp_endpoint_uses_the_exact_complete_target_state() {
+        let incomplete = SpatialObjectState::new(
+            true,
+            Some(SpatialPosition::new(-1.0, 0.0, 0.0)),
+            Some(0.25),
+            false,
+        );
+        let complete = complete_state(0.9);
+
+        assert_eq!(interpolate_state(incomplete, complete, 1.0), complete);
+        assert_eq!(
+            MetadataRamp {
+                start_frame: 10,
+                duration_frames: 5,
+                from: incomplete,
+                to: complete,
+            }
+            .state_at(15),
+            complete
+        );
+    }
+
+    #[test]
+    fn lfe_render_state_follows_oamd_activation_and_gain() {
+        assert_eq!(lfe_render_state(None), (false, 0.0));
+        assert_eq!(lfe_render_state(Some(complete_state(0.4))), (true, 0.4));
+
+        let inactive = SpatialObjectState::new(false, None, Some(0.8), true);
+        assert_eq!(lfe_render_state(Some(inactive)), (false, 0.8));
+    }
+
+    #[test]
+    fn lfe_quantum_uses_ramped_state_and_pcm_at_its_start() {
+        let target = complete_state(0.8);
+        let cursor = BlockCursor {
+            block: DecodedSceneBlock::new(
+                48_000,
+                0,
+                6,
+                1,
+                0,
+                None,
+                true,
+                Vec::new(),
+                Some(SceneLfePcm::new(
+                    99,
+                    Some(complete_state(0.2)),
+                    vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
+                )),
+                vec![SceneMetadataUpdate::new(99, 2, 2, u32::MAX, target)],
+            ),
+            offset_frames: 4,
+        };
+        let mut accumulator = LfeQuantumAccumulator::new(2);
+
+        copy_lfe_pcm(&cursor, 0, 2, Some(&mut accumulator)).expect("copy LFE quantum");
+        let render = accumulator.finish();
+        assert!(render.active);
+        assert!((render.gain - 0.8).abs() < f32::EPSILON);
+        assert_eq!(render.samples, vec![4.0, 5.0]);
+    }
+
+    #[test]
+    fn rejects_configuration_generation_changes_after_activation() {
+        let mut configuration = None;
+        validate_block(&configured_block(3), 48_000, 1, false, &mut configuration)
+            .expect("first block establishes the active Scene configuration");
+
+        let error = validate_block(&configured_block(4), 48_000, 1, false, &mut configuration)
+            .expect_err("a generation change must not reuse the active object IDs");
+        assert!(error.contains("generation changed from 3 to 4"), "{error}");
+        assert!(error.contains("require reopening"), "{error}");
     }
 }

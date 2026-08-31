@@ -31,6 +31,26 @@ pub struct PlayerApp {
     diagnostics_open: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutputSyncAction {
+    Configure,
+    Preserve,
+    Reset,
+}
+
+const fn output_sync_action(
+    decode_phase: DecodePhase,
+    configured_for_request: bool,
+) -> OutputSyncAction {
+    match (decode_phase, configured_for_request) {
+        (DecodePhase::Ready | DecodePhase::EndOfStream, false) => OutputSyncAction::Configure,
+        (DecodePhase::Buffering | DecodePhase::Ready | DecodePhase::EndOfStream, true) => {
+            OutputSyncAction::Preserve
+        }
+        _ => OutputSyncAction::Reset,
+    }
+}
+
 impl PlayerApp {
     pub fn new(creation_context: &eframe::CreationContext<'_>) -> Self {
         theme::install(&creation_context.egui_ctx);
@@ -175,29 +195,35 @@ impl PlayerApp {
     }
 
     fn sync_output(&mut self, context: &egui::Context) {
-        let config = self.decoder.snapshot().metrics().and_then(|metrics| {
-            matches!(
-                self.decoder.snapshot().phase(),
-                DecodePhase::Ready | DecodePhase::EndOfStream
-            )
-            .then(|| {
-                OutputStreamConfig::new(
-                    self.decoder.request_id(),
-                    metrics.sample_rate(),
-                    metrics.object_count(),
-                    metrics.has_lfe(),
-                )
-            })
-        });
-        match config {
-            Some(Ok(config)) => self
-                .output
-                .ensure_configured(config, self.decoder.scene_reader()),
-            Some(Err(error)) => {
-                self.output.reset();
-                self.status = StatusLine::warning(error);
+        let request_id = self.decoder.request_id();
+        let configured_for_request = self.output.is_configured_for_request(request_id);
+        match output_sync_action(self.decoder.snapshot().phase(), configured_for_request) {
+            OutputSyncAction::Configure => {
+                let config = self
+                    .decoder
+                    .snapshot()
+                    .metrics()
+                    .ok_or_else(|| "Ready decoder state has no Scene metrics".to_owned())
+                    .and_then(|metrics| {
+                        OutputStreamConfig::new(
+                            request_id,
+                            metrics.sample_rate(),
+                            metrics.object_count(),
+                            metrics.has_lfe(),
+                        )
+                    });
+                match config {
+                    Ok(config) => self
+                        .output
+                        .ensure_configured(config, self.decoder.scene_reader()),
+                    Err(error) => {
+                        self.output.reset();
+                        self.status = StatusLine::warning(error);
+                    }
+                }
             }
-            None => self.output.reset(),
+            OutputSyncAction::Preserve => {}
+            OutputSyncAction::Reset => self.output.reset(),
         }
 
         let master_gain = if self.muted { 0.0 } else { self.volume };
@@ -1456,4 +1482,41 @@ fn draw_drop_overlay(context: &egui::Context) {
         egui::FontId::proportional(22.0),
         theme::TEXT,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn output_sync_preserves_same_request_during_buffering() {
+        assert_eq!(
+            output_sync_action(DecodePhase::Buffering, true),
+            OutputSyncAction::Preserve
+        );
+    }
+
+    #[test]
+    fn output_sync_resets_unconfigured_buffering_state() {
+        assert_eq!(
+            output_sync_action(DecodePhase::Buffering, false),
+            OutputSyncAction::Reset
+        );
+    }
+
+    #[test]
+    fn output_sync_configures_an_unconfigured_ready_decoder() {
+        assert_eq!(
+            output_sync_action(DecodePhase::Ready, false),
+            OutputSyncAction::Configure
+        );
+    }
+
+    #[test]
+    fn output_sync_resets_during_a_new_open_request() {
+        assert_eq!(
+            output_sync_action(DecodePhase::Opening, true),
+            OutputSyncAction::Reset
+        );
+    }
 }

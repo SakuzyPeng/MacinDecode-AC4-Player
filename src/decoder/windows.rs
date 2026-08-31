@@ -333,7 +333,7 @@ fn enqueue_block(
                 return Ok(RunControl::Complete);
             }
             Err(QueuePushError::Full(returned)) => {
-                block = returned;
+                block = *returned;
                 send_progress(request_id, path, DecodePhase::Ready, metrics, event_sender);
                 match command_receiver.recv_timeout(COMMAND_POLL_INTERVAL) {
                     Ok(WorkerCommand::Shutdown) | Err(RecvTimeoutError::Disconnected) => {
@@ -435,6 +435,7 @@ fn own_scene_frame(frame: Ac4SceneFrame<'_>) -> Result<DecodedSceneBlock, String
             validate_samples(component.plane().samples(), expected_samples)?;
             lfe = Some(SceneLfePcm::new(
                 bed.element_id().get(),
+                bed.initial_state().map(own_state),
                 component.plane().samples().to_vec(),
             ));
         }
