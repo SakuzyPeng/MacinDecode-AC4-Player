@@ -3,6 +3,7 @@ name = "macindecode-windows-spatial-audio"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.98"
+license = "MIT"
 publish = false
 
 [target.'cfg(target_os = "windows")'.dependencies]

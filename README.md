@@ -75,9 +75,8 @@ cargo test -p macindecode-windows-spatial-audio ended_renderer_releases_objects_
 
 真实媒体应只放在仓库根目录被忽略的 `.local-test-media/`，不得提交到 Git。
 
-本仓库当前未选择项目发布许可证。第三方依赖的许可证需在引入和发布前持续审计；GUI 栈使用
-MIT/Apache-2.0 的 `egui`/`eframe`，`rfd` 与 MacinDecode inspection 使用 MIT，
-不以 GPLv3 作为发布基础。
+本项目采用 [MIT License](LICENSE) 发布。第三方依赖的许可证需在引入和发布前持续审计；
+GUI 栈使用 MIT/Apache-2.0 的 `egui`/`eframe`，`rfd` 与 MacinDecode inspection 使用 MIT。
 
 架构边界见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，Windows 解码契约见
 [docs/WINDOWS_DECODE.md](docs/WINDOWS_DECODE.md)，原生输出契约见
