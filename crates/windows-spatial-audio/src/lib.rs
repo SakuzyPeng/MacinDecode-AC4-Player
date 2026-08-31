@@ -317,7 +317,7 @@ fn render_worker(
     snapshot: &Arc<Mutex<RenderSnapshot>>,
 ) {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        run_render_loop(config, source, commands, snapshot)
+        run_render_loop(&config, source, commands, snapshot)
     }));
     match result {
         Ok(Ok(())) => {}
@@ -327,13 +327,13 @@ fn render_worker(
 }
 
 fn run_render_loop(
-    config: StreamConfig,
+    config: &StreamConfig,
     mut source: Box<dyn SpatialSource>,
     commands: &Receiver<Command>,
     snapshot: &Arc<Mutex<RenderSnapshot>>,
 ) -> Result<(), String> {
     let _apartment = ComApartment::initialize()?;
-    let mut context = SpatialContext::open(&config)?;
+    let mut context = SpatialContext::open(config)?;
     {
         let mut state = lock_recover(snapshot);
         state.phase = RenderPhase::Ready;
