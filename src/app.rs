@@ -933,7 +933,8 @@ impl PlayerApp {
                     .inner_margin(egui::Margin::same(18)),
             )
             .show(root, |ui| {
-                const INFO_BLOCK_HEIGHT: f32 = 220.0;
+                // Noto Sans CJK makes the complete ready-state card about 249 points tall.
+                const INFO_BLOCK_HEIGHT: f32 = 256.0;
                 const BLOCK_GAP: f32 = 18.0;
 
                 let available = ui.available_rect_before_wrap();
