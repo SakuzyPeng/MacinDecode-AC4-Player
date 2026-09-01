@@ -1300,7 +1300,8 @@ fn playlist_contents(
                         if ui
                             .add_sized(
                                 [ui.available_width(), 34.0],
-                                egui::Button::selectable(selected, RichText::new(label).size(12.0))
+                                egui::Button::selectable(selected, ())
+                                    .left_text(RichText::new(label).size(12.0))
                                     .truncate(),
                             )
                             .on_hover_text(source.path().display().to_string())

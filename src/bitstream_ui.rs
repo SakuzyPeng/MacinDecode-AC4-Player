@@ -182,7 +182,7 @@ fn content_summary_text(report: &InspectReport) -> String {
     let Some(presentation) = report.presentations.first() else {
         return "Not present".to_owned();
     };
-    let content = field_summary_text(&presentation.summary).replace(" (single_group)", "");
+    let content = compact_content_summary(&field_summary_text(&presentation.summary));
     if !has_object_coded_audio(report) {
         return content;
     }
@@ -194,6 +194,26 @@ fn content_summary_text(report: &InspectReport) -> String {
         .and_then(serde_json::Value::as_u64)
         .and_then(object_profile)
         .map_or(content.clone(), |profile| format!("{content} · {profile}"))
+}
+
+fn compact_content_summary(summary: &str) -> String {
+    let Some((description, configuration)) =
+        summary
+            .rsplit_once(" (")
+            .and_then(|(description, configuration)| {
+                configuration
+                    .strip_suffix(')')
+                    .map(|configuration| (description, configuration))
+            })
+    else {
+        return summary.strip_suffix(" main").unwrap_or(summary).to_owned();
+    };
+    let description = description.strip_suffix(" main").unwrap_or(description);
+    if configuration == "single_group" {
+        description.to_owned()
+    } else {
+        format!("{description} ({configuration})")
+    }
 }
 
 const fn object_profile(compatibility_level: u64) -> Option<&'static str> {
@@ -696,7 +716,7 @@ fn detail_frame(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui)) {
 
 #[cfg(test)]
 mod tests {
-    use super::{object_core_layout, object_profile};
+    use super::{compact_content_summary, object_core_layout, object_profile};
 
     #[test]
     fn maps_only_confirmed_object_core_bit_rate_tiers() {
@@ -710,5 +730,22 @@ mod tests {
         assert_eq!(object_profile(3), Some("16 objects (L3)"));
         assert_eq!(object_profile(4), Some("20 objects (L4)"));
         assert_eq!(object_profile(2), None);
+    }
+
+    #[test]
+    fn compact_content_hides_only_the_main_role_and_redundant_configuration() {
+        assert_eq!(
+            compact_content_summary("Object-Based main (single_group)"),
+            "Object-Based"
+        );
+        assert_eq!(
+            compact_content_summary("Object-Based main (presentation_config_3)"),
+            "Object-Based (presentation_config_3)"
+        );
+        assert_eq!(
+            compact_content_summary("Object-Based alternative (single_group)"),
+            "Object-Based alternative"
+        );
+        assert_eq!(compact_content_summary("Main Street"), "Main Street");
     }
 }
