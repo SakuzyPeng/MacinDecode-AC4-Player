@@ -1,5 +1,6 @@
 /target/
 /.local-test-media/
+/assets/fonts/NotoSansCJKsc-Regular.otf
 .DS_Store
 *.swp
 *.swo
