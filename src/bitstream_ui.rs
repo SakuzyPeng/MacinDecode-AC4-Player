@@ -256,10 +256,7 @@ pub fn draw_details(
             ui.add_space(14.0);
             match state {
                 Some(InspectionState::Ready(snapshot)) => {
-                    egui::ScrollArea::vertical()
-                        .id_salt("bitstream-details-scroll")
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| draw_report(ui, &snapshot.report));
+                    draw_report(ui, &snapshot.report);
                 }
                 Some(InspectionState::Failed(error)) => {
                     action = draw_details_error(ui, error);
@@ -328,51 +325,141 @@ fn draw_details_error(ui: &mut egui::Ui, error: &str) -> Option<BitstreamAction>
     action
 }
 
+const DETAIL_ROW_HEIGHT: f32 = 28.0;
+const DETAIL_HEADER_HEIGHT: f32 = 30.0;
+
+enum DetailTableRow {
+    Section {
+        title: String,
+        state_id: egui::Id,
+        default_open: bool,
+        open: bool,
+        depth: u8,
+    },
+    Field {
+        label: String,
+        value: String,
+        depth: u8,
+        alternate: bool,
+    },
+}
+
+struct DetailTable {
+    context: egui::Context,
+    rows: Vec<DetailTableRow>,
+    field_depth: u8,
+    alternate: bool,
+}
+
+impl DetailTable {
+    fn new(context: &egui::Context) -> Self {
+        Self {
+            context: context.clone(),
+            rows: Vec::new(),
+            field_depth: 0,
+            alternate: false,
+        }
+    }
+
+    fn group(
+        &mut self,
+        title: impl Into<String>,
+        state_id: egui::Id,
+        default_open: bool,
+        depth: u8,
+        contents: impl FnOnce(&mut Self),
+    ) {
+        let open = egui::collapsing_header::CollapsingState::load_with_default_open(
+            &self.context,
+            state_id,
+            default_open,
+        )
+        .is_open();
+        self.rows.push(DetailTableRow::Section {
+            title: title.into(),
+            state_id,
+            default_open,
+            open,
+            depth,
+        });
+
+        if open {
+            let previous_depth = self.field_depth;
+            self.field_depth = depth + 1;
+            contents(self);
+            self.field_depth = previous_depth;
+        }
+    }
+
+    fn field(&mut self, label: impl Into<String>, value: impl Into<String>) {
+        self.rows.push(DetailTableRow::Field {
+            label: label.into(),
+            value: value.into(),
+            depth: self.field_depth,
+            alternate: self.alternate,
+        });
+        self.alternate = !self.alternate;
+    }
+}
+
 fn draw_report(ui: &mut egui::Ui, report: &InspectReport) {
-    collapsible_group(ui, "Audio", egui::Id::new("details-audio"), true, |ui| {
-        draw_audio(ui, report);
+    let rows = collect_report_rows(ui.ctx(), report);
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        draw_table_header(ui);
+        egui::ScrollArea::vertical()
+            .id_salt("bitstream-details-scroll")
+            .auto_shrink([false, false])
+            .animated(false)
+            .show_rows(ui, DETAIL_ROW_HEIGHT, rows.len(), |ui, visible_rows| {
+                for row_index in visible_rows {
+                    draw_table_row(ui, &rows[row_index]);
+                }
+            });
     });
-    ui.add_space(8.0);
+}
+
+fn collect_report_rows(context: &egui::Context, report: &InspectReport) -> Vec<DetailTableRow> {
+    let mut table = DetailTable::new(context);
+    table.group("Audio", egui::Id::new("details-audio"), true, 0, |table| {
+        draw_audio(table, report);
+    });
 
     for presentation in &report.presentations {
-        let title = format!("Presentation {}", presentation.index);
-        collapsible_group(
-            ui,
-            &title,
+        table.group(
+            format!("Presentation {}", presentation.index),
             egui::Id::new(("details-presentation", presentation.index)),
             true,
-            |ui| draw_presentation(ui, presentation),
+            0,
+            |table| draw_presentation(table, presentation),
         );
-        ui.add_space(8.0);
     }
 
     for substream in &report.audio_substreams {
-        let title = format!("Substream {}", substream.index);
-        collapsible_group(
-            ui,
-            &title,
+        table.group(
+            format!("Substream {}", substream.index),
             egui::Id::new(("details-substream", substream.index)),
             false,
-            |ui| draw_substream(ui, substream),
+            0,
+            |table| draw_substream(table, substream),
         );
-        ui.add_space(8.0);
     }
 
-    let issues_title = format!("Issues ({})", report.issues.len());
-    collapsible_group(
-        ui,
-        &issues_title,
+    table.group(
+        format!("Issues ({})", report.issues.len()),
         egui::Id::new("details-issues"),
         !report.issues.is_empty(),
-        |ui| draw_issues(ui, report),
+        0,
+        |table| draw_issues(table, report),
     );
+    table.rows
 }
 
-fn draw_audio(ui: &mut egui::Ui, report: &InspectReport) {
-    plain_detail_row(ui, "Codec", &report.stream.codec);
-    plain_detail_row(ui, "Source", source_kind_text(report.source.kind));
+fn draw_audio(table: &mut DetailTable, report: &InspectReport) {
+    table.field("Codec", &report.stream.codec);
+    table.field("Source", source_kind_text(report.source.kind));
     detail_fields(
-        ui,
+        table,
         &[
             ("Track index", &report.source.track_index),
             ("Duration", &report.source.duration),
@@ -398,12 +485,12 @@ fn draw_audio(ui: &mut egui::Ui, report: &InspectReport) {
             ),
         ],
     );
-    plain_detail_row(ui, "Frames", &report.source.frame_count.to_string());
+    table.field("Frames", report.source.frame_count.to_string());
 }
 
-fn draw_presentation(ui: &mut egui::Ui, presentation: &InspectPresentation) {
+fn draw_presentation(table: &mut DetailTable, presentation: &InspectPresentation) {
     detail_fields(
-        ui,
+        table,
         &[
             ("Presentation ID", &presentation.presentation_id),
             ("Summary", &presentation.summary),
@@ -426,44 +513,44 @@ fn draw_presentation(ui: &mut egui::Ui, presentation: &InspectPresentation) {
             ),
         ],
     );
-    nested_presentation_groups(ui, presentation);
+    nested_presentation_groups(table, presentation);
 }
 
-fn nested_presentation_groups(ui: &mut egui::Ui, presentation: &InspectPresentation) {
+fn nested_presentation_groups(table: &mut DetailTable, presentation: &InspectPresentation) {
     let index = presentation.index;
-    collapsible_group(
-        ui,
+    table.group(
         "Loudness",
         egui::Id::new(("details-loudness", index)),
         false,
-        |ui| draw_loudness(ui, &presentation.loudness),
+        1,
+        |table| draw_loudness(table, &presentation.loudness),
     );
-    collapsible_group(
-        ui,
+    table.group(
         "Dynamic range control",
         egui::Id::new(("details-drc", index)),
         false,
-        |ui| draw_drc(ui, &presentation.dynamic_range_control),
+        1,
+        |table| draw_drc(table, &presentation.dynamic_range_control),
     );
-    collapsible_group(
-        ui,
+    table.group(
         "Mixing metadata",
         egui::Id::new(("details-mixing", index)),
         false,
-        |ui| draw_mixing(ui, &presentation.mixing_metadata),
+        1,
+        |table| draw_mixing(table, &presentation.mixing_metadata),
     );
-    collapsible_group(
-        ui,
+    table.group(
         "Downmix",
         egui::Id::new(("details-downmix", index)),
         false,
-        |ui| draw_downmix(ui, &presentation.downmix),
+        1,
+        |table| draw_downmix(table, &presentation.downmix),
     );
 }
 
-fn draw_loudness(ui: &mut egui::Ui, loudness: &InspectLoudness) {
+fn draw_loudness(table: &mut DetailTable, loudness: &InspectLoudness) {
     detail_fields(
-        ui,
+        table,
         &[
             ("Loudness", &loudness.loudness),
             ("Version", &loudness.version),
@@ -488,9 +575,9 @@ fn draw_loudness(ui: &mut egui::Ui, loudness: &InspectLoudness) {
     );
 }
 
-fn draw_drc(ui: &mut egui::Ui, drc: &InspectDrc) {
+fn draw_drc(table: &mut DetailTable, drc: &InspectDrc) {
     detail_fields(
-        ui,
+        table,
         &[
             ("Enhanced AC-3 profile", &drc.enhanced_ac3_profile),
             ("Home theater AVR", &drc.home_theater_avr),
@@ -501,9 +588,9 @@ fn draw_drc(ui: &mut egui::Ui, drc: &InspectDrc) {
     );
 }
 
-fn draw_mixing(ui: &mut egui::Ui, mixing: &InspectMixing) {
+fn draw_mixing(table: &mut DetailTable, mixing: &InspectMixing) {
     detail_fields(
-        ui,
+        table,
         &[
             ("Main audio ducking level", &mixing.main_audio_ducking_level),
             (
@@ -518,9 +605,9 @@ fn draw_mixing(ui: &mut egui::Ui, mixing: &InspectMixing) {
     );
 }
 
-fn draw_downmix(ui: &mut egui::Ui, downmix: &InspectDownmix) {
+fn draw_downmix(table: &mut DetailTable, downmix: &InspectDownmix) {
     detail_fields(
-        ui,
+        table,
         &[
             ("Lo/Ro Center mix gain", &downmix.loro_center_mix_gain),
             ("Lo/Ro Surround mix gain", &downmix.loro_surround_mix_gain),
@@ -533,9 +620,9 @@ fn draw_downmix(ui: &mut egui::Ui, downmix: &InspectDownmix) {
     );
 }
 
-fn draw_substream(ui: &mut egui::Ui, substream: &InspectAudioSubstream) {
+fn draw_substream(table: &mut DetailTable, substream: &InspectAudioSubstream) {
     detail_fields(
-        ui,
+        table,
         &[
             ("Summary", &substream.summary),
             ("Channel configuration", &substream.channel_configuration),
@@ -544,25 +631,25 @@ fn draw_substream(ui: &mut egui::Ui, substream: &InspectAudioSubstream) {
             ("Bit rate", &substream.bit_rate),
         ],
     );
-    collapsible_group(
-        ui,
+    table.group(
         "Preprocessing",
         egui::Id::new(("details-preprocessing", substream.index)),
         false,
-        |ui| draw_preprocessing(ui, &substream.preprocessing),
+        1,
+        |table| draw_preprocessing(table, &substream.preprocessing),
     );
-    collapsible_group(
-        ui,
+    table.group(
         "Dialogue Enhancement",
         egui::Id::new(("details-dialogue-enhancement", substream.index)),
         false,
-        |ui| draw_dialogue_enhancement(ui, &substream.dialogue_enhancement),
+        1,
+        |table| draw_dialogue_enhancement(table, &substream.dialogue_enhancement),
     );
 }
 
-fn draw_preprocessing(ui: &mut egui::Ui, preprocessing: &InspectPreprocessing) {
+fn draw_preprocessing(table: &mut DetailTable, preprocessing: &InspectPreprocessing) {
     detail_fields(
-        ui,
+        table,
         &[
             (
                 "Previous mix type 2-channel",
@@ -621,9 +708,9 @@ fn draw_preprocessing(ui: &mut egui::Ui, preprocessing: &InspectPreprocessing) {
     );
 }
 
-fn draw_dialogue_enhancement(ui: &mut egui::Ui, de: &InspectDialogueEnhancement) {
+fn draw_dialogue_enhancement(table: &mut DetailTable, de: &InspectDialogueEnhancement) {
     detail_fields(
-        ui,
+        table,
         &[
             ("Enabled", &de.enabled),
             ("Method", &de.method),
@@ -633,29 +720,24 @@ fn draw_dialogue_enhancement(ui: &mut egui::Ui, de: &InspectDialogueEnhancement)
     );
 }
 
-fn draw_issues(ui: &mut egui::Ui, report: &InspectReport) {
+fn draw_issues(table: &mut DetailTable, report: &InspectReport) {
     if report.issues.is_empty() {
-        ui.label(RichText::new("None").color(theme::MUTED));
+        table.field("Status", "None");
         return;
     }
     for issue in &report.issues {
-        detail_frame(ui, |ui| {
-            ui.label(
-                RichText::new(format!("{} · {}", issue.severity, issue.code))
-                    .strong()
-                    .color(theme::WARNING),
-            );
-            ui.label(RichText::new(&issue.message).size(11.0).color(theme::TEXT));
-            let context = issue_context(
-                issue.frame_index,
-                issue.presentation_id,
-                issue.substream_index,
-            );
-            if !context.is_empty() {
-                ui.label(RichText::new(context).size(10.0).color(theme::MUTED));
-            }
-        });
-        ui.add_space(6.0);
+        table.field(
+            format!("{} · {}", issue.severity, issue.code),
+            &issue.message,
+        );
+        let context = issue_context(
+            issue.frame_index,
+            issue.presentation_id,
+            issue.substream_index,
+        );
+        if !context.is_empty() {
+            table.field("Context", context);
+        }
     }
 }
 
@@ -673,37 +755,193 @@ fn issue_context(frame: Option<u64>, presentation: Option<u32>, substream: Optio
     parts.join(" · ")
 }
 
-fn collapsible_group(
-    ui: &mut egui::Ui,
-    title: &str,
-    id: egui::Id,
-    default_open: bool,
-    contents: impl FnOnce(&mut egui::Ui),
-) {
-    egui::CollapsingHeader::new(RichText::new(title).size(13.0).strong().color(theme::TEXT))
-        .id_salt(id)
-        .default_open(default_open)
-        .show(ui, |ui| detail_frame(ui, contents));
+fn draw_table_header(ui: &mut egui::Ui) {
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), DETAIL_HEADER_HEIGHT),
+        egui::Sense::hover(),
+    );
+    let divider_x = rect.left() + detail_field_width(rect.width());
+    ui.painter()
+        .rect_filled(rect, egui::CornerRadius::ZERO, theme::SURFACE);
+    draw_table_dividers(ui, rect, divider_x);
+
+    draw_cell_label(
+        ui,
+        table_cell_rect(rect, rect.left() + 12.0, divider_x - 10.0),
+        RichText::new("Field")
+            .size(12.0)
+            .strong()
+            .color(theme::TEXT),
+    );
+    draw_cell_label(
+        ui,
+        table_cell_rect(rect, divider_x + 12.0, rect.right() - 10.0),
+        RichText::new("Value")
+            .size(12.0)
+            .strong()
+            .color(theme::TEXT),
+    );
 }
 
-fn detail_fields(ui: &mut egui::Ui, fields: &[(&str, &ReportedField)]) {
-    for (label, field) in fields {
-        detail_row(ui, label, &field_text(field, true));
+fn draw_table_row(ui: &mut egui::Ui, row: &DetailTableRow) {
+    match row {
+        DetailTableRow::Section {
+            title,
+            state_id,
+            default_open,
+            open,
+            depth,
+        } => draw_section_row(ui, title, *state_id, *default_open, *open, *depth),
+        DetailTableRow::Field {
+            label,
+            value,
+            depth,
+            alternate,
+        } => draw_field_row(ui, label, value, *depth, *alternate),
     }
 }
 
-fn plain_detail_row(ui: &mut egui::Ui, label: &str, value: &str) {
-    detail_row(ui, label, value);
+fn draw_section_row(
+    ui: &mut egui::Ui,
+    title: &str,
+    state_id: egui::Id,
+    default_open: bool,
+    open: bool,
+    depth: u8,
+) {
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), DETAIL_ROW_HEIGHT),
+        egui::Sense::click(),
+    );
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    let fill = if response.hovered() {
+        theme::HOVER
+    } else if depth == 0 {
+        theme::ACCENT_SOFT
+    } else {
+        theme::STAGE
+    };
+    ui.painter()
+        .rect_filled(rect, egui::CornerRadius::ZERO, fill);
+    ui.painter().line_segment(
+        [rect.left_bottom(), rect.right_bottom()],
+        Stroke::new(1.0, theme::BORDER),
+    );
+
+    let mut displayed_open = open;
+    if response.clicked() {
+        let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
+            ui.ctx(),
+            state_id,
+            default_open,
+        );
+        state.toggle(ui);
+        state.store(ui.ctx());
+        displayed_open = !displayed_open;
+    }
+
+    let left = rect.left() + 10.0 + f32::from(depth) * 18.0;
+    draw_disclosure_icon(ui, egui::pos2(left + 4.0, rect.center().y), displayed_open);
+    draw_cell_label(
+        ui,
+        table_cell_rect(rect, left + 18.0, rect.right() - 10.0),
+        RichText::new(title).size(12.0).strong().color(theme::TEXT),
+    );
 }
 
-fn detail_row(ui: &mut egui::Ui, label: &str, value: &str) {
-    ui.horizontal_top(|ui| {
-        ui.add_sized(
-            [190.0, 18.0],
-            egui::Label::new(RichText::new(label).size(11.0).color(theme::MUTED)),
-        );
-        ui.add(egui::Label::new(RichText::new(value).size(11.0).color(theme::TEXT)).wrap());
-    });
+fn draw_disclosure_icon(ui: &egui::Ui, center: egui::Pos2, open: bool) {
+    let points = if open {
+        vec![
+            egui::pos2(center.x - 4.0, center.y - 2.0),
+            egui::pos2(center.x + 4.0, center.y - 2.0),
+            egui::pos2(center.x, center.y + 3.0),
+        ]
+    } else {
+        vec![
+            egui::pos2(center.x - 2.0, center.y - 4.0),
+            egui::pos2(center.x + 3.0, center.y),
+            egui::pos2(center.x - 2.0, center.y + 4.0),
+        ]
+    };
+    ui.painter().add(egui::Shape::convex_polygon(
+        points,
+        theme::TEXT,
+        Stroke::NONE,
+    ));
+}
+
+fn draw_field_row(ui: &mut egui::Ui, label: &str, value: &str, depth: u8, alternate: bool) {
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), DETAIL_ROW_HEIGHT),
+        egui::Sense::hover(),
+    );
+    let fill = if alternate {
+        theme::STAGE
+    } else {
+        theme::SURFACE
+    };
+    ui.painter()
+        .rect_filled(rect, egui::CornerRadius::ZERO, fill);
+
+    let divider_x = rect.left() + detail_field_width(rect.width());
+    draw_table_dividers(ui, rect, divider_x);
+    let label_left = rect.left() + 12.0 + f32::from(depth) * 18.0;
+    draw_cell_label(
+        ui,
+        table_cell_rect(rect, label_left, divider_x - 10.0),
+        RichText::new(label).size(11.0).color(theme::MUTED),
+    );
+    draw_cell_label(
+        ui,
+        table_cell_rect(rect, divider_x + 12.0, rect.right() - 10.0),
+        RichText::new(value).size(11.0).color(theme::TEXT),
+    );
+}
+
+fn draw_table_dividers(ui: &egui::Ui, rect: egui::Rect, divider_x: f32) {
+    ui.painter().line_segment(
+        [
+            egui::pos2(divider_x, rect.top()),
+            egui::pos2(divider_x, rect.bottom()),
+        ],
+        Stroke::new(1.0, theme::BORDER),
+    );
+    ui.painter().line_segment(
+        [rect.left_bottom(), rect.right_bottom()],
+        Stroke::new(1.0, theme::BORDER),
+    );
+}
+
+fn draw_cell_label(ui: &mut egui::Ui, rect: egui::Rect, text: RichText) {
+    let clip_rect = ui.clip_rect().intersect(rect);
+    let _ = ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(Layout::left_to_right(Align::Center)),
+        |ui| {
+            ui.set_clip_rect(clip_rect);
+            ui.add(egui::Label::new(text).truncate());
+        },
+    );
+}
+
+fn table_cell_rect(row_rect: egui::Rect, left: f32, right: f32) -> egui::Rect {
+    egui::Rect::from_min_max(
+        egui::pos2(left.min(row_rect.right()), row_rect.top()),
+        egui::pos2(right.max(left).min(row_rect.right()), row_rect.bottom()),
+    )
+}
+
+fn detail_field_width(total_width: f32) -> f32 {
+    (total_width * 0.30)
+        .clamp(180.0, 500.0)
+        .min(total_width * 0.46)
+}
+
+fn detail_fields(table: &mut DetailTable, fields: &[(&str, &ReportedField)]) {
+    for (label, field) in fields {
+        table.field(*label, field_text(field, true));
+    }
 }
 
 fn detail_frame(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui)) {
@@ -716,7 +954,16 @@ fn detail_frame(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui)) {
 
 #[cfg(test)]
 mod tests {
-    use super::{compact_content_summary, object_core_layout, object_profile};
+    use super::{compact_content_summary, detail_field_width, object_core_layout, object_profile};
+
+    #[test]
+    fn detail_field_column_tracks_the_window_width_with_sensible_limits() {
+        for (window_width, expected_field_width) in
+            [(400.0, 180.0), (800.0, 240.0), (2_000.0, 500.0)]
+        {
+            assert!((detail_field_width(window_width) - expected_field_width).abs() < 0.01);
+        }
+    }
 
     #[test]
     fn maps_only_confirmed_object_core_bit_rate_tiers() {
