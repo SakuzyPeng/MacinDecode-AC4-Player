@@ -136,8 +136,7 @@ fn compact_key_value(ui: &mut egui::Ui, key: &str, value: &str) {
     ui.horizontal(|ui| {
         ui.label(RichText::new(key).size(12.0).color(theme::MUTED));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.add(egui::Label::new(RichText::new(value).size(12.0).color(theme::TEXT)).truncate())
-                .on_hover_text(value);
+            ui.add(egui::Label::new(RichText::new(value).size(12.0).color(theme::TEXT)).truncate());
         });
     });
 }
