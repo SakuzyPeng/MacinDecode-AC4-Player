@@ -31,11 +31,13 @@ pub fn draw_card(
 fn draw_empty_card(ui: &mut egui::Ui) -> Option<BitstreamAction> {
     summary_rows(ui, ["—", "—", "—"]);
     ui.separator();
-    ui.label(
-        RichText::new("Select a playlist item")
-            .size(11.0)
-            .color(theme::MUTED),
-    );
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new("Select a playlist item")
+                .size(11.0)
+                .color(theme::MUTED),
+        );
+    });
     None
 }
 
