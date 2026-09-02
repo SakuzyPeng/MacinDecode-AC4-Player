@@ -9,6 +9,7 @@
 use crate::theme;
 
 use super::camera::Camera;
+use super::figure::{Figure, PartTone};
 use super::mesh::{Layer, MeshBuilder, Rgb, ViewContext};
 use super::params;
 
@@ -24,12 +25,22 @@ pub struct SceneObject {
     pub position: [f32; 3],
 }
 
+/// Everything one frame of the scene depends on.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SceneInput<'a> {
+    pub objects: &'a [SceneObject],
+    /// Whether the presentation carries an LFE element. The slot is drawn either
+    /// way; only its occupancy changes.
+    pub has_lfe: bool,
+    pub figure: Figure,
+}
+
 /// Build one frame of geometry into `mesh`, which is cleared first.
 pub fn build(
     mesh: &mut MeshBuilder,
     camera: &Camera,
     viewport_height_points: f32,
-    objects: &[SceneObject],
+    input: SceneInput<'_>,
 ) {
     mesh.clear();
     let view = ViewContext {
@@ -42,8 +53,68 @@ pub fn build(
 
     add_room(mesh, &view);
     add_floor_grid(mesh, &view);
-    for object in objects {
+    add_figure(mesh, input.figure, &view);
+    add_lfe_slot(mesh, input.has_lfe, &view);
+    for object in input.objects {
         add_object(mesh, object, &view);
+    }
+}
+
+/// The listener.
+///
+/// Bases are mid-tone on purpose. Three-tone shading lerps toward `INK`, so a
+/// base already near `INK` loses every distinction between faces and the figure
+/// renders as one dark obelisk instead of a body. Graphite, well clear of the
+/// terracotta the dynamic objects own.
+fn add_figure(mesh: &mut MeshBuilder, figure: Figure, view: &ViewContext) {
+    let muted = Rgb::from_color32(theme::MUTED);
+    let skin = muted.lerp(Rgb::from_color32(theme::TEXT), 0.22);
+    for part in figure.parts(FLOOR_Y) {
+        let base = match part.tone {
+            PartTone::Skin => skin,
+            PartTone::Cloth => muted.lerp(view.ink, 0.50),
+            // The hat encloses the head opaquely, so it *is* the head as far as
+            // the eye is concerned: keep it near skin, or the figure reads as a
+            // dark block balanced on a lighter body.
+            PartTone::Hat => skin.lerp(view.ink, 0.16),
+            PartTone::Eye => view.ink.lerp(Rgb::from_color32(theme::TEXT), 0.20),
+            PartTone::Facing => Rgb::from_color32(theme::ACCENT),
+        };
+        mesh.add_box(part.centre, part.size, base, view);
+    }
+}
+
+/// The LFE slot: a cabinet sunk into the front wall, centred, on the floor.
+///
+/// It gets no drop line, no gain halo and no trail. The absence of all three is
+/// the signal that this element has no position — putting a cube out in the room
+/// would claim one it does not have. The slot itself is permanent, so an absent
+/// element leaves its outline and the layout stays learnable.
+fn add_lfe_slot(mesh: &mut MeshBuilder, present: bool, view: &ViewContext) {
+    let width = params::LFE_SLAB_WIDTH;
+    let height = params::LFE_SLAB_HEIGHT;
+    let depth = height * 0.65;
+    let centre = [
+        0.0,
+        FLOOR_Y + height / 2.0,
+        -ROOM_EXTENT + depth * (1.0 - params::LFE_WALL_INSET),
+    ];
+
+    if present {
+        mesh.add_box(
+            centre,
+            [width, height, depth],
+            Rgb::from_color32(theme::ACCENT_SOFT).lerp(Rgb::from_color32(theme::ACCENT), 0.25),
+            view,
+        );
+    } else {
+        mesh.add_wire_box(
+            centre,
+            [width, height, depth],
+            Rgb::from_color32(theme::BORDER).lerp(view.ink, 0.25),
+            params::HAIRLINE_POINTS * 0.8,
+            view,
+        );
     }
 }
 
@@ -149,18 +220,77 @@ mod tests {
     use super::*;
 
     fn built(objects: &[SceneObject]) -> MeshBuilder {
+        with_input(SceneInput {
+            objects,
+            ..SceneInput::default()
+        })
+    }
+
+    fn with_input(input: SceneInput<'_>) -> MeshBuilder {
         let mut mesh = MeshBuilder::default();
-        build(&mut mesh, &Camera::default(), 600.0, objects);
+        build(&mut mesh, &Camera::default(), 600.0, input);
         mesh
     }
 
     #[test]
-    fn an_empty_scene_still_draws_the_room_and_its_ruler() {
+    fn a_source_less_scene_is_still_a_room_a_ruler_and_a_listener() {
+        // The point of the cross-platform view: DecodePhase::Unavailable now
+        // shows someone standing in an empty room, not an empty text box.
         let mesh = built(&[]);
-        assert!(mesh.solid.is_empty(), "no objects means no solid geometry");
-        assert_eq!(mesh.line.len(), 12 * 6, "twelve room edges");
+        let figure_faces = super::super::figure::PART_COUNT * 6 * 6;
+        assert_eq!(
+            mesh.solid.len(),
+            figure_faces,
+            "the listener and nothing else"
+        );
+        assert_eq!(
+            mesh.line.len(),
+            (12 + 12) * 6,
+            "room edges plus the empty LFE slot"
+        );
         let grid_lines = (params::ROOM_BLOCKS as usize + 1) * 2;
         assert_eq!(mesh.decal.len(), grid_lines * 6);
+    }
+
+    #[test]
+    fn the_lfe_slot_is_drawn_whether_or_not_the_element_is_present() {
+        let absent = built(&[]);
+        let present = with_input(SceneInput {
+            has_lfe: true,
+            ..SceneInput::default()
+        });
+        // Occupied: a solid cabinet, and the outline is gone.
+        assert_eq!(present.solid.len() - absent.solid.len(), 6 * 6);
+        assert_eq!(absent.line.len() - present.line.len(), 12 * 6);
+    }
+
+    #[test]
+    fn the_lfe_cabinet_sits_on_the_floor_against_the_front_wall() {
+        let absent = built(&[]);
+        let present = with_input(SceneInput {
+            has_lfe: true,
+            ..SceneInput::default()
+        });
+        let cabinet = &present.solid[absent.solid.len()..];
+
+        let lowest = cabinet
+            .iter()
+            .map(|vertex| vertex.position[1])
+            .fold(f32::INFINITY, f32::min);
+        assert!((lowest - FLOOR_Y).abs() < 1e-6, "cabinet floats: {lowest}");
+
+        // Front is -Z, so the cabinet must straddle the -Z wall, and it must be
+        // wider than it is deep — the non-cubic shape is what says "not one of
+        // the dynamic objects".
+        let nearest = cabinet
+            .iter()
+            .map(|vertex| vertex.position[2])
+            .fold(f32::INFINITY, f32::min);
+        assert!(
+            nearest <= -ROOM_EXTENT + 1e-6,
+            "cabinet left the wall: {nearest}"
+        );
+        const { assert!(params::LFE_SLAB_WIDTH > params::LFE_SLAB_HEIGHT) };
     }
 
     #[test]

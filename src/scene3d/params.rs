@@ -56,6 +56,20 @@ pub const AIR_PERSPECTIVE_SPAN: f32 = 3.5;
 /// Edge length of a dynamic object's cube, in world units.
 pub const OBJECT_EDGE: f32 = 0.05;
 
+/// Overall listener height in world units — roughly a quarter of the room, so
+/// the listener reads as the subject of the scene rather than as one more piece
+/// of scenery. Its internal proportions stay strictly Minecraft.
+pub const FIGURE_HEIGHT: f32 = 0.55;
+
+/// The LFE cabinet, in world units. It is deliberately non-cubic: the shape
+/// alone says "not one of the dynamic objects".
+pub const LFE_SLAB_WIDTH: f32 = 0.50;
+/// Height of the LFE cabinet.
+pub const LFE_SLAB_HEIGHT: f32 = 0.22;
+/// How far the cabinet is sunk into the front wall, `0.0` flush to `1.0` fully
+/// buried.
+pub const LFE_WALL_INSET: f32 = 0.50;
+
 /// Default orthographic height, framing the room with a little air around it.
 pub const DEFAULT_ORTHO_HEIGHT: f32 = 3.4;
 /// Zoomed all the way in: a single object fills a good part of the viewport.

@@ -17,6 +17,7 @@
 //! genuinely fragile rather than only theoretically so.
 
 pub mod camera;
+pub mod figure;
 pub mod gpu;
 pub mod mesh;
 pub mod params;

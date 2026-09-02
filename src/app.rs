@@ -44,6 +44,9 @@ pub struct PlayerApp {
     bitstream_details_open: bool,
     diagnostics_open: bool,
     camera: scene3d::camera::Camera,
+    /// Listener pose. Head tracking will drive the two angles; until then the
+    /// listener faces the room's front.
+    figure: scene3d::figure::Figure,
     /// Reused across frames so rebuilding the scene does not reallocate.
     scene_mesh: scene3d::mesh::MeshBuilder,
     /// False when eframe is not on the wgpu backend; the stage then falls back
@@ -263,6 +266,7 @@ impl PlayerApp {
             bitstream_details_open: false,
             diagnostics_open: false,
             camera: scene3d::camera::Camera::default(),
+            figure: scene3d::figure::Figure::default(),
             scene_mesh: scene3d::mesh::MeshBuilder::default(),
             scene_renderer_ready,
         }
@@ -1102,7 +1106,12 @@ impl PlayerApp {
                     &mut self.scene_mesh,
                     &self.camera,
                     rect.height(),
-                    &PROBE_OBJECTS,
+                    scene3d::scene::SceneInput {
+                        objects: &PROBE_OBJECTS,
+                        // Increment 4 takes both of these from the mirror.
+                        has_lfe: decoder.metrics().is_some_and(DecodeMetrics::has_lfe),
+                        figure: self.figure,
+                    },
                 );
                 let matrix = self.camera.view_projection(rect.width() / rect.height());
                 let callback = scene3d::gpu::SceneCallback::new(&self.scene_mesh, matrix);

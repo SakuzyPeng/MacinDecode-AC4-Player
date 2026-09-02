@@ -177,8 +177,7 @@ impl Camera {
     #[allow(
         dead_code,
         reason = "the CPU half of the projection contract; object labels and \
-                  hover hit-testing consume it in the next increment, and its \
-                  agreement with the GPU matrix is already under test"
+                  hover hit-testing consume it in the next increment"
     )]
     pub fn project(&self, point: [f32; 3], viewport: Rect) -> Pos2 {
         let matrix = self.view_projection(viewport.width() / viewport.height().max(f32::EPSILON));
@@ -356,14 +355,23 @@ fn wrap_degrees(degrees: f32) -> f32 {
     }
 }
 
+/// Orthographic projection in **WebGPU's** clip convention: depth runs `0.0` at
+/// the near plane to `1.0` at the far plane, not OpenGL's `-1.0..=1.0`.
+///
+/// Getting this wrong is silent and half-invisible rather than obviously broken.
+/// The OpenGL form maps the nearer half of the depth range to negative clip z,
+/// which WebGPU discards — so roughly half the scene vanishes, and only at the
+/// camera angles that happen to push geometry into that half. Everything looked
+/// correct from the default isometric angle while the front view dropped the
+/// listener and every object behind the origin.
 fn orthographic(left: f32, right: f32, bottom: f32, top: f32, near: f32, far: f32) -> Matrix4 {
     let mut matrix = [0.0; 16];
     matrix[0] = 2.0 / (right - left);
     matrix[5] = 2.0 / (top - bottom);
-    matrix[10] = -2.0 / (far - near);
+    matrix[10] = -1.0 / (far - near);
     matrix[12] = -(right + left) / (right - left);
     matrix[13] = -(top + bottom) / (top - bottom);
-    matrix[14] = -(far + near) / (far - near);
+    matrix[14] = -near / (far - near);
     matrix[15] = 1.0;
     matrix
 }
@@ -403,11 +411,7 @@ fn multiply(a: Matrix4, b: Matrix4) -> Matrix4 {
     out
 }
 
-/// Transform a point, returning normalised device coordinates.
-#[allow(
-    dead_code,
-    reason = "reached only through Camera::project, which lands with labels"
-)]
+/// Transform a point into normalised device coordinates.
 fn transform(matrix: Matrix4, point: [f32; 3]) -> [f32; 3] {
     let mut out = [0.0; 3];
     for (row, value) in out.iter_mut().enumerate() {
@@ -568,6 +572,73 @@ mod tests {
         };
         let close = closer.world_units_per_point(600.0);
         assert!((wide / close - 2.0).abs() < 1e-4);
+    }
+
+    /// Clip-space depth of a world point, in WebGPU's `0.0..=1.0` convention.
+    fn clip_depth(camera: &Camera, point: [f32; 3]) -> f32 {
+        transform(camera.view_projection(4.0 / 3.0), point)[2]
+    }
+
+    #[test]
+    fn depth_maps_onto_webgpus_zero_to_one_clip_range() {
+        let camera = Camera::default();
+        let direction = camera.direction();
+        let at = |distance: f32| {
+            [
+                direction[0] * distance,
+                direction[1] * distance,
+                direction[2] * distance,
+            ]
+        };
+        // The near plane sits CAMERA_DISTANCE - DEPTH_HALF_RANGE from the eye,
+        // which is DEPTH_HALF_RANGE in front of the target along the view axis.
+        let near = clip_depth(&camera, at(params::DEPTH_HALF_RANGE));
+        let centre = clip_depth(&camera, [0.0; 3]);
+        let far = clip_depth(&camera, at(-params::DEPTH_HALF_RANGE));
+
+        assert!(
+            near.abs() < 1e-4,
+            "near plane should land on 0.0, got {near}"
+        );
+        assert!(
+            (far - 1.0).abs() < 1e-4,
+            "far plane should land on 1.0, got {far}"
+        );
+        assert!(
+            (centre - 0.5).abs() < 1e-4,
+            "target should sit mid-range: {centre}"
+        );
+    }
+
+    #[test]
+    fn the_whole_room_stays_inside_the_clip_volume_from_every_angle() {
+        // The OpenGL depth convention passes at the isometric default and then
+        // silently discards half the scene at an axis-aligned view; sweep the
+        // angles rather than trusting one.
+        for azimuth in [0.0, 45.0, 90.0, 137.0, 180.0, 270.0, 315.0] {
+            for elevation in [-89.0, -30.0, 0.0, 15.0, 30.0, 89.0] {
+                let camera = Camera {
+                    azimuth_degrees: azimuth,
+                    elevation_degrees: elevation,
+                    ..Camera::default()
+                };
+                for corner in [-1.0_f32, 1.0] {
+                    for point in [
+                        [corner, corner, corner],
+                        [corner, -corner, corner],
+                        [corner, corner, -corner],
+                        [0.0, 0.0, 0.0],
+                    ] {
+                        let depth = clip_depth(&camera, point);
+                        assert!(
+                            (0.0..=1.0).contains(&depth),
+                            "{point:?} fell outside the clip volume at \
+                             {azimuth}/{elevation}: {depth}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
