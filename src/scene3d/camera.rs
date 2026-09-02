@@ -1,4 +1,4 @@
-//! The scene camera: a free orbit over an orthographic projection.
+//! The scene camera: a free orbit with orthographic and perspective projection.
 //!
 //! This is an inspection tool, not a fixed diagram — reading an object's
 //! position off a single angle is ambiguous, so every angle has to be reachable.
@@ -14,6 +14,24 @@ use super::params;
 
 /// Column-major 4x4, matching what the shader expects.
 pub type Matrix4 = [f32; 16];
+
+/// Projection used to inspect the same listener-relative scene.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProjectionMode {
+    #[default]
+    Orthographic,
+    Perspective,
+}
+
+impl ProjectionMode {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Orthographic => "ORTHO",
+            Self::Perspective => "PERSP",
+        }
+    }
+}
 
 /// Named viewpoints, offered as a way back to a known reading rather than as a
 /// fence around the view.
@@ -80,6 +98,7 @@ pub struct Camera {
     elevation_degrees: f32,
     ortho_height: f32,
     target: [f32; 3],
+    projection_mode: ProjectionMode,
     animation: Option<Animation>,
 }
 
@@ -90,6 +109,7 @@ impl Default for Camera {
             elevation_degrees: params::ISO_ELEVATION_DEGREES,
             ortho_height: params::DEFAULT_ORTHO_HEIGHT,
             target: [0.0; 3],
+            projection_mode: ProjectionMode::Orthographic,
             animation: None,
         }
     }
@@ -109,6 +129,19 @@ impl Camera {
     #[must_use]
     pub fn ortho_height(&self) -> f32 {
         self.ortho_height
+    }
+
+    #[must_use]
+    pub fn projection_mode(&self) -> ProjectionMode {
+        self.projection_mode
+    }
+
+    /// Switch projection without changing the target-plane scale.
+    pub fn toggle_projection(&mut self) {
+        self.projection_mode = match self.projection_mode {
+            ProjectionMode::Orthographic => ProjectionMode::Perspective,
+            ProjectionMode::Perspective => ProjectionMode::Orthographic,
+        };
     }
 
     /// Unit vector from the view target toward the eye.
@@ -139,11 +172,10 @@ impl Camera {
         (1.0 - magnitudes[1] * 3.2).clamp(0.0, 1.0)
     }
 
-    /// World units spanned by one egui point at the current zoom.
+    /// World units spanned by one egui point at the target plane.
     ///
     /// This is what keeps a hairline the same width on screen at any zoom, and
-    /// it is DPI-independent because points and the orthographic height scale
-    /// together.
+    /// it is DPI-independent because points and the view height scale together.
     #[must_use]
     pub fn world_units_per_point(&self, viewport_height_points: f32) -> f32 {
         if viewport_height_points <= 0.0 {
@@ -170,16 +202,24 @@ impl Camera {
             [0.0, 1.0, 0.0]
         };
 
-        let half_height = self.ortho_height / 2.0;
-        let half_width = half_height * aspect.max(f32::EPSILON);
-        let projection = orthographic(
-            -half_width,
-            half_width,
-            -half_height,
-            half_height,
-            params::CAMERA_DISTANCE - params::DEPTH_HALF_RANGE,
-            params::CAMERA_DISTANCE + params::DEPTH_HALF_RANGE,
-        );
+        let aspect = aspect.max(f32::EPSILON);
+        let near = params::CAMERA_DISTANCE - params::DEPTH_HALF_RANGE;
+        let far = params::CAMERA_DISTANCE + params::DEPTH_HALF_RANGE;
+        let projection = match self.projection_mode {
+            ProjectionMode::Orthographic => {
+                let half_height = self.ortho_height / 2.0;
+                let half_width = half_height * aspect;
+                orthographic(
+                    -half_width,
+                    half_width,
+                    -half_height,
+                    half_height,
+                    near,
+                    far,
+                )
+            }
+            ProjectionMode::Perspective => perspective(self.ortho_height, aspect, near, far),
+        };
         multiply(projection, look_at(eye, self.target, up))
     }
 
@@ -207,11 +247,19 @@ impl Camera {
     pub fn apply_preset(&mut self, preset: Preset, viewport_aspect: f32) {
         let (azimuth, elevation) = preset.angles();
         let current_span = projected_room_span(
+            self.projection_mode,
             self.azimuth_degrees,
             self.elevation_degrees,
+            self.target,
             viewport_aspect,
         );
-        let target_span = projected_room_span(azimuth, elevation, viewport_aspect);
+        let target_span = projected_room_span(
+            self.projection_mode,
+            azimuth,
+            elevation,
+            [0.0; 3],
+            viewport_aspect,
+        );
         let current_fill = current_span / self.ortho_height.max(f32::EPSILON);
         let ortho_height = if current_fill > f32::EPSILON {
             (target_span / current_fill).clamp(params::MIN_ORTHO_HEIGHT, params::MAX_ORTHO_HEIGHT)
@@ -221,7 +269,8 @@ impl Camera {
         self.animate_to((azimuth, elevation, ortho_height, [0.0; 3]));
     }
 
-    /// Restore the canonical Angle composition, including zoom and pan.
+    /// Restore the canonical Angle composition, including zoom and pan, while
+    /// leaving the chosen projection mode intact.
     pub fn reset_view(&mut self) {
         self.animate_to((
             params::ISO_AZIMUTH_DEGREES,
@@ -360,15 +409,53 @@ impl Camera {
 /// Horizontal span is divided by the viewport aspect so it can be compared
 /// directly with vertical span. Holding `span / ortho_height` constant makes
 /// the room retain the same dominant on-screen extent across preset angles.
-fn projected_room_span(azimuth_degrees: f32, elevation_degrees: f32, aspect: f32) -> f32 {
+fn projected_room_span(
+    projection_mode: ProjectionMode,
+    azimuth_degrees: f32,
+    elevation_degrees: f32,
+    target: [f32; 3],
+    aspect: f32,
+) -> f32 {
     let azimuth = azimuth_degrees.to_radians();
     let elevation = elevation_degrees.to_radians();
-    let horizontal =
-        params::ROOM_WIDTH * azimuth.cos().abs() + params::ROOM_DEPTH * azimuth.sin().abs();
-    let vertical = params::ROOM_WIDTH * (elevation.sin() * azimuth.sin()).abs()
-        + params::ROOM_HEIGHT * elevation.cos().abs()
-        + params::ROOM_DEPTH * (elevation.sin() * azimuth.cos()).abs();
-    vertical.max(horizontal / aspect.max(f32::EPSILON))
+    let direction = [
+        elevation.cos() * azimuth.sin(),
+        elevation.sin(),
+        elevation.cos() * azimuth.cos(),
+    ];
+    let right = [azimuth.cos(), 0.0, -azimuth.sin()];
+    let up = [
+        -elevation.sin() * azimuth.sin(),
+        elevation.cos(),
+        -elevation.sin() * azimuth.cos(),
+    ];
+    let mut horizontal_min = f32::INFINITY;
+    let mut horizontal_max = f32::NEG_INFINITY;
+    let mut vertical_min = f32::INFINITY;
+    let mut vertical_max = f32::NEG_INFINITY;
+
+    for x in [-params::ROOM_WIDTH / 2.0, params::ROOM_WIDTH / 2.0] {
+        for y in [params::ROOM_FLOOR_Y, params::ROOM_CEILING_Y] {
+            for z in [-params::ROOM_DEPTH / 2.0, params::ROOM_DEPTH / 2.0] {
+                let offset = [x - target[0], y - target[1], z - target[2]];
+                let depth_scale = match projection_mode {
+                    ProjectionMode::Orthographic => 1.0,
+                    ProjectionMode::Perspective => {
+                        let eye_distance = params::CAMERA_DISTANCE - dot(offset, direction);
+                        params::CAMERA_DISTANCE / eye_distance.max(f32::EPSILON)
+                    }
+                };
+                let horizontal = dot(offset, right) * depth_scale / aspect.max(f32::EPSILON);
+                let vertical = dot(offset, up) * depth_scale;
+                horizontal_min = horizontal_min.min(horizontal);
+                horizontal_max = horizontal_max.max(horizontal);
+                vertical_min = vertical_min.min(vertical);
+                vertical_max = vertical_max.max(vertical);
+            }
+        }
+    }
+
+    (horizontal_max - horizontal_min).max(vertical_max - vertical_min)
 }
 
 /// Signed shortest rotation from `from` to `to`, in degrees.
@@ -428,6 +515,20 @@ fn orthographic(left: f32, right: f32, bottom: f32, top: f32, near: f32, far: f3
     matrix
 }
 
+/// Right-handed perspective projection in WebGPU's `0.0..=1.0` depth range.
+/// `target_plane_height` is the world-space height visible at the camera target,
+/// which makes its zoom scale directly compatible with orthographic mode.
+fn perspective(target_plane_height: f32, aspect: f32, near: f32, far: f32) -> Matrix4 {
+    let focal_scale = 2.0 * params::CAMERA_DISTANCE / target_plane_height.max(f32::EPSILON);
+    let mut matrix = [0.0; 16];
+    matrix[0] = focal_scale / aspect.max(f32::EPSILON);
+    matrix[5] = focal_scale;
+    matrix[10] = far / (near - far);
+    matrix[11] = -1.0;
+    matrix[14] = far * near / (near - far);
+    matrix
+}
+
 fn look_at(eye: [f32; 3], centre: [f32; 3], up: [f32; 3]) -> Matrix4 {
     let back = normalise([eye[0] - centre[0], eye[1] - centre[1], eye[2] - centre[2]]);
     let right = normalise(cross(up, back));
@@ -465,14 +566,19 @@ fn multiply(a: Matrix4, b: Matrix4) -> Matrix4 {
 
 /// Transform a point into normalised device coordinates.
 fn transform(matrix: Matrix4, point: [f32; 3]) -> [f32; 3] {
-    let mut out = [0.0; 3];
-    for (row, value) in out.iter_mut().enumerate() {
-        *value = matrix[row] * point[0]
+    let homogeneous = |row: usize| {
+        matrix[row] * point[0]
             + matrix[4 + row] * point[1]
             + matrix[8 + row] * point[2]
-            + matrix[12 + row];
-    }
-    out
+            + matrix[12 + row]
+    };
+    let w = homogeneous(3);
+    let divisor = if w.abs() > f32::EPSILON { w } else { 1.0 };
+    [
+        homogeneous(0) / divisor,
+        homogeneous(1) / divisor,
+        homogeneous(2) / divisor,
+    ]
 }
 
 fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
@@ -507,6 +613,7 @@ mod tests {
     #[test]
     fn the_default_camera_sits_at_the_locked_iso_angle() {
         let camera = Camera::default();
+        assert_eq!(camera.projection_mode(), ProjectionMode::Orthographic);
         assert!((camera.azimuth_degrees() - params::ISO_AZIMUTH_DEGREES).abs() < f32::EPSILON);
         assert!((camera.elevation_degrees() - params::ISO_ELEVATION_DEGREES).abs() < f32::EPSILON);
         assert!((camera.ortho_height() - params::DEFAULT_ORTHO_HEIGHT).abs() < f32::EPSILON);
@@ -533,25 +640,39 @@ mod tests {
     #[test]
     fn presets_use_different_zoom_values_to_keep_the_room_the_same_visual_size() {
         let aspect = VIEWPORT.width() / VIEWPORT.height();
-        let mut camera = Camera::default();
-        let expected_fill =
-            projected_room_span(camera.azimuth_degrees, camera.elevation_degrees, aspect)
-                / camera.ortho_height;
-        let iso_zoom = camera.ortho_height;
+        for projection_mode in [ProjectionMode::Orthographic, ProjectionMode::Perspective] {
+            let mut camera = Camera {
+                projection_mode,
+                ..Camera::default()
+            };
+            let expected_fill = projected_room_span(
+                projection_mode,
+                camera.azimuth_degrees,
+                camera.elevation_degrees,
+                camera.target,
+                aspect,
+            ) / camera.ortho_height;
+            let iso_zoom = camera.ortho_height;
 
-        for preset in [Preset::Back, Preset::Top, Preset::Side, Preset::Iso] {
-            camera.apply_preset(preset, aspect);
-            camera.advance(1.0);
-            let fill =
-                projected_room_span(camera.azimuth_degrees, camera.elevation_degrees, aspect)
-                    / camera.ortho_height;
-            assert!(
-                (fill - expected_fill).abs() < 1e-5,
-                "{preset:?} changed visual fill from {expected_fill} to {fill}"
-            );
+            for preset in [Preset::Back, Preset::Top, Preset::Side, Preset::Iso] {
+                camera.apply_preset(preset, aspect);
+                camera.advance(1.0);
+                let fill = projected_room_span(
+                    projection_mode,
+                    camera.azimuth_degrees,
+                    camera.elevation_degrees,
+                    camera.target,
+                    aspect,
+                ) / camera.ortho_height;
+                assert!(
+                    (fill - expected_fill).abs() < 1e-5,
+                    "{projection_mode:?}/{preset:?} changed visual fill from \
+                     {expected_fill} to {fill}"
+                );
+            }
+
+            assert!((camera.ortho_height - iso_zoom).abs() < 1e-5);
         }
-
-        assert!((camera.ortho_height - iso_zoom).abs() < 1e-5);
     }
 
     #[test]
@@ -568,6 +689,7 @@ mod tests {
         camera.azimuth_degrees = 123.0;
         camera.elevation_degrees = -27.0;
         camera.target = [0.4, -0.2, 0.3];
+        camera.toggle_projection();
         camera.reset_view();
         camera.advance(1.0);
 
@@ -575,6 +697,41 @@ mod tests {
         assert!((camera.elevation_degrees - params::ISO_ELEVATION_DEGREES).abs() < 1e-5);
         assert!((camera.ortho_height - params::DEFAULT_ORTHO_HEIGHT).abs() < 1e-5);
         assert!(camera.target.iter().all(|axis| axis.abs() < 1e-5));
+        assert_eq!(camera.projection_mode, ProjectionMode::Perspective);
+    }
+
+    #[test]
+    fn projection_toggle_preserves_target_plane_scale_and_adds_foreshortening() {
+        let mut camera = Camera::default();
+        let azimuth = camera.azimuth_degrees.to_radians();
+        let right = [azimuth.cos(), 0.0, -azimuth.sin()];
+        let direction = camera.direction();
+        let point = [right[0] * 0.5, right[1] * 0.5, right[2] * 0.5];
+        let centre = camera.project([0.0; 3], VIEWPORT);
+        let orthographic = camera.project(point, VIEWPORT);
+
+        camera.toggle_projection();
+        assert_eq!(camera.projection_mode(), ProjectionMode::Perspective);
+        let perspective_at_target = camera.project(point, VIEWPORT);
+        assert!((orthographic.x - perspective_at_target.x).abs() < 0.01);
+        assert!((orthographic.y - perspective_at_target.y).abs() < 0.01);
+
+        let near = [
+            point[0] + direction[0],
+            point[1] + direction[1],
+            point[2] + direction[2],
+        ];
+        let far = [
+            point[0] - direction[0],
+            point[1] - direction[1],
+            point[2] - direction[2],
+        ];
+        let near_screen = camera.project(near, VIEWPORT);
+        let far_screen = camera.project(far, VIEWPORT);
+        assert!((near_screen.x - centre.x).abs() > (far_screen.x - centre.x).abs());
+
+        camera.toggle_projection();
+        assert_eq!(camera.projection_mode(), ProjectionMode::Orthographic);
     }
 
     #[test]
@@ -699,33 +856,41 @@ mod tests {
 
     #[test]
     fn depth_maps_onto_webgpus_zero_to_one_clip_range() {
-        let camera = Camera::default();
-        let direction = camera.direction();
-        let at = |distance: f32| {
-            [
-                direction[0] * distance,
-                direction[1] * distance,
-                direction[2] * distance,
-            ]
-        };
-        // The near plane sits CAMERA_DISTANCE - DEPTH_HALF_RANGE from the eye,
-        // which is DEPTH_HALF_RANGE in front of the target along the view axis.
-        let near = clip_depth(&camera, at(params::DEPTH_HALF_RANGE));
-        let centre = clip_depth(&camera, [0.0; 3]);
-        let far = clip_depth(&camera, at(-params::DEPTH_HALF_RANGE));
+        for projection_mode in [ProjectionMode::Orthographic, ProjectionMode::Perspective] {
+            let camera = Camera {
+                projection_mode,
+                ..Camera::default()
+            };
+            let direction = camera.direction();
+            let at = |distance: f32| {
+                [
+                    direction[0] * distance,
+                    direction[1] * distance,
+                    direction[2] * distance,
+                ]
+            };
+            // The near plane sits CAMERA_DISTANCE - DEPTH_HALF_RANGE from the
+            // eye, which is DEPTH_HALF_RANGE in front of the target.
+            let near = clip_depth(&camera, at(params::DEPTH_HALF_RANGE));
+            let centre = clip_depth(&camera, [0.0; 3]);
+            let far = clip_depth(&camera, at(-params::DEPTH_HALF_RANGE));
 
-        assert!(
-            near.abs() < 1e-4,
-            "near plane should land on 0.0, got {near}"
-        );
-        assert!(
-            (far - 1.0).abs() < 1e-4,
-            "far plane should land on 1.0, got {far}"
-        );
-        assert!(
-            (centre - 0.5).abs() < 1e-4,
-            "target should sit mid-range: {centre}"
-        );
+            assert!(
+                near.abs() < 1e-4,
+                "{projection_mode:?} near plane should land on 0.0, got {near}"
+            );
+            assert!(
+                (far - 1.0).abs() < 1e-4,
+                "{projection_mode:?} far plane should land on 1.0, got {far}"
+            );
+            assert!(
+                centre > near && centre < far,
+                "{projection_mode:?} target depth is not between its planes: {centre}"
+            );
+            if projection_mode == ProjectionMode::Orthographic {
+                assert!((centre - 0.5).abs() < 1e-4);
+            }
+        }
     }
 
     #[test]
@@ -733,26 +898,29 @@ mod tests {
         // The OpenGL depth convention passes at the isometric default and then
         // silently discards half the scene at an axis-aligned view; sweep the
         // angles rather than trusting one.
-        for azimuth in [0.0, 45.0, 90.0, 137.0, 180.0, 270.0, 315.0] {
-            for elevation in [-89.0, -30.0, 0.0, 15.0, 30.0, 89.0] {
-                let camera = Camera {
-                    azimuth_degrees: azimuth,
-                    elevation_degrees: elevation,
-                    ..Camera::default()
-                };
-                for corner in [-1.0_f32, 1.0] {
-                    for point in [
-                        [corner, corner, corner],
-                        [corner, -corner, corner],
-                        [corner, corner, -corner],
-                        [0.0, 0.0, 0.0],
-                    ] {
-                        let depth = clip_depth(&camera, point);
-                        assert!(
-                            (0.0..=1.0).contains(&depth),
-                            "{point:?} fell outside the clip volume at \
-                             {azimuth}/{elevation}: {depth}"
-                        );
+        for projection_mode in [ProjectionMode::Orthographic, ProjectionMode::Perspective] {
+            for azimuth in [0.0, 45.0, 90.0, 137.0, 180.0, 270.0, 315.0] {
+                for elevation in [-89.0, -30.0, 0.0, 15.0, 30.0, 89.0] {
+                    let camera = Camera {
+                        azimuth_degrees: azimuth,
+                        elevation_degrees: elevation,
+                        projection_mode,
+                        ..Camera::default()
+                    };
+                    for corner in [-1.0_f32, 1.0] {
+                        for point in [
+                            [corner, corner, corner],
+                            [corner, -corner, corner],
+                            [corner, corner, -corner],
+                            [0.0, 0.0, 0.0],
+                        ] {
+                            let depth = clip_depth(&camera, point);
+                            assert!(
+                                (0.0..=1.0).contains(&depth),
+                                "{projection_mode:?} {point:?} fell outside the clip volume at \
+                                 {azimuth}/{elevation}: {depth}"
+                            );
+                        }
                     }
                 }
             }

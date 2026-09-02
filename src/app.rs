@@ -1123,7 +1123,8 @@ impl PlayerApp {
     fn draw_camera_readout(&self, ui: &mut egui::Ui, stage: egui::Rect) {
         let faces = scene3d::mesh::visible_face_count(self.camera.direction());
         let text = format!(
-            "az {:.0}°   el {:.0}°   zoom {:.2}   faces/box {faces}",
+            "{}   az {:.0}°   el {:.0}°   zoom {:.2}   faces/box {faces}",
+            self.camera.projection_mode().label(),
             self.camera.azimuth_degrees(),
             self.camera.elevation_degrees(),
             self.camera.ortho_height(),
@@ -1174,8 +1175,13 @@ impl PlayerApp {
     /// Named viewpoints, in the theme's own square hairline idiom — no floating
     /// gizmo, no rounded HUD.
     fn draw_camera_presets(&mut self, ui: &mut egui::Ui, stage: egui::Rect) {
-        use scene3d::camera::Preset;
+        use scene3d::camera::{Preset, ProjectionMode};
 
+        let projection_mode = self.camera.projection_mode();
+        let projection_hint = match projection_mode {
+            ProjectionMode::Orthographic => "Switch to perspective projection",
+            ProjectionMode::Perspective => "Switch to orthographic projection",
+        };
         let buttons = [
             ("ISO", Some(Preset::Iso)),
             ("TOP", Some(Preset::Top)),
@@ -1192,6 +1198,23 @@ impl PlayerApp {
                 .max_rect(strip)
                 .layout(Layout::right_to_left(Align::Min)),
             |ui| {
+                if ui
+                    .add_sized(
+                        [58.0, 26.0],
+                        egui::Button::new(
+                            RichText::new(projection_mode.label())
+                                .size(10.0)
+                                .strong()
+                                .color(theme::MUTED),
+                        ),
+                    )
+                    .on_hover_text(projection_hint)
+                    .clicked()
+                {
+                    self.camera.toggle_projection();
+                }
+                ui.add_space(4.0);
+
                 for (label, preset) in buttons.into_iter().rev() {
                     if ui
                         .add_sized(
