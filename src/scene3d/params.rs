@@ -7,22 +7,38 @@
 //!
 //! Two constraints are easy to violate and hard to spot afterwards:
 //!
-//! * Actor sizes are world units with the room half-extent as `1.0`, and are
-//!   deliberately independent of [`ROOM_BLOCKS`]. Tying both to a single "block"
-//!   unit makes the grid resolution silently resize the listener and the objects
-//!   together, so their ratio can never be corrected — only the whole scene
-//!   scales. The grid is a ruler; the listener and objects are actors.
+//! * Actor sizes are world units and deliberately independent of
+//!   [`ROOM_BLOCKS`]. Tying both to a single "block" unit makes the grid
+//!   resolution silently resize the listener and the objects together, so their
+//!   ratio can never be corrected — only the whole scene scales. The grid is a
+//!   ruler; the listener and objects are actors.
 //! * Three-tone shading lerps toward [`crate::theme::INK`], so any base colour
 //!   already near INK loses all separation between faces and renders as one flat
 //!   dark mass. Keep bases in the mid range.
 
-/// Divisions along each floor axis. Purely the ruler's resolution — it must not
-/// feed any actor's size.
+/// Major blocks along each floor axis. Four matches the coarse ruler used by
+/// the Logic spatial view; it remains independent of every actor's size.
 ///
-/// Readability comes from the three-tier weighting in
-/// [`crate::scene3d::scene`], not from this number: at a single weight, 8 and 16
-/// divisions were indistinguishable, which means density carries no information.
-pub const ROOM_BLOCKS: u32 = 16;
+/// Readability comes from graduated weighting in [`crate::scene3d::scene`]: the
+/// centre axes remain strongest, these block boundaries sit in the middle, and
+/// the subdivisions below form the fine ruler.
+pub const ROOM_BLOCKS: u32 = 4;
+
+/// Fine cells inside each major room block. Four restores the earlier 16×16
+/// ruler without losing the visually dominant 4×4 structure.
+pub const GRID_SUBDIVISIONS_PER_BLOCK: u32 = 4;
+
+/// Total fine divisions drawn along each floor axis.
+pub const ROOM_GRID_DIVISIONS: u32 = ROOM_BLOCKS * GRID_SUBDIVISIONS_PER_BLOCK;
+
+/// Room width in world units. Logic's top view is square, so width and depth
+/// match while the front view establishes a deliberately lower ceiling.
+pub const ROOM_WIDTH: f32 = 2.0;
+/// Room height in world units. A 3:5 height-to-width ratio gives the low
+/// rectangular volume visible in Logic's front and side references.
+pub const ROOM_HEIGHT: f32 = 1.2;
+/// Room depth in world units.
+pub const ROOM_DEPTH: f32 = 2.0;
 
 /// Hairline width in egui points, matched to the 1px strokes the rest of the UI
 /// uses. Converted to world units against the current orthographic height so it
@@ -53,13 +69,22 @@ pub const DEGENERATE_VIEW_BOOST: f32 = 0.90;
 /// World-space span over which air perspective ramps from none to full.
 pub const AIR_PERSPECTIVE_SPAN: f32 = 3.5;
 
-/// Edge length of a dynamic object's cube, in world units.
-pub const OBJECT_EDGE: f32 = 0.05;
+/// Edge length of a dynamic object's cube, in world units. Logic's marker is
+/// roughly 28% of its listener's head-and-shoulder envelope in the supplied
+/// reference views.
+pub const OBJECT_EDGE: f32 = 0.11;
 
-/// Overall listener height in world units — roughly a quarter of the room, so
-/// the listener reads as the subject of the scene rather than as one more piece
-/// of scenery. Its internal proportions stay strictly Minecraft.
-pub const FIGURE_HEIGHT: f32 = 0.55;
+/// Outer shoulder width of the listener, in world units. This is the scale
+/// anchor: three head-and-shoulder envelopes span the room height. The complete
+/// canonical Minecraft figure is twice this height, so a standing body occupies
+/// two thirds of the low room without shrinking its upper body.
+pub const FIGURE_SHOULDER_WIDTH: f32 = ROOM_HEIGHT / 3.0;
+
+/// Floor chosen so the standing figure's head centre remains at the acoustic
+/// origin: 12 leg + 12 torso + 4 half-head model units below it.
+pub const ROOM_FLOOR_Y: f32 = -FIGURE_SHOULDER_WIDTH * 28.0 / 16.0;
+/// The low ceiling completes the rectangular room above the asymmetric floor.
+pub const ROOM_CEILING_Y: f32 = ROOM_FLOOR_Y + ROOM_HEIGHT;
 
 /// The LFE cabinet, in world units. It is deliberately non-cubic: the shape
 /// alone says "not one of the dynamic objects".
@@ -71,16 +96,17 @@ pub const LFE_SLAB_HEIGHT: f32 = 0.22;
 pub const LFE_WALL_INSET: f32 = 0.50;
 
 /// Default orthographic height, framing the room with a little air around it.
-pub const DEFAULT_ORTHO_HEIGHT: f32 = 3.4;
+pub const DEFAULT_ORTHO_HEIGHT: f32 = 2.7;
 /// Zoomed all the way in: a single object fills a good part of the viewport.
 pub const MIN_ORTHO_HEIGHT: f32 = 0.35;
 /// Zoomed all the way out.
 pub const MAX_ORTHO_HEIGHT: f32 = 6.0;
 
-/// Default camera azimuth in degrees.
-pub const ISO_AZIMUTH_DEGREES: f32 = 45.0;
-/// Default camera elevation in degrees.
-pub const ISO_ELEVATION_DEGREES: f32 = 30.0;
+/// Default camera azimuth in degrees, from the listener's back-left as in
+/// Logic's Angle view.
+pub const ISO_AZIMUTH_DEGREES: f32 = 325.0;
+/// Default camera elevation in degrees; lower than a geometric isometric view.
+pub const ISO_ELEVATION_DEGREES: f32 = 20.0;
 
 /// How close a released drag has to land before the view settles onto a
 /// canonical angle. This never blocks an angle — it only makes the clean

@@ -1,17 +1,16 @@
 //! The listener: a Minecraft player model in voxels.
 //!
 //! Proportions are the canonical ones in model units — head 8³, torso 8x12x4,
-//! arms and legs 4x12x4, 32 units from sole to crown. Only the overall height is
-//! a free parameter; the ratios are fixed, which is what makes the figure read
-//! as that model rather than as a generic blocky person.
+//! arms and legs 4x12x4, 32 units from sole to crown. The outer 16-unit shoulder
+//! span is the scale anchor, so including the standing lower body cannot make
+//! the listener's head and shoulders smaller.
 //!
 //! **Limbs sit on the X axis.** The torso is 8 wide by 4 deep, so the shoulder
 //! line runs along X and the body faces `-Z`. Arms belong at `x = ±6u` (torso
 //! half-width 4 plus arm half-width 2) and legs at `x = ±2u`, both at `z = 0`.
 //! Putting them on Z instead turns the figure ninety degrees against its own
-//! torso and head: from the `FRONT` preset one arm then floats in the middle of
-//! the silhouette, the whole figure reads side-on, and the eye voxels that
-//! protrude from the head get read as features pointing at the camera.
+//! torso and head: from the `BACK` preset one arm then floats in the middle of
+//! the silhouette, and the whole figure reads side-on.
 //!
 //! The head is a separate box on a neck pivot. That is the entire reason for
 //! choosing this model — head tracking becomes two floats, and the body does not
@@ -58,11 +57,12 @@ pub struct Figure {
 }
 
 impl Figure {
-    /// Resolve the pose into world-space boxes standing on `floor_y`.
+    /// Resolve the standing pose into world-space boxes on `floor_y`.
     #[must_use]
     pub fn parts(self, floor_y: f32) -> [Part; PART_COUNT] {
-        // One model unit. 32 of them span the figure.
-        let u = params::FIGURE_HEIGHT / 32.0;
+        // One model unit. The 16-unit outer shoulder span, not the 32-unit full
+        // height, is what determines it.
+        let u = params::FIGURE_SHOULDER_WIDTH / 16.0;
         let leg_height = 12.0 * u;
         let torso_height = 12.0 * u;
         let head_height = 8.0 * u;
@@ -73,7 +73,7 @@ impl Figure {
         let neck = floor_y + leg_height + torso_height;
         let head_centre = neck + head_height / 2.0;
 
-        let limb = [4.0 * u, leg_height, 4.0 * u];
+        let leg = [4.0 * u, leg_height, 4.0 * u];
         let arm = [4.0 * u, torso_height, 4.0 * u];
 
         // Facing cues rotate about the neck; the head and hat are centred on
@@ -91,12 +91,12 @@ impl Figure {
         [
             Part {
                 centre: [-2.0 * u, leg_centre, 0.0],
-                size: limb,
+                size: leg,
                 tone: PartTone::Cloth,
             },
             Part {
                 centre: [2.0 * u, leg_centre, 0.0],
-                size: limb,
+                size: leg,
                 tone: PartTone::Cloth,
             },
             Part {
@@ -178,7 +178,7 @@ impl Figure {
 mod tests {
     use super::*;
 
-    const FLOOR: f32 = -1.0;
+    const FLOOR: f32 = params::ROOM_FLOOR_Y;
 
     fn close(a: f32, b: f32) -> bool {
         (a - b).abs() < 1e-6
@@ -188,8 +188,7 @@ mod tests {
         a.iter().zip(b.iter()).all(|(x, y)| close(*x, *y))
     }
 
-    /// The head is the only cubic part; arms are 4x12x4, so a predicate that
-    /// only checks two of the three sides picks an arm instead.
+    /// Require all three dimensions when classifying a voxel as a cube.
     fn is_cube(part: &Part) -> bool {
         close(part.size[0], part.size[1]) && close(part.size[1], part.size[2])
     }
@@ -199,7 +198,8 @@ mod tests {
     }
 
     #[test]
-    fn the_figure_stands_on_the_floor_at_the_locked_height() {
+    fn the_standing_figure_touches_the_floor_without_moving_the_head() {
+        let unit = params::FIGURE_SHOULDER_WIDTH / 16.0;
         let parts = parts();
         let lowest = parts
             .iter()
@@ -213,20 +213,33 @@ mod tests {
 
         assert!(
             (lowest - FLOOR).abs() < 1e-6,
-            "soles left the floor: {lowest}"
+            "feet left the floor: {lowest}"
+        );
+
+        let head = parts
+            .iter()
+            .find(|part| part.tone == PartTone::Skin && is_cube(part))
+            .expect("head");
+        assert!(
+            same_point(head.centre, [0.0; 3]),
+            "head left the acoustic origin: {head:?}"
         );
         assert!(
-            (highest - FLOOR - params::FIGURE_HEIGHT).abs() < 1e-6,
+            close(highest - FLOOR, 32.0 * unit),
             "crown is at {highest}, expected {}",
-            FLOOR + params::FIGURE_HEIGHT
+            FLOOR + 32.0 * unit
+        );
+        assert!(
+            close(highest - FLOOR, params::ROOM_HEIGHT * 2.0 / 3.0),
+            "standing body no longer occupies two thirds of the room"
         );
     }
 
     #[test]
     fn limbs_sit_on_the_shoulder_axis_not_the_facing_axis() {
         // The bug this pins: limbs on Z put an arm between the camera and the
-        // torso at the FRONT preset, and the whole figure reads side-on.
-        let unit = params::FIGURE_HEIGHT / 32.0;
+        // torso at the BACK preset, and the whole figure reads side-on.
+        let unit = params::FIGURE_SHOULDER_WIDTH / 16.0;
         let parts = parts();
 
         let mut arms: Vec<f32> = parts
@@ -240,7 +253,11 @@ mod tests {
 
         let mut legs: Vec<f32> = parts
             .iter()
-            .filter(|part| part.tone == PartTone::Cloth && close(part.size[0], 4.0 * unit))
+            .filter(|part| {
+                part.tone == PartTone::Cloth
+                    && close(part.size[0], 4.0 * unit)
+                    && close(part.size[1], 12.0 * unit)
+            })
             .map(|part| part.centre[0])
             .collect();
         legs.sort_by(f32::total_cmp);
@@ -252,7 +269,7 @@ mod tests {
             .filter(|part| matches!(part.tone, PartTone::Skin | PartTone::Cloth))
         {
             assert!(
-                part.centre[2].abs() < 1e-6,
+                close(part.centre[2], 0.0),
                 "a body part drifted onto the facing axis: {part:?}"
             );
         }
@@ -260,19 +277,22 @@ mod tests {
 
     #[test]
     fn the_torso_is_wider_than_it_is_deep_so_the_body_faces_z() {
-        let unit = params::FIGURE_HEIGHT / 32.0;
+        let unit = params::FIGURE_SHOULDER_WIDTH / 16.0;
         let torso = parts()
             .into_iter()
-            .find(|part| part.tone == PartTone::Cloth && close(part.size[0], 8.0 * unit))
+            .find(|part| {
+                part.tone == PartTone::Cloth
+                    && close(part.size[0], 8.0 * unit)
+                    && close(part.size[1], 12.0 * unit)
+            })
             .expect("torso");
         assert!(torso.size[0] > torso.size[2], "{torso:?}");
     }
 
     #[test]
-    fn zero_yaw_faces_the_front_wall_which_is_where_the_front_preset_looks_from() {
-        // Front is -Z. The FRONT preset puts the camera on +Z, so the listener's
-        // back is to it: the view looks over their shoulder rather than into
-        // their face, which is the whole point of that preset.
+    fn zero_yaw_faces_away_from_the_back_preset() {
+        // Front is -Z. The BACK preset puts the camera on +Z, so the listener's
+        // back is correctly turned toward it.
         let wedge = parts()
             .into_iter()
             .find(|part| part.tone == PartTone::Facing)

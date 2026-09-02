@@ -29,28 +29,42 @@ pub type Matrix4 = [f32; 16];
 pub enum Preset {
     Iso,
     Top,
-    Front,
+    Back,
     Side,
 }
 
 impl Preset {
-    fn angles(self) -> (f32, f32, f32) {
+    fn angles(self) -> (f32, f32) {
         match self {
-            Self::Iso => (
-                params::ISO_AZIMUTH_DEGREES,
-                params::ISO_ELEVATION_DEGREES,
-                params::DEFAULT_ORTHO_HEIGHT,
-            ),
-            Self::Top => (0.0, params::MAX_ELEVATION_DEGREES, 3.0),
-            Self::Front => (0.0, 0.0, 3.0),
-            Self::Side => (90.0, 0.0, 3.0),
+            Self::Iso => (params::ISO_AZIMUTH_DEGREES, params::ISO_ELEVATION_DEGREES),
+            Self::Top => (0.0, params::MAX_ELEVATION_DEGREES),
+            // The listener faces -Z, so an eye on +Z sees their back.
+            Self::Back => (0.0, 0.0),
+            Self::Side => (90.0, 0.0),
         }
     }
 }
 
 /// Angles a release will settle onto when it lands close enough.
-const CANONICAL_AZIMUTHS: [f32; 8] = [0.0, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0];
-const CANONICAL_ELEVATIONS: [f32; 5] = [0.0, 30.0, 35.264, 60.0, params::MAX_ELEVATION_DEGREES];
+const CANONICAL_AZIMUTHS: [f32; 9] = [
+    0.0,
+    45.0,
+    90.0,
+    135.0,
+    180.0,
+    225.0,
+    270.0,
+    315.0,
+    params::ISO_AZIMUTH_DEGREES,
+];
+const CANONICAL_ELEVATIONS: [f32; 6] = [
+    0.0,
+    params::ISO_ELEVATION_DEGREES,
+    30.0,
+    35.264,
+    60.0,
+    params::MAX_ELEVATION_DEGREES,
+];
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Animation {
@@ -189,10 +203,32 @@ impl Camera {
         )
     }
 
-    /// Ease toward a named viewpoint.
-    pub fn apply_preset(&mut self, preset: Preset) {
-        let (azimuth, elevation, ortho_height) = preset.angles();
+    /// Ease toward a named viewpoint while preserving the room's apparent size.
+    pub fn apply_preset(&mut self, preset: Preset, viewport_aspect: f32) {
+        let (azimuth, elevation) = preset.angles();
+        let current_span = projected_room_span(
+            self.azimuth_degrees,
+            self.elevation_degrees,
+            viewport_aspect,
+        );
+        let target_span = projected_room_span(azimuth, elevation, viewport_aspect);
+        let current_fill = current_span / self.ortho_height.max(f32::EPSILON);
+        let ortho_height = if current_fill > f32::EPSILON {
+            (target_span / current_fill).clamp(params::MIN_ORTHO_HEIGHT, params::MAX_ORTHO_HEIGHT)
+        } else {
+            self.ortho_height
+        };
         self.animate_to((azimuth, elevation, ortho_height, [0.0; 3]));
+    }
+
+    /// Restore the canonical Angle composition, including zoom and pan.
+    pub fn reset_view(&mut self) {
+        self.animate_to((
+            params::ISO_AZIMUTH_DEGREES,
+            params::ISO_ELEVATION_DEGREES,
+            params::DEFAULT_ORTHO_HEIGHT,
+            [0.0; 3],
+        ));
     }
 
     /// Settle onto a canonical angle if the view came to rest near one.
@@ -319,6 +355,22 @@ impl Camera {
     }
 }
 
+/// Maximum projected room span expressed in vertical-view world units.
+///
+/// Horizontal span is divided by the viewport aspect so it can be compared
+/// directly with vertical span. Holding `span / ortho_height` constant makes
+/// the room retain the same dominant on-screen extent across preset angles.
+fn projected_room_span(azimuth_degrees: f32, elevation_degrees: f32, aspect: f32) -> f32 {
+    let azimuth = azimuth_degrees.to_radians();
+    let elevation = elevation_degrees.to_radians();
+    let horizontal =
+        params::ROOM_WIDTH * azimuth.cos().abs() + params::ROOM_DEPTH * azimuth.sin().abs();
+    let vertical = params::ROOM_WIDTH * (elevation.sin() * azimuth.sin()).abs()
+        + params::ROOM_HEIGHT * elevation.cos().abs()
+        + params::ROOM_DEPTH * (elevation.sin() * azimuth.cos()).abs();
+    vertical.max(horizontal / aspect.max(f32::EPSILON))
+}
+
 /// Signed shortest rotation from `from` to `to`, in degrees.
 #[must_use]
 pub fn angle_delta(from: f32, to: f32) -> f32 {
@@ -362,7 +414,7 @@ fn wrap_degrees(degrees: f32) -> f32 {
 /// The OpenGL form maps the nearer half of the depth range to negative clip z,
 /// which WebGPU discards — so roughly half the scene vanishes, and only at the
 /// camera angles that happen to push geometry into that half. Everything looked
-/// correct from the default isometric angle while the front view dropped the
+/// correct from the default isometric angle while the level axis view dropped the
 /// listener and every object behind the origin.
 fn orthographic(left: f32, right: f32, bottom: f32, top: f32, near: f32, far: f32) -> Matrix4 {
     let mut matrix = [0.0; 16];
@@ -457,6 +509,72 @@ mod tests {
         let camera = Camera::default();
         assert!((camera.azimuth_degrees() - params::ISO_AZIMUTH_DEGREES).abs() < f32::EPSILON);
         assert!((camera.elevation_degrees() - params::ISO_ELEVATION_DEGREES).abs() < f32::EPSILON);
+        assert!((camera.ortho_height() - params::DEFAULT_ORTHO_HEIGHT).abs() < f32::EPSILON);
+
+        // Logic's Angle reference sees the listener from back-left, leaving
+        // their -Z-facing profile pointed toward screen-left.
+        let head = camera.project([0.0; 3], VIEWPORT);
+        let facing = camera.project([0.0, 0.0, -1.0], VIEWPORT);
+        assert!(facing.x < head.x, "ISO view was mirrored");
+    }
+
+    #[test]
+    fn the_back_preset_puts_the_eye_behind_the_listener() {
+        let mut camera = Camera::default();
+        camera.apply_preset(Preset::Back, VIEWPORT.width() / VIEWPORT.height());
+        camera.advance(1.0);
+
+        let direction = camera.direction();
+        assert!(direction[0].abs() < 1e-6);
+        assert!(direction[1].abs() < 1e-6);
+        assert!(direction[2] > 0.999, "eye is not on the +Z/back side");
+    }
+
+    #[test]
+    fn presets_use_different_zoom_values_to_keep_the_room_the_same_visual_size() {
+        let aspect = VIEWPORT.width() / VIEWPORT.height();
+        let mut camera = Camera::default();
+        let expected_fill =
+            projected_room_span(camera.azimuth_degrees, camera.elevation_degrees, aspect)
+                / camera.ortho_height;
+        let iso_zoom = camera.ortho_height;
+
+        for preset in [Preset::Back, Preset::Top, Preset::Side, Preset::Iso] {
+            camera.apply_preset(preset, aspect);
+            camera.advance(1.0);
+            let fill =
+                projected_room_span(camera.azimuth_degrees, camera.elevation_degrees, aspect)
+                    / camera.ortho_height;
+            assert!(
+                (fill - expected_fill).abs() < 1e-5,
+                "{preset:?} changed visual fill from {expected_fill} to {fill}"
+            );
+        }
+
+        assert!((camera.ortho_height - iso_zoom).abs() < 1e-5);
+    }
+
+    #[test]
+    fn iso_preserves_zoom_but_reset_restores_the_complete_default_view() {
+        let aspect = VIEWPORT.width() / VIEWPORT.height();
+        let mut camera = Camera {
+            ortho_height: 1.4,
+            ..Camera::default()
+        };
+        camera.apply_preset(Preset::Iso, aspect);
+        camera.advance(1.0);
+        assert!((camera.ortho_height - 1.4).abs() < 1e-5);
+
+        camera.azimuth_degrees = 123.0;
+        camera.elevation_degrees = -27.0;
+        camera.target = [0.4, -0.2, 0.3];
+        camera.reset_view();
+        camera.advance(1.0);
+
+        assert!((camera.azimuth_degrees - params::ISO_AZIMUTH_DEGREES).abs() < 1e-5);
+        assert!((camera.elevation_degrees - params::ISO_ELEVATION_DEGREES).abs() < 1e-5);
+        assert!((camera.ortho_height - params::DEFAULT_ORTHO_HEIGHT).abs() < 1e-5);
+        assert!(camera.target.iter().all(|axis| axis.abs() < 1e-5));
     }
 
     #[test]
