@@ -83,6 +83,33 @@ pub const OBJECT_SILENT_GAIN: f32 = 0.015_848_932;
 /// way a distant one does instead of introducing a second visual language.
 pub const OBJECT_SILENT_FADE: f32 = 0.55;
 
+/// Trail breadcrumbs kept per object, and how far apart in time they are taken.
+/// Forty at forty milliseconds is 1.6 seconds of history.
+///
+/// The trail is stroboscopic on purpose: discrete marks at a fixed time
+/// interval, so **the gap between marks is speed**. A continuous ribbon would
+/// throw that away and add a width channel carrying nothing. It is also honest
+/// about what the data is — `backend::source::element_state_at` shows the real
+/// trajectory is a piecewise-linear polyline, so an OAMD ramp comes out as
+/// evenly spaced marks and a `ramp_frames == 0` jump as one long gap.
+pub const TRAIL_SAMPLES: usize = 40;
+/// Sampling interval for the trail, in milliseconds.
+pub const TRAIL_INTERVAL_MILLISECONDS: u32 = 40;
+
+/// How far the oldest breadcrumb is pushed toward `STAGE`. Younger marks
+/// interpolate up from here, which is what makes the trail read directionally
+/// without needing an arrowhead.
+pub const TRAIL_FADE: f32 = 0.85;
+
+/// Weight of the trail's floor projection relative to its airborne marks. The
+/// projection is not decoration: at a grazing or axis-aligned view it is the
+/// only thing placing the path on the grid.
+pub const FLOOR_TRAIL_WEIGHT: f32 = 0.45;
+
+/// Breadcrumb edge as a fraction of [`OBJECT_EDGE`]. Small enough that a dense
+/// trail does not read as a second row of objects.
+pub const TRAIL_MARK_SCALE: f32 = 0.30;
+
 /// Outer shoulder width of the listener, in world units. This is the scale
 /// anchor: three head-and-shoulder envelopes span the room height. The complete
 /// canonical Minecraft figure is twice this height, so a standing body occupies

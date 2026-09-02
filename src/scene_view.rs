@@ -28,6 +28,7 @@
 use std::sync::{Mutex, PoisonError};
 
 use crate::decoder::PlaybackKey;
+use crate::scene3d::params::{TRAIL_INTERVAL_MILLISECONDS, TRAIL_SAMPLES};
 
 /// Objects the view will draw. The design budget is 20 dynamic objects plus the
 /// static LFE slot; a scene beyond it is truncated and reported, never grown,
@@ -50,15 +51,38 @@ pub struct ObjectView {
     pub gain: f32,
 }
 
-/// One instant of the scene, as the audio thread last saw it.
-#[derive(Debug, Clone, Copy, Default)]
+/// One instant of the scene, as the audio thread last saw it, plus the recent
+/// history of where each object has been.
+#[derive(Debug, Clone, Copy)]
 pub struct SceneViewFrame {
     objects: [ObjectView; MAX_VIEW_OBJECTS],
     /// Objects the render callback resolved, which may exceed the array.
     total_objects: usize,
+    /// Breadcrumbs per object slot, oldest first and contiguous. Kept as a
+    /// shift-down array rather than a ring: at forty points the shift is a
+    /// half-kilobyte memmove once every sampling interval, and in exchange the
+    /// scene can hand a plain slice straight to the mesh builder instead of
+    /// stitching two halves back together every frame.
+    trails: [[[f32; 3]; TRAIL_SAMPLES]; MAX_VIEW_OBJECTS],
+    trail_lens: [usize; MAX_VIEW_OBJECTS],
+    /// Presentation frame at which the next breadcrumb is due.
+    next_trail_frame: i64,
     /// `None` until the first write. Distinguishes "no playback yet" from a
     /// playback that legitimately carries no objects.
     key: Option<PlaybackKey>,
+}
+
+impl Default for SceneViewFrame {
+    fn default() -> Self {
+        Self {
+            objects: [ObjectView::default(); MAX_VIEW_OBJECTS],
+            total_objects: 0,
+            trails: [[[0.0; 3]; TRAIL_SAMPLES]; MAX_VIEW_OBJECTS],
+            trail_lens: [0; MAX_VIEW_OBJECTS],
+            next_trail_frame: 0,
+            key: None,
+        }
+    }
 }
 
 impl SceneViewFrame {
@@ -68,12 +92,41 @@ impl SceneViewFrame {
         &self.objects[..self.total_objects.min(MAX_VIEW_OBJECTS)]
     }
 
+    /// Where the object in `slot` has been, oldest first.
+    ///
+    /// Empty until the first breadcrumb is due, and emptied whenever the slot
+    /// changes hands — a trail belongs to an element, not to an array index.
+    #[must_use]
+    pub fn trail(&self, slot: usize) -> &[[f32; 3]] {
+        match self.trail_lens.get(slot) {
+            Some(&len) => &self.trails[slot][..len],
+            None => &[],
+        }
+    }
+
     /// Objects the scene carried beyond [`MAX_VIEW_OBJECTS`]. Non-zero means the
     /// view is showing an incomplete scene and has to say so.
     #[must_use]
     pub const fn hidden_objects(&self) -> usize {
         self.total_objects.saturating_sub(MAX_VIEW_OBJECTS)
     }
+}
+
+/// Breadcrumb spacing in presentation frames, at least one so the cadence can
+/// never stall on a pathological sample rate.
+fn trail_interval_frames(sample_rate: u32) -> i64 {
+    let frames = u64::from(sample_rate) * u64::from(TRAIL_INTERVAL_MILLISECONDS) / 1000;
+    i64::try_from(frames).unwrap_or(i64::MAX).max(1)
+}
+
+fn push_trail(trail: &mut [[f32; 3]; TRAIL_SAMPLES], len: &mut usize, point: [f32; 3]) {
+    if let Some(slot) = trail.get_mut(*len) {
+        *slot = point;
+        *len = len.saturating_add(1);
+        return;
+    }
+    trail.copy_within(1.., 0);
+    trail[TRAIL_SAMPLES - 1] = point;
 }
 
 /// The shared handle. `SpatialOutputController` owns it, the render source
@@ -108,11 +161,11 @@ impl SceneViewMirror {
             reason = "only the Windows render callback produces object positions"
         )
     )]
-    pub fn write<I>(&self, key: PlaybackKey, objects: I)
+    pub fn write<I>(&self, key: PlaybackKey, objects: I, timeline_frame: i64, sample_rate: u32)
     where
         I: IntoIterator<Item = ObjectView>,
     {
-        // Staged off-lock so the critical section is one memcpy.
+        // Staged off-lock so the critical section stays short.
         let mut staged = [ObjectView::default(); MAX_VIEW_OBJECTS];
         let mut total = 0usize;
         for object in objects {
@@ -125,12 +178,41 @@ impl SceneViewMirror {
             return;
         }
 
-        let Ok(mut frame) = self.frame.try_lock() else {
+        let Ok(mut guard) = self.frame.try_lock() else {
             return;
         };
+        // Reborrowed once so the field borrows below are disjoint; through the
+        // guard's Deref they would all be borrows of the whole frame.
+        let frame = &mut *guard;
+
+        // A seek, a new source or a device recovery starts a different history.
+        // Carrying breadcrumbs across one would draw a line the object never
+        // travelled, straight from where it used to be to where it now is.
+        if frame.key != Some(key) {
+            frame.trail_lens = [0; MAX_VIEW_OBJECTS];
+            frame.next_trail_frame = timeline_frame;
+        }
+        // A trail belongs to an element, not to an array index. If the scene's
+        // element set changed, a slot can now hold a different object and its
+        // history is not that object's.
+        for (slot, previous) in frame.objects.iter().enumerate() {
+            if previous.element_id != staged[slot].element_id {
+                frame.trail_lens[slot] = 0;
+            }
+        }
+
         frame.objects = staged;
         frame.total_objects = total;
         frame.key = Some(key);
+
+        if timeline_frame >= frame.next_trail_frame {
+            frame.next_trail_frame =
+                timeline_frame.saturating_add(trail_interval_frames(sample_rate));
+            for slot in 0..total.min(MAX_VIEW_OBJECTS) {
+                let point = frame.objects[slot].position;
+                push_trail(&mut frame.trails[slot], &mut frame.trail_lens[slot], point);
+            }
+        }
     }
 
     /// Take a copy of the current frame if it belongs to `key`. UI thread.
@@ -162,6 +244,13 @@ mod tests {
         u64::try_from(MAX_VIEW_OBJECTS).expect("the object budget fits a u64")
     }
 
+    const RATE: u32 = 48_000;
+
+    /// Publish one quantum's worth of objects at a presentation position.
+    fn write_at(mirror: &SceneViewMirror, key: PlaybackKey, frame: i64, objects: &[ObjectView]) {
+        mirror.write(key, objects.iter().copied(), frame, RATE);
+    }
+
     #[test]
     fn an_unwritten_mirror_reads_empty_so_the_stage_draws_an_empty_room() {
         // This is the permanent state off Windows, where nothing writes it.
@@ -172,7 +261,7 @@ mod tests {
     #[test]
     fn a_frame_from_a_superseded_playback_is_not_returned() {
         let mirror = SceneViewMirror::new();
-        mirror.write(PlaybackKey::new(3, 1), [object(1, 0.5)]);
+        write_at(&mirror, PlaybackKey::new(3, 1), 0, &[object(1, 0.5)]);
 
         assert!(mirror.read(PlaybackKey::new(3, 1)).is_some());
         assert!(
@@ -192,8 +281,8 @@ mod tests {
         // blink every object out and back roughly once a buffer.
         let mirror = SceneViewMirror::new();
         let key = PlaybackKey::new(1, 0);
-        mirror.write(key, [object(7, 0.25)]);
-        mirror.write(key, std::iter::empty());
+        write_at(&mirror, key, 0, &[object(7, 0.25)]);
+        write_at(&mirror, key, 1, &[]);
 
         let frame = mirror.read(key).expect("the previous frame is held");
         assert_eq!(frame.objects().len(), 1);
@@ -206,10 +295,104 @@ mod tests {
         // The held frame keeps the key it was written under, so the gate in
         // `read` catches it without the writer needing a separate clear path.
         let mirror = SceneViewMirror::new();
-        mirror.write(PlaybackKey::new(1, 0), [object(7, 0.25)]);
-        mirror.write(PlaybackKey::new(1, 1), std::iter::empty());
+        write_at(&mirror, PlaybackKey::new(1, 0), 0, &[object(7, 0.25)]);
+        write_at(&mirror, PlaybackKey::new(1, 1), 0, &[]);
 
         assert!(mirror.read(PlaybackKey::new(1, 1)).is_none());
+    }
+
+    #[test]
+    fn breadcrumbs_are_taken_on_the_interval_not_on_every_quantum() {
+        // Fixed spacing in time is the whole point: it makes the gap between
+        // marks a speed reading. Sampling per quantum would make it a frame-rate
+        // reading instead.
+        let mirror = SceneViewMirror::new();
+        let key = PlaybackKey::new(1, 0);
+        let interval = trail_interval_frames(RATE);
+
+        write_at(&mirror, key, 0, &[object(1, 0.0)]);
+        assert_eq!(mirror.read(key).expect("frame").trail(0).len(), 1);
+
+        write_at(&mirror, key, interval / 2, &[object(1, 0.1)]);
+        assert_eq!(
+            mirror.read(key).expect("frame").trail(0).len(),
+            1,
+            "a quantum inside the interval must not add a mark"
+        );
+
+        write_at(&mirror, key, interval, &[object(1, 0.2)]);
+        let frame = mirror.read(key).expect("frame");
+        assert_eq!(frame.trail(0).len(), 2);
+        assert!((frame.trail(0)[1][0] - 0.2).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn a_seek_discards_the_trail_rather_than_drawing_a_path_never_travelled() {
+        let mirror = SceneViewMirror::new();
+        let interval = trail_interval_frames(RATE);
+        let before = PlaybackKey::new(1, 0);
+        write_at(&mirror, before, 0, &[object(1, -0.9)]);
+        write_at(&mirror, before, interval, &[object(1, -0.8)]);
+        assert_eq!(mirror.read(before).expect("frame").trail(0).len(), 2);
+
+        let after = PlaybackKey::new(1, 1);
+        write_at(&mirror, after, 500_000, &[object(1, 0.9)]);
+        let frame = mirror.read(after).expect("frame");
+        assert_eq!(
+            frame.trail(0).len(),
+            1,
+            "breadcrumbs survived a seek and would join two unrelated positions"
+        );
+        assert!((frame.trail(0)[0][0] - 0.9).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn a_slot_that_changes_element_does_not_inherit_the_previous_trail() {
+        // Slots are array indices; trails belong to elements. A scene whose
+        // element set changes can hand a slot to a different object.
+        let mirror = SceneViewMirror::new();
+        let key = PlaybackKey::new(1, 0);
+        let interval = trail_interval_frames(RATE);
+        write_at(&mirror, key, 0, &[object(11, -0.5)]);
+        write_at(&mirror, key, interval, &[object(11, -0.4)]);
+        assert_eq!(mirror.read(key).expect("frame").trail(0).len(), 2);
+
+        write_at(&mirror, key, interval * 2, &[object(22, 0.6)]);
+        let frame = mirror.read(key).expect("frame");
+        assert_eq!(frame.trail(0).len(), 1);
+        assert!((frame.trail(0)[0][0] - 0.6).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn a_full_trail_drops_its_oldest_mark_and_stays_oldest_first() {
+        let mirror = SceneViewMirror::new();
+        let key = PlaybackKey::new(1, 0);
+        let interval = trail_interval_frames(RATE);
+        let steps = TRAIL_SAMPLES + 5;
+        for step in 0..steps {
+            let position = f32::from(u16::try_from(step).expect("step fits a u16"));
+            write_at(
+                &mirror,
+                key,
+                interval * i64::try_from(step).expect("step fits an i64"),
+                &[object(1, position)],
+            );
+        }
+
+        let frame = mirror.read(key).expect("frame");
+        let trail = frame.trail(0);
+        assert_eq!(trail.len(), TRAIL_SAMPLES);
+        let oldest = f32::from(u16::try_from(steps - TRAIL_SAMPLES).expect("fits"));
+        let newest = f32::from(u16::try_from(steps - 1).expect("fits"));
+        assert!(
+            (trail[0][0] - oldest).abs() < f32::EPSILON,
+            "{:?}",
+            trail[0]
+        );
+        assert!(
+            (trail[TRAIL_SAMPLES - 1][0] - newest).abs() < f32::EPSILON,
+            "the newest mark is not at the end"
+        );
     }
 
     #[test]
@@ -217,7 +400,7 @@ mod tests {
         let mirror = SceneViewMirror::new();
         let key = PlaybackKey::new(1, 0);
         let objects: Vec<ObjectView> = (0..budget() + 3).map(|id| object(id, 0.0)).collect();
-        mirror.write(key, objects);
+        write_at(&mirror, key, 0, &objects);
 
         let frame = mirror.read(key).expect("frame");
         assert_eq!(frame.objects().len(), MAX_VIEW_OBJECTS);

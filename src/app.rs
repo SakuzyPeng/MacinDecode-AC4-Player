@@ -49,9 +49,6 @@ pub struct PlayerApp {
     figure: scene3d::figure::Figure,
     /// Reused across frames so rebuilding the scene does not reallocate.
     scene_mesh: scene3d::mesh::MeshBuilder,
-    /// This frame's objects, copied out of the audio thread's mirror. Also
-    /// reused rather than rebuilt, for the same reason.
-    scene_objects: Vec<scene3d::scene::SceneObject>,
     /// False when eframe is not on the wgpu backend. The stage then draws
     /// nothing at all but its frame, which is why it is checked rather than
     /// assumed.
@@ -272,7 +269,6 @@ impl PlayerApp {
             camera: scene3d::camera::Camera::default(),
             figure: scene3d::figure::Figure::default(),
             scene_mesh: scene3d::mesh::MeshBuilder::default(),
-            scene_objects: Vec::with_capacity(crate::scene_view::MAX_VIEW_OBJECTS),
             scene_renderer_ready,
         }
     }
@@ -1082,7 +1078,32 @@ impl PlayerApp {
             .inner_margin(egui::Margin::same(18));
         let margins = frame.total_margin();
         let content_height = (available_height - margins.top - margins.bottom).max(180.0);
-        let hidden_objects = self.sync_scene_objects();
+        // The mirror is gated on the decoder's current playback key, so a frame
+        // written before a seek, a source change or a device recovery is
+        // rejected rather than drawn and the stage falls back to an empty room.
+        // Off Windows nothing ever writes it, so that is the permanent state.
+        //
+        // These are locals because a SceneObject borrows its trail out of the
+        // frame, which on `self` would be a self-referential struct. The array
+        // is sized to the object budget, so it costs no allocation either way.
+        let mirror_frame = self.output.scene_view().read(self.decoder.playback_key());
+        let mut objects =
+            [scene3d::scene::SceneObject::default(); crate::scene_view::MAX_VIEW_OBJECTS];
+        let mut hidden_objects = 0usize;
+        let mut object_count = 0usize;
+        if let Some(mirrored) = mirror_frame.as_ref() {
+            hidden_objects = mirrored.hidden_objects();
+            for (slot, object) in mirrored.objects().iter().enumerate() {
+                objects[slot] = scene3d::scene::SceneObject {
+                    position: object.position,
+                    active: object.active,
+                    gain: object.gain,
+                    trail: mirrored.trail(slot),
+                };
+                object_count = object_count.saturating_add(1);
+            }
+        }
+        let objects = &objects[..object_count];
         frame.show(ui, |ui| {
             ui.set_min_height(content_height);
             // The stage claims drag and scroll itself so the camera never fights
@@ -1105,7 +1126,7 @@ impl PlayerApp {
                     &self.camera,
                     rect.height(),
                     scene3d::scene::SceneInput {
-                        objects: &self.scene_objects,
+                        objects,
                         // Not from the mirror: the presentation's LFE layout is
                         // known as soon as the decoder reports metrics, well
                         // before the render callback produces a first quantum,
@@ -1124,33 +1145,6 @@ impl PlayerApp {
             self.draw_camera_presets(ui, rect);
             self.draw_camera_readout(ui, rect, hidden_objects);
         });
-    }
-
-    /// Copy this frame's objects out of the audio thread's mirror, returning how
-    /// many the scene carried beyond the view's budget.
-    ///
-    /// The mirror is gated on the decoder's current playback key, so a frame
-    /// written before a seek, a source change, or a device recovery is rejected
-    /// rather than drawn, and the stage falls back to an empty room until the
-    /// new stream produces its first quantum. Off Windows nothing ever writes
-    /// it, so that empty room is the permanent state.
-    fn sync_scene_objects(&mut self) -> usize {
-        self.scene_objects.clear();
-        let Some(frame) = self.output.scene_view().read(self.decoder.playback_key()) else {
-            return 0;
-        };
-        self.scene_objects
-            .extend(
-                frame
-                    .objects()
-                    .iter()
-                    .map(|object| scene3d::scene::SceneObject {
-                        position: object.position,
-                        active: object.active,
-                        gain: object.gain,
-                    }),
-            );
-        frame.hidden_objects()
     }
 
     /// Live camera state, bottom-left of the stage.

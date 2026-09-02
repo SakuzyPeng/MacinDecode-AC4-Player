@@ -120,6 +120,11 @@ impl SceneRenderSource {
         // OAMD state a second time. A parallel derivation would drift from the
         // audio under ramps, and these are already in the listener space the
         // scene view draws in.
+        //
+        // The timeline position doubles as the trail's clock. It is the only
+        // monotonic presentation-time source here, and it jumps exactly when a
+        // seek does — which is also when the trail has to be discarded, so the
+        // two stay consistent for free.
         self.mirror.write(
             self.key,
             objects.values().map(|render| ObjectView {
@@ -128,6 +133,8 @@ impl SceneRenderSource {
                 position: render.position,
                 gain: render.gain,
             }),
+            self.timeline_frame,
+            self.sample_rate,
         );
         Ok(RenderQuantum {
             objects: objects.into_values().collect(),

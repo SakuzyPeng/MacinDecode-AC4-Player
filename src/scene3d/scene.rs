@@ -26,7 +26,7 @@ const CEILING_Y: f32 = params::ROOM_CEILING_Y;
 /// elevation is remapped around the head-height origin into the lower
 /// rectangular room.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct SceneObject {
+pub struct SceneObject<'a> {
     pub position: [f32; 3],
     /// Whether the renderer is spatializing this element. An inactive one is
     /// not drawn at all — see [`build`].
@@ -34,12 +34,15 @@ pub struct SceneObject {
     /// Linear gain, which decides whether the object reads as sounding or as
     /// present but silent.
     pub gain: f32,
+    /// Where this object has been, oldest first, in the same normalized
+    /// coordinates as `position`.
+    pub trail: &'a [[f32; 3]],
 }
 
 /// Everything one frame of the scene depends on.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SceneInput<'a> {
-    pub objects: &'a [SceneObject],
+    pub objects: &'a [SceneObject<'a>],
     /// Whether the presentation carries an LFE element. The slot is drawn either
     /// way; only its occupancy changes.
     pub has_lfe: bool,
@@ -72,6 +75,7 @@ pub fn build(
     // in the one place guaranteed to look deliberate. Leaving it out is the
     // honest reading of "we do not know where this is".
     for object in input.objects.iter().filter(|object| object.active) {
+        add_trail(mesh, object, &view);
         add_object(mesh, object, &view);
     }
 }
@@ -197,16 +201,10 @@ fn add_floor_grid(mesh: &mut MeshBuilder, view: &ViewContext) {
 /// The drop line and footprint are not decoration. In an orthographic view an
 /// airborne cube's height and depth are ambiguous, and at an axis-aligned angle
 /// the projection carries no depth at all — these two carry it instead.
-fn add_object(mesh: &mut MeshBuilder, object: &SceneObject, view: &ViewContext) {
+fn add_object(mesh: &mut MeshBuilder, object: &SceneObject<'_>, view: &ViewContext) {
     let [x, y, z] = object_world_position(object.position);
     let edge = params::OBJECT_EDGE;
-    let accent = Rgb::from_color32(theme::ACCENT);
-    let colour = if object.gain >= params::OBJECT_SILENT_GAIN {
-        accent
-    } else {
-        accent.lerp(view.stage, params::OBJECT_SILENT_FADE)
-    };
-    mesh.add_box([x, y, z], [edge; 3], colour, view);
+    mesh.add_box([x, y, z], [edge; 3], object_colour(object, view), view);
 
     let drop = Rgb::from_color32(theme::MUTED).lerp(Rgb::from_color32(theme::BORDER), 0.35);
     mesh.add_line(
@@ -225,6 +223,62 @@ fn add_object(mesh: &mut MeshBuilder, object: &SceneObject, view: &ViewContext) 
         Rgb::from_color32(theme::MUTED).lerp(view.stage, 0.4),
         view,
     );
+}
+
+/// An object's base colour: accent while it is audible, faded toward the stage
+/// once it drops below the silence floor. Fading toward the ground is the same
+/// recession air perspective uses, so silence does not need a second language.
+fn object_colour(object: &SceneObject<'_>, view: &ViewContext) -> Rgb {
+    let accent = Rgb::from_color32(theme::ACCENT);
+    if object.gain >= params::OBJECT_SILENT_GAIN {
+        accent
+    } else {
+        accent.lerp(view.stage, params::OBJECT_SILENT_FADE)
+    }
+}
+
+/// The object's recent path, as discrete marks at a fixed time interval.
+///
+/// Because the interval is fixed, **the gap between marks is speed**: an OAMD
+/// ramp comes out evenly spaced and a `ramp_frames == 0` jump as a single long
+/// gap. A continuous ribbon would lose that and add a width channel carrying
+/// nothing.
+///
+/// Each mark is projected onto the floor as well. That projection is not
+/// decoration — at a grazing or axis-aligned view the airborne marks carry no
+/// depth at all, and the projection is what still places the path on the grid.
+fn add_trail(mesh: &mut MeshBuilder, object: &SceneObject<'_>, view: &ViewContext) {
+    let Ok(count) = u16::try_from(object.trail.len()) else {
+        return;
+    };
+    if count == 0 {
+        return;
+    }
+    // Deliberately not tinted by the object's current gain. The mirror records
+    // positions, not a gain history, so colouring past positions with the
+    // present gain would repaint history with something that was not true when
+    // the object was there. It also compounded with the age fade until a silent
+    // object's trail was invisible. Age is the only thing a trail encodes.
+    let colour = Rgb::from_color32(theme::ACCENT);
+    let edge = params::OBJECT_EDGE * params::TRAIL_MARK_SCALE;
+
+    for (index, point) in object.trail.iter().enumerate() {
+        // Newest mark unfaded, oldest at TRAIL_FADE. This is what gives the
+        // trail a direction without needing an arrowhead.
+        let freshness = f32::from(u16::try_from(index).unwrap_or(u16::MAX).saturating_add(1))
+            / f32::from(count);
+        let faded = colour.lerp(view.stage, params::TRAIL_FADE * (1.0 - freshness));
+        let [x, y, z] = object_world_position(*point);
+        mesh.add_box([x, y, z], [edge; 3], faded, view);
+        mesh.add_floor_mark(
+            x,
+            z,
+            edge * 0.7,
+            FLOOR_Y,
+            faded.lerp(view.stage, 1.0 - params::FLOOR_TRAIL_WEIGHT),
+            view,
+        );
+    }
 }
 
 /// Map the normalized acoustic coordinates into the display room. The floor is
@@ -250,11 +304,12 @@ mod tests {
 
     /// An object the renderer is spatializing at full gain — the ordinary case
     /// the geometry tests care about.
-    fn sounding(position: [f32; 3]) -> SceneObject {
+    fn sounding(position: [f32; 3]) -> SceneObject<'static> {
         SceneObject {
             position,
             active: true,
             gain: 1.0,
+            trail: &[],
         }
     }
 
@@ -396,9 +451,8 @@ mod tests {
         // reading rather than withhold one.
         let empty = built(&[]);
         let inactive = built(&[SceneObject {
-            position: [0.3, 0.4, -0.2],
             active: false,
-            gain: 1.0,
+            ..sounding([0.3, 0.4, -0.2])
         }]);
 
         assert_eq!(inactive.solid.len(), empty.solid.len());
@@ -411,9 +465,8 @@ mod tests {
         let empty = built(&[]);
         let loud = built(&[sounding([0.3, 0.4, -0.2])]);
         let silent = built(&[SceneObject {
-            position: [0.3, 0.4, -0.2],
-            active: true,
             gain: params::OBJECT_SILENT_GAIN / 2.0,
+            ..sounding([0.3, 0.4, -0.2])
         }]);
 
         // Same shape: silence is a colour, not a different object.
@@ -432,6 +485,71 @@ mod tests {
             brightness(&silent) > brightness(&loud),
             "the silent object did not recede toward the stage"
         );
+    }
+
+    #[test]
+    fn a_trail_adds_one_mark_and_one_floor_projection_per_breadcrumb() {
+        let trail = [[-0.5, 0.2, 0.1], [-0.2, 0.2, 0.1], [0.1, 0.2, 0.1]];
+        let bare = built(&[sounding([0.3, 0.4, -0.2])]);
+        let trailed = built(&[SceneObject {
+            trail: &trail,
+            ..sounding([0.3, 0.4, -0.2])
+        }]);
+
+        assert_eq!(
+            trailed.solid.len() - bare.solid.len(),
+            trail.len() * 6 * 6,
+            "one cube per breadcrumb"
+        );
+        assert_eq!(
+            trailed.decal.len() - bare.decal.len(),
+            trail.len() * 6,
+            "one floor projection per breadcrumb"
+        );
+    }
+
+    #[test]
+    fn the_trail_fades_from_its_newest_mark_back_to_its_oldest() {
+        // The fade is what gives the trail a direction; without it the path
+        // reads the same forwards and backwards.
+        let trail = [[-0.5, 0.2, 0.1], [0.1, 0.2, 0.1]];
+        let empty = built(&[]);
+        let trailed = built(&[SceneObject {
+            trail: &trail,
+            ..sounding([0.3, 0.4, -0.2])
+        }]);
+
+        // The trail is emitted before its object, so the marks start where the
+        // objectless scene ends. Offsetting past a scene that already has the
+        // object would land in the middle of the run.
+        let marks = &trailed.solid[empty.solid.len()..];
+        let brightness = |cube: &[crate::scene3d::mesh::Vertex]| {
+            let sum: u32 = cube
+                .iter()
+                .map(|vertex| u32::from(vertex.colour[0]) + u32::from(vertex.colour[2]))
+                .sum();
+            sum / u32::try_from(cube.len()).unwrap_or(1)
+        };
+        let oldest = brightness(&marks[..36]);
+        let newest = brightness(&marks[36..72]);
+        assert!(
+            oldest > newest,
+            "the oldest mark ({oldest}) is not the most faded ({newest})"
+        );
+    }
+
+    #[test]
+    fn an_inactive_object_draws_no_trail_either() {
+        let trail = [[-0.5, 0.2, 0.1], [0.1, 0.2, 0.1]];
+        let empty = built(&[]);
+        let inactive = built(&[SceneObject {
+            active: false,
+            trail: &trail,
+            ..sounding([0.3, 0.4, -0.2])
+        }]);
+
+        assert_eq!(inactive.solid.len(), empty.solid.len());
+        assert_eq!(inactive.decal.len(), empty.decal.len());
     }
 
     #[test]
