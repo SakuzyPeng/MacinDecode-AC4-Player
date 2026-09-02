@@ -20,6 +20,9 @@ eframe = { version = "=0.36.1", default-features = false, features = [
     "wgpu",
     "x11",
 ] }
+# Already in the tree via wgpu, so taking it as a direct dependency costs no
+# extra compilation. Used only for the scene vertex cast in `scene3d::gpu`.
+bytemuck = { version = "1", features = ["derive"] }
 macindecode-ac4-inspect = { git = "https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git", rev = "eb7c6132072daad3b4312bd23c2d9e8a63fa1265" }
 rfd = { version = "=0.17.2", default-features = false, features = [
     "common-controls-v6",

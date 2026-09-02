@@ -1670,6 +1670,7 @@ dependencies = [
 name = "macindecode-ac4-player"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "eframe",
  "macindecode-ac4-bitstream",
  "macindecode-ac4-inspect",

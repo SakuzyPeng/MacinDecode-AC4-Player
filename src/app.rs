@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use eframe::egui::{self, Align, Color32, Layout, RichText, Stroke};
+use eframe::egui::{self, Align, Align2, Color32, Layout, RichText, Stroke};
 
 use crate::backend::{
     OutputDeviceSelection, OutputPhase, OutputSnapshot, OutputStreamConfig, SpatialBackendKind,
@@ -13,6 +13,7 @@ use crate::decoder::{
 };
 use crate::inspection::InspectionController;
 use crate::model::SelectedSource;
+use crate::scene3d;
 use crate::theme;
 
 #[allow(
@@ -42,6 +43,12 @@ pub struct PlayerApp {
     muted: bool,
     bitstream_details_open: bool,
     diagnostics_open: bool,
+    camera: scene3d::camera::Camera,
+    /// Reused across frames so rebuilding the scene does not reallocate.
+    scene_mesh: scene3d::mesh::MeshBuilder,
+    /// False when eframe is not on the wgpu backend; the stage then falls back
+    /// to its text-only presentation.
+    scene_renderer_ready: bool,
 }
 
 const OUTPUT_DEVICE_STORAGE_KEY: &str = "preferred-output-device-v1";
@@ -228,6 +235,10 @@ impl PlayerApp {
             .unwrap_or_default();
         let mut output = SpatialOutputController::new();
         output.set_preferred_device(preferred_device);
+        let scene_renderer_ready = creation_context
+            .wgpu_render_state
+            .as_ref()
+            .is_some_and(scene3d::gpu::SceneRenderer::install);
         Self {
             playlist: Vec::new(),
             selected_source: None,
@@ -251,6 +262,9 @@ impl PlayerApp {
             muted: false,
             bitstream_details_open: false,
             diagnostics_open: false,
+            camera: scene3d::camera::Camera::default(),
+            scene_mesh: scene3d::mesh::MeshBuilder::default(),
+            scene_renderer_ready,
         }
     }
 
@@ -1038,8 +1052,184 @@ impl PlayerApp {
                 metric_strip(ui, &decoder);
 
                 ui.add_space(16.0);
-                scene_placeholder(ui, self.has_selected_source(), &decoder, &output);
+                self.draw_stage(ui, &decoder, &output);
             });
+    }
+
+    /// The object scene stage.
+    ///
+    /// The `STAGE`-filled, hairline-bordered frame is unchanged from when this
+    /// was a text-only box: the 3D view paints onto the same ground so there is
+    /// no seam, and it deliberately gets no darker "viewport" backdrop of its
+    /// own — that is the surest way to break the paper metaphor.
+    ///
+    /// The phase message is drawn *after* the callback. egui's own pipeline uses
+    /// `depth_compare: Always` and never writes depth, so 2D always lands on top
+    /// of the scene regardless of what the depth buffer holds.
+    fn draw_stage(
+        &mut self,
+        ui: &mut egui::Ui,
+        decoder: &DecoderSnapshot,
+        output: &OutputSnapshot,
+    ) {
+        let available_height = ui.available_height();
+        let frame = egui::Frame::NONE
+            .fill(theme::STAGE)
+            .stroke(Stroke::new(1.0, theme::BORDER))
+            .inner_margin(egui::Margin::same(18));
+        let margins = frame.total_margin();
+        let content_height = (available_height - margins.top - margins.bottom).max(180.0);
+        let has_source = self.has_selected_source();
+
+        frame.show(ui, |ui| {
+            ui.set_min_height(content_height);
+            // The stage claims drag and scroll itself so the camera never fights
+            // the surrounding panel for the pointer.
+            let response = ui.allocate_rect(
+                egui::Rect::from_min_size(
+                    ui.cursor().min,
+                    egui::vec2(ui.available_width(), content_height),
+                ),
+                egui::Sense::drag(),
+            );
+            let rect = response.rect;
+            ui.advance_cursor_after_rect(rect);
+
+            self.drive_camera(ui, &response);
+
+            if self.scene_renderer_ready && rect.width() > 0.0 && rect.height() > 0.0 {
+                scene3d::scene::build(
+                    &mut self.scene_mesh,
+                    &self.camera,
+                    rect.height(),
+                    &PROBE_OBJECTS,
+                );
+                let matrix = self.camera.view_projection(rect.width() / rect.height());
+                let callback = scene3d::gpu::SceneCallback::new(&self.scene_mesh, matrix);
+                if !callback.is_empty() {
+                    ui.painter().add(callback.into_shape(rect));
+                }
+            }
+
+            let (headline, detail) = stage_message(has_source, decoder, output);
+            ui.scope_builder(
+                egui::UiBuilder::new()
+                    .max_rect(rect)
+                    .layout(Layout::top_down(Align::Center)),
+                |ui| {
+                    // The message sits on top of the scene, so it must not take
+                    // the pointer: selectable labels would otherwise swallow a
+                    // drag as a text selection and the camera would never move.
+                    ui.style_mut().interaction.selectable_labels = false;
+                    ui.add_space(((content_height - 62.0) / 2.0).max(24.0));
+                    ui.label(
+                        RichText::new(headline)
+                            .size(19.0)
+                            .strong()
+                            .color(theme::TEXT),
+                    );
+                    ui.add_space(6.0);
+                    ui.label(RichText::new(detail).color(theme::MUTED));
+                },
+            );
+
+            self.draw_camera_presets(ui, rect);
+            self.draw_camera_readout(ui, rect);
+        });
+    }
+
+    /// Live camera state, bottom-left of the stage.
+    ///
+    /// `faces` is the number of an axis-aligned box's faces still turned toward
+    /// the viewer. It drops below three as the view approaches an axis, which is
+    /// exactly when three-tone shading stops separating faces and the projection
+    /// stops carrying depth — so it is worth showing rather than discovering.
+    fn draw_camera_readout(&self, ui: &mut egui::Ui, stage: egui::Rect) {
+        let faces = scene3d::mesh::visible_face_count(self.camera.direction());
+        let text = format!(
+            "az {:.0}°   el {:.0}°   zoom {:.2}   faces/box {faces}",
+            self.camera.azimuth_degrees(),
+            self.camera.elevation_degrees(),
+            self.camera.ortho_height(),
+        );
+        ui.painter().text(
+            egui::pos2(stage.left(), stage.bottom() - 4.0),
+            Align2::LEFT_BOTTOM,
+            text,
+            egui::FontId::monospace(10.0),
+            if faces < 3 {
+                theme::WARNING
+            } else {
+                theme::MUTED
+            },
+        );
+    }
+
+    /// Orbit, zoom and pan. Every angle stays reachable — this is an inspection
+    /// tool, and a single fixed viewpoint leaves object positions ambiguous.
+    fn drive_camera(&mut self, ui: &egui::Ui, response: &egui::Response) {
+        let viewport_height = response.rect.height();
+        if response.dragged() {
+            self.camera.cancel_animation();
+            let delta = response.drag_delta();
+            if ui.input(|input| input.modifiers.shift) {
+                self.camera.pan([delta.x, delta.y], viewport_height);
+            } else {
+                self.camera.orbit([delta.x, delta.y]);
+            }
+        }
+        if response.drag_stopped() && !ui.input(|input| input.modifiers.shift) {
+            self.camera.snap_if_near();
+        }
+        if response.hovered() {
+            let scroll = ui.input(|input| input.smooth_scroll_delta.y);
+            if scroll.abs() > f32::EPSILON {
+                self.camera.cancel_animation();
+                self.camera.zoom(-scroll);
+            }
+        }
+
+        let delta_seconds = ui.input(|input| input.stable_dt);
+        if self.camera.advance(delta_seconds) {
+            ui.ctx().request_repaint();
+        }
+    }
+
+    /// Named viewpoints, in the theme's own square hairline idiom — no floating
+    /// gizmo, no rounded HUD.
+    fn draw_camera_presets(&mut self, ui: &mut egui::Ui, stage: egui::Rect) {
+        use scene3d::camera::Preset;
+
+        let buttons = [
+            ("ISO", Preset::Iso),
+            ("TOP", Preset::Top),
+            ("FRONT", Preset::Front),
+            ("SIDE", Preset::Side),
+        ];
+        let strip = egui::Rect::from_min_size(
+            egui::pos2(stage.left(), stage.top()),
+            egui::vec2(stage.width(), 30.0),
+        );
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(strip)
+                .layout(Layout::right_to_left(Align::Min)),
+            |ui| {
+                for (label, preset) in buttons.into_iter().rev() {
+                    if ui
+                        .add_sized(
+                            [52.0, 26.0],
+                            egui::Button::new(
+                                RichText::new(label).size(10.0).strong().color(theme::MUTED),
+                            ),
+                        )
+                        .clicked()
+                    {
+                        self.camera.apply_preset(preset);
+                    }
+                }
+            },
+        );
     }
 
     fn draw_diagnostics_window(&mut self, context: &egui::Context) {
@@ -2016,95 +2206,91 @@ fn metric_strip(ui: &mut egui::Ui, decoder: &DecoderSnapshot) {
     }
 }
 
-fn scene_placeholder(
-    ui: &mut egui::Ui,
-    has_source: bool,
-    decoder: &DecoderSnapshot,
-    output: &OutputSnapshot,
-) {
-    let available_height = ui.available_height();
-    let frame = egui::Frame::NONE
-        .fill(theme::STAGE)
-        .stroke(Stroke::new(1.0, theme::BORDER))
-        .inner_margin(egui::Margin::same(18));
-    let margins = frame.total_margin();
-    let content_height = (available_height - margins.top - margins.bottom).max(180.0);
+/// Objects drawn while the audio-thread mirror does not exist yet.
+///
+/// They exist to exercise the `solid` pipeline — culling, depth, and the drop
+/// line and footprint that carry height and depth when the projection cannot.
+/// Increment 4 replaces them with the real scene.
+const PROBE_OBJECTS: [scene3d::scene::SceneObject; 3] = [
+    scene3d::scene::SceneObject {
+        position: [0.55, 0.30, -0.40],
+    },
+    scene3d::scene::SceneObject {
+        position: [-0.62, -0.15, 0.35],
+    },
+    scene3d::scene::SceneObject {
+        position: [0.10, 0.70, 0.62],
+    },
+];
 
-    frame.show(ui, |ui| {
-        ui.set_min_height(content_height);
-        ui.vertical_centered(|ui| {
-            ui.add_space(((content_height - 62.0) / 2.0).max(24.0));
-            let (headline, detail) = match decoder.phase() {
-                DecodePhase::Opening => (
-                    "Opening AC-4 source",
-                    "Reading the bounded access-unit timeline for MacinDecode Core.",
-                ),
-                DecodePhase::Seeking => (
-                    "Seeking object scene",
-                    "Core is rebuilding Scene state from the nearest complete random-access point.",
-                ),
-                DecodePhase::Buffering => (
-                    "Decoding object scene",
-                    "Core is producing normalized object/LFE PCM into the bounded Scene FIFO.",
-                ),
-                DecodePhase::Ready | DecodePhase::EndOfStream => match output.phase() {
-                    OutputPhase::Initializing => (
-                        "Opening spatial output",
-                        "Activating the default endpoint and reserving Windows dynamic objects.",
-                    ),
-                    OutputPhase::Playing => (
-                        "Spatial playback active",
-                        "Scene PCM, object positions, gains, and LFE are being submitted to Windows.",
-                    ),
-                    OutputPhase::Paused => (
-                        "Spatial playback paused",
-                        "The native stream remains active and submits silence until playback resumes.",
-                    ),
-                    OutputPhase::Ended => (
-                        "Spatial playback ended",
-                        "The Scene FIFO reached its end and all native objects were finalized.",
-                    ),
-                    OutputPhase::Failed => (
-                        "Spatial output failed",
-                        output.error().unwrap_or("Windows Spatial Audio reported an error."),
-                    ),
-                    OutputPhase::Ready => (
-                        "Spatial scene ready",
-                        "Windows Spatial Audio is active; press Play to consume the Scene FIFO.",
-                    ),
-                    OutputPhase::Unavailable | OutputPhase::Idle => (
-                        "Decoded scene buffered",
-                        "Full A-JOC PCM and OAMD are ready for native spatial submission.",
-                    ),
-                },
-                DecodePhase::Failed => (
-                    "Scene decode failed",
-                    decoder.detail().unwrap_or("MacinDecode Core reported an error."),
-                ),
-                DecodePhase::Unavailable => (
-                    "Windows decoder path",
-                    decoder
-                        .detail()
-                        .unwrap_or("Audio decoding is unavailable on this platform."),
-                ),
-                DecodePhase::Idle if has_source => (
-                    "Waiting for decoder",
-                    "The selected source has not entered the decode worker yet.",
-                ),
-                DecodePhase::Idle => ("No object scene", "Add an AC-4 source to begin inspection."),
-            };
-            ui.label(
-                RichText::new(headline)
-                    .size(19.0)
-                    .strong()
-                    .color(theme::TEXT),
-            );
-            ui.add_space(6.0);
-            ui.label(
-                RichText::new(detail).color(theme::MUTED),
-            );
-        });
-    });
+fn stage_message<'a>(
+    has_source: bool,
+    decoder: &'a DecoderSnapshot,
+    output: &'a OutputSnapshot,
+) -> (&'static str, &'a str) {
+    match decoder.phase() {
+        DecodePhase::Opening => (
+            "Opening AC-4 source",
+            "Reading the bounded access-unit timeline for MacinDecode Core.",
+        ),
+        DecodePhase::Seeking => (
+            "Seeking object scene",
+            "Core is rebuilding Scene state from the nearest complete random-access point.",
+        ),
+        DecodePhase::Buffering => (
+            "Decoding object scene",
+            "Core is producing normalized object/LFE PCM into the bounded Scene FIFO.",
+        ),
+        DecodePhase::Ready | DecodePhase::EndOfStream => match output.phase() {
+            OutputPhase::Initializing => (
+                "Opening spatial output",
+                "Activating the default endpoint and reserving Windows dynamic objects.",
+            ),
+            OutputPhase::Playing => (
+                "Spatial playback active",
+                "Scene PCM, object positions, gains, and LFE are being submitted to Windows.",
+            ),
+            OutputPhase::Paused => (
+                "Spatial playback paused",
+                "The native stream remains active and submits silence until playback resumes.",
+            ),
+            OutputPhase::Ended => (
+                "Spatial playback ended",
+                "The Scene FIFO reached its end and all native objects were finalized.",
+            ),
+            OutputPhase::Failed => (
+                "Spatial output failed",
+                output
+                    .error()
+                    .unwrap_or("Windows Spatial Audio reported an error."),
+            ),
+            OutputPhase::Ready => (
+                "Spatial scene ready",
+                "Windows Spatial Audio is active; press Play to consume the Scene FIFO.",
+            ),
+            OutputPhase::Unavailable | OutputPhase::Idle => (
+                "Decoded scene buffered",
+                "Full A-JOC PCM and OAMD are ready for native spatial submission.",
+            ),
+        },
+        DecodePhase::Failed => (
+            "Scene decode failed",
+            decoder
+                .detail()
+                .unwrap_or("MacinDecode Core reported an error."),
+        ),
+        DecodePhase::Unavailable => (
+            "Windows decoder path",
+            decoder
+                .detail()
+                .unwrap_or("Audio decoding is unavailable on this platform."),
+        ),
+        DecodePhase::Idle if has_source => (
+            "Waiting for decoder",
+            "The selected source has not entered the decode worker yet.",
+        ),
+        DecodePhase::Idle => ("No object scene", "Add an AC-4 source to begin inspection."),
+    }
 }
 
 #[allow(
