@@ -531,7 +531,7 @@ pub(crate) struct PlaybackKey {
 }
 
 impl PlaybackKey {
-    const fn new(request_id: u64, epoch: u64) -> Self {
+    pub(crate) const fn new(request_id: u64, epoch: u64) -> Self {
         Self { request_id, epoch }
     }
 
@@ -769,6 +769,16 @@ impl SceneQueueReader {
     #[cfg(target_os = "windows")]
     pub(crate) fn is_end_of_stream(&self) -> bool {
         self.queue.is_end_of_stream(self.key)
+    }
+
+    /// The playback this reader is bound to.
+    ///
+    /// The render source stamps everything it mirrors to the UI with this, so
+    /// the view is gated by exactly the key the FIFO already enforces rather
+    /// than by a second, parallel notion of freshness.
+    #[cfg(target_os = "windows")]
+    pub(crate) const fn playback_key(&self) -> PlaybackKey {
+        self.key
     }
 }
 

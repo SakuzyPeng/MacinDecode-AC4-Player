@@ -21,13 +21,19 @@ const ROOM_HALF_DEPTH: f32 = params::ROOM_DEPTH / 2.0;
 const FLOOR_Y: f32 = params::ROOM_FLOOR_Y;
 const CEILING_Y: f32 = params::ROOM_CEILING_Y;
 
-/// A dynamic object to draw, in normalized listener-relative coordinates.
-/// Increment 4 fills these from the audio-thread mirror; until then the caller
-/// supplies a fixed set. X/Z map onto the square footprint while elevation is
-/// remapped around the head-height origin into the lower rectangular room.
-#[derive(Debug, Clone, Copy)]
+/// A dynamic object to draw, in normalized listener-relative coordinates as the
+/// render callback submitted them. X/Z map onto the square footprint while
+/// elevation is remapped around the head-height origin into the lower
+/// rectangular room.
+#[derive(Debug, Clone, Copy, Default)]
 pub struct SceneObject {
     pub position: [f32; 3],
+    /// Whether the renderer is spatializing this element. An inactive one is
+    /// not drawn at all — see [`build`].
+    pub active: bool,
+    /// Linear gain, which decides whether the object reads as sounding or as
+    /// present but silent.
+    pub gain: f32,
 }
 
 /// Everything one frame of the scene depends on.
@@ -60,7 +66,12 @@ pub fn build(
     add_floor_grid(mesh, &view);
     add_figure(mesh, input.figure, &view);
     add_lfe_slot(mesh, input.has_lfe, &view);
-    for object in input.objects {
+    // An inactive element is one whose metadata is absent or incomplete, so the
+    // only coordinate available for it is the origin — the listener's own head.
+    // Drawing it there would assert a position it does not have, and assert it
+    // in the one place guaranteed to look deliberate. Leaving it out is the
+    // honest reading of "we do not know where this is".
+    for object in input.objects.iter().filter(|object| object.active) {
         add_object(mesh, object, &view);
     }
 }
@@ -124,7 +135,7 @@ fn add_lfe_slot(mesh: &mut MeshBuilder, present: bool, view: &ViewContext) {
 fn add_room(mesh: &mut MeshBuilder, view: &ViewContext) {
     let colour = Rgb::from_color32(theme::BORDER).lerp(view.ink, 0.25);
     mesh.add_wire_box(
-        [0.0, (FLOOR_Y + CEILING_Y) / 2.0, 0.0],
+        [0.0, f32::midpoint(FLOOR_Y, CEILING_Y), 0.0],
         [params::ROOM_WIDTH, params::ROOM_HEIGHT, params::ROOM_DEPTH],
         colour,
         params::HAIRLINE_POINTS,
@@ -189,7 +200,13 @@ fn add_floor_grid(mesh: &mut MeshBuilder, view: &ViewContext) {
 fn add_object(mesh: &mut MeshBuilder, object: &SceneObject, view: &ViewContext) {
     let [x, y, z] = object_world_position(object.position);
     let edge = params::OBJECT_EDGE;
-    mesh.add_box([x, y, z], [edge; 3], Rgb::from_color32(theme::ACCENT), view);
+    let accent = Rgb::from_color32(theme::ACCENT);
+    let colour = if object.gain >= params::OBJECT_SILENT_GAIN {
+        accent
+    } else {
+        accent.lerp(view.stage, params::OBJECT_SILENT_FADE)
+    };
+    mesh.add_box([x, y, z], [edge; 3], colour, view);
 
     let drop = Rgb::from_color32(theme::MUTED).lerp(Rgb::from_color32(theme::BORDER), 0.35);
     mesh.add_line(
@@ -231,6 +248,16 @@ fn object_world_position([x, y, z]: [f32; 3]) -> [f32; 3] {
 mod tests {
     use super::*;
 
+    /// An object the renderer is spatializing at full gain — the ordinary case
+    /// the geometry tests care about.
+    fn sounding(position: [f32; 3]) -> SceneObject {
+        SceneObject {
+            position,
+            active: true,
+            gain: 1.0,
+        }
+    }
+
     fn built(objects: &[SceneObject]) -> MeshBuilder {
         with_input(SceneInput {
             objects,
@@ -266,8 +293,8 @@ mod tests {
 
     #[test]
     fn the_room_is_a_low_cuboid_with_the_head_at_elevation_zero() {
-        assert!(params::ROOM_HEIGHT < params::ROOM_WIDTH);
-        assert!(params::ROOM_HEIGHT < params::ROOM_DEPTH);
+        const { assert!(params::ROOM_HEIGHT < params::ROOM_WIDTH) };
+        const { assert!(params::ROOM_HEIGHT < params::ROOM_DEPTH) };
         assert!((CEILING_Y - FLOOR_Y - params::ROOM_HEIGHT).abs() < 1e-6);
         assert!((params::FIGURE_SHOULDER_WIDTH * 3.0 - params::ROOM_HEIGHT).abs() < 1e-6);
 
@@ -320,9 +347,7 @@ mod tests {
     #[test]
     fn every_object_brings_a_cube_a_drop_line_and_a_footprint() {
         let empty = built(&[]);
-        let one = built(&[SceneObject {
-            position: [0.3, 0.4, -0.2],
-        }]);
+        let one = built(&[sounding([0.3, 0.4, -0.2])]);
 
         assert_eq!(one.solid.len() - empty.solid.len(), 6 * 6, "six cube faces");
         assert_eq!(one.line.len() - empty.line.len(), 6, "one drop line");
@@ -331,9 +356,7 @@ mod tests {
 
     #[test]
     fn the_footprint_lands_directly_under_the_cube_on_the_floor() {
-        let object = SceneObject {
-            position: [0.3, 0.4, -0.2],
-        };
+        let object = sounding([0.3, 0.4, -0.2]);
         let world = object_world_position(object.position);
         let empty = built(&[]);
         let one = built(&[object]);
@@ -350,9 +373,7 @@ mod tests {
 
     #[test]
     fn object_elevation_is_remapped_into_the_low_room() {
-        let object = SceneObject {
-            position: [0.3, 0.4, -0.2],
-        };
+        let object = sounding([0.3, 0.4, -0.2]);
         let expected = object_world_position(object.position);
         let empty = built(&[]);
         let one = built(&[object]);
@@ -365,7 +386,52 @@ mod tests {
             .iter()
             .map(|vertex| vertex.position[1])
             .fold(f32::NEG_INFINITY, f32::max);
-        assert!(((lowest + highest) / 2.0 - expected[1]).abs() < 1e-6);
+        assert!((f32::midpoint(lowest, highest) - expected[1]).abs() < 1e-6);
+    }
+
+    #[test]
+    fn an_inactive_object_is_not_drawn_at_the_listener() {
+        // An element without complete metadata has no position but the origin,
+        // which is the listener's own head. Drawing it there would invent a
+        // reading rather than withhold one.
+        let empty = built(&[]);
+        let inactive = built(&[SceneObject {
+            position: [0.3, 0.4, -0.2],
+            active: false,
+            gain: 1.0,
+        }]);
+
+        assert_eq!(inactive.solid.len(), empty.solid.len());
+        assert_eq!(inactive.line.len(), empty.line.len());
+        assert_eq!(inactive.decal.len(), empty.decal.len());
+    }
+
+    #[test]
+    fn a_silent_object_keeps_its_geometry_but_fades_toward_the_stage() {
+        let empty = built(&[]);
+        let loud = built(&[sounding([0.3, 0.4, -0.2])]);
+        let silent = built(&[SceneObject {
+            position: [0.3, 0.4, -0.2],
+            active: true,
+            gain: params::OBJECT_SILENT_GAIN / 2.0,
+        }]);
+
+        // Same shape: silence is a colour, not a different object.
+        assert_eq!(silent.solid.len(), loud.solid.len());
+        assert_eq!(silent.line.len(), loud.line.len());
+
+        let brightness = |mesh: &MeshBuilder| {
+            let face = &mesh.solid[empty.solid.len()..];
+            let sum: u32 = face
+                .iter()
+                .map(|vertex| u32::from(vertex.colour[0]) + u32::from(vertex.colour[2]))
+                .sum();
+            sum / u32::try_from(face.len()).unwrap_or(1)
+        };
+        assert!(
+            brightness(&silent) > brightness(&loud),
+            "the silent object did not recede toward the stage"
+        );
     }
 
     #[test]

@@ -1,16 +1,24 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use macindecode_windows_spatial_audio::{
     DynamicObjectRender, LfeObjectRender, RenderQuantum, SpatialSource,
 };
 
 use crate::decoder::{
-    DecodedSceneBlock, SceneLfePcm, SceneObjectPcm, SceneQueueReader, SceneSignature,
+    DecodedSceneBlock, PlaybackKey, SceneLfePcm, SceneObjectPcm, SceneQueueReader, SceneSignature,
     SpatialObjectState, SpatialPosition,
 };
+use crate::scene_view::{ObjectView, SceneViewMirror};
 
 pub(super) struct SceneRenderSource {
     reader: SceneQueueReader,
+    /// Where the UI reads this stream's object positions from. Written at the
+    /// end of every quantum; see [`SceneViewMirror`] for why that never blocks.
+    mirror: Arc<SceneViewMirror>,
+    /// Stamped onto every mirrored frame so a superseded playback's positions
+    /// cannot reach the view. Taken from `reader`, which is already gated by it.
+    key: PlaybackKey,
     sample_rate: u32,
     dynamic_object_count: u32,
     has_lfe: bool,
@@ -20,8 +28,9 @@ pub(super) struct SceneRenderSource {
 }
 
 impl SceneRenderSource {
-    pub(super) const fn new(
+    pub(super) fn new(
         reader: SceneQueueReader,
+        mirror: Arc<SceneViewMirror>,
         sample_rate: u32,
         dynamic_object_count: u32,
         has_lfe: bool,
@@ -29,7 +38,9 @@ impl SceneRenderSource {
         start_frame: u64,
     ) -> Self {
         Self {
+            key: reader.playback_key(),
             reader,
+            mirror,
             sample_rate,
             dynamic_object_count,
             has_lfe,
@@ -105,6 +116,19 @@ impl SceneRenderSource {
         }
 
         let end_of_stream = self.current.is_none() && self.reader.is_end_of_stream();
+        // Mirror exactly what is about to be submitted rather than resolving the
+        // OAMD state a second time. A parallel derivation would drift from the
+        // audio under ramps, and these are already in the listener space the
+        // scene view draws in.
+        self.mirror.write(
+            self.key,
+            objects.values().map(|render| ObjectView {
+                element_id: render.element_id,
+                active: render.active,
+                position: render.position,
+                gain: render.gain,
+            }),
+        );
         Ok(RenderQuantum {
             objects: objects.into_values().collect(),
             lfe: lfe.map(LfeQuantumAccumulator::finish),

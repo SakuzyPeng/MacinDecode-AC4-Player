@@ -41,12 +41,48 @@ GUI、播放协调器和解码适配器均留在 Rust 进程内，直接依赖
 - `crates/windows-spatial-audio` 是唯一允许 `unsafe` 的边界，负责 endpoint 枚举/选择、COM 对象流、
   动态对象、静态 LFE、事件等待、source replacement 和原始 `f32` buffer；主程序仍设置
   `unsafe_code = "forbid"`；
+- `scene_view` 是渲染回调到 UI 的单向镜像，`app` 的 3D 对象场景从这里取数（见下节）；
 - `app` 连接上一曲/下一曲、顺序/单曲循环/列表循环/随机播放、Play/Pause、精确 seek、持久化设备
   选择、断开回退/恢复、拓扑自动重建、音量/静音和真实输出诊断。
 
 Core 的 MP4 入口当前要求完整文件切片，因此 decode worker 会先把压缩源读入内存；有界约束针对
 解码后的对象 PCM。后续若 Core 增加 seekable source API，可替换容器读取层而不改变 Scene FIFO
 或平台后端契约。
+
+## 场景视图镜像
+
+3D 对象场景要显示对象此刻在哪里，而唯一知道这件事的是运行在 WASAPI 事件线程上的 render
+callback。`scene_view::SceneViewMirror` 是这条单向通道，`Arc<Mutex<SceneViewFrame>>`。
+
+**所有权**：`backend::SpatialOutputController` 持有唯一的 `Arc`，经 `backend::windows` 的
+`spawn` / `replace_source` 注入每一个 `backend::source::SceneRenderSource`，并通过
+`scene_view()` 暴露给 `app`。镜像挂在控制器而不是每条 stream 上——设备恢复和兼容 seek 都会新建
+render source，共用同一个镜像才不会让视图空一拍。
+
+**写入点**：`SceneRenderSource::render_quantum` 的尾部，直接抄这一帧**已经算好**的
+`RenderQuantum` 对象表，不重新解析一遍 OAMD。理由是平行推导会在 ramp 上和音频漂开；而且
+`windows_render_state` 产出的坐标（Core/ADM `[x, y, z]` 映射为 `[x, z, -y]`）本来就是 `scene3d`
+绘制所用的听众空间，不需要任何转换。
+
+**实时约束**（每一条都是必需的，不是风格问题）：
+
+- 写侧只用 `try_lock`，抢不到就丢弃这次更新。丢一帧画面看不出来，阻塞 WASAPI 回调是真的会响。
+- 两侧都不分配。对象数组定长（`MAX_VIEW_OBJECTS`，20），`SceneViewFrame` 是 `Copy`，因此一次
+  写入就是一次 memcpy；超出预算的场景被截断并上报，绝不扩容。
+- 读侧在锁内**只做一次结构体复制**就放锁，再拿副本去建网格。持锁跨越整个网格组装会让写侧的
+  `try_lock` 每帧全部落空，镜像会静默停止更新。
+- 锁序单向：镜像锁永远不与 Scene FIFO 锁同时持有。写入点在 `try_pop` 早已返回之后。
+
+**抽取率**：当前状态每个 quantum 写一次。**一个没有解析出任何对象状态的 quantum 会被丢弃而不是
+存成空场景**——前向时间线空隙和 FIFO 抽干都会产生这种 quantum 且相当常见，存成空场景会让每个
+对象大约每个缓冲闪断一次；保留上一帧位置既更稳，也更诚实：确实没有更新的位置。
+
+**`PlaybackKey` 语义**：每次写入都盖上 render source 从 `SceneQueueReader` 取到的 key，UI 用
+`DecoderController::playback_key()` 比对，不匹配就当作没有数据（舞台画一间空房间）。seek、换源和
+设备恢复因此自动清场，不需要单独的清空路径——被保留的旧帧仍带着旧 key，同样会被拒。这与 Scene
+FIFO 自己的 key 门是同一套语义，视图不可能显示 stream 已经越过的那段播放的位置。
+
+非 Windows 平台上没有任何写方，`read` 恒为空，舞台走同一条路径显示空房间。
 
 ## 后续里程碑
 

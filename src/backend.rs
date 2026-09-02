@@ -1,4 +1,5 @@
 use core::fmt;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -8,6 +9,7 @@ mod source;
 mod windows;
 
 use crate::decoder::{SceneQueueReader, SceneSignature};
+use crate::scene_view::SceneViewMirror;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum OutputDeviceSelection {
@@ -276,6 +278,11 @@ pub struct SpatialOutputController {
     #[cfg(target_os = "windows")]
     device_catalog: windows::DeviceCatalogWorker,
     config: Option<OutputStreamConfig>,
+    /// The render callback's object positions, for the scene view. Held here
+    /// rather than per stream so a device recovery or a compatible seek — both
+    /// of which build a fresh render source — keep publishing into the same
+    /// mirror instead of leaving the view blank until the next quantum.
+    scene_view: Arc<SceneViewMirror>,
     snapshot: OutputSnapshot,
     revision: u64,
     master_gain: f32,
@@ -311,6 +318,7 @@ impl SpatialOutputController {
             #[cfg(target_os = "windows")]
             device_catalog: windows::DeviceCatalogWorker::spawn(),
             config: None,
+            scene_view: Arc::new(SceneViewMirror::new()),
             snapshot,
             revision: 0,
             master_gain: 1.0,
@@ -337,7 +345,13 @@ impl SpatialOutputController {
         if output_phase_allows_source_replacement(self.snapshot.phase)
             && let (Some(current), Some(renderer)) = (self.config.as_ref(), self.renderer.as_ref())
             && current.stream_compatible(config)
-            && windows::replace_source(renderer, config, reader.clone()).is_ok()
+            && windows::replace_source(
+                renderer,
+                config,
+                reader.clone(),
+                Arc::clone(&self.scene_view),
+            )
+            .is_ok()
         {
             self.config = Some(config.clone());
             return;
@@ -346,7 +360,7 @@ impl SpatialOutputController {
         let restore_phase = self.snapshot.phase;
         self.reset();
         #[cfg(target_os = "windows")]
-        match windows::spawn(config, reader) {
+        match windows::spawn(config, reader, Arc::clone(&self.scene_view)) {
             Ok(renderer) => {
                 self.config = Some(config.clone());
                 renderer.set_master_gain(self.master_gain);
@@ -368,6 +382,15 @@ impl SpatialOutputController {
             self.config = Some(config.clone());
             drop(reader);
         }
+    }
+
+    /// The scene view's window onto the render callback.
+    ///
+    /// Off Windows nothing ever writes it, so every read comes back empty and
+    /// the stage draws an empty room through the same path.
+    #[must_use]
+    pub fn scene_view(&self) -> &SceneViewMirror {
+        &self.scene_view
     }
 
     pub fn reset(&mut self) {

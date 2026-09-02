@@ -74,6 +74,15 @@ pub const AIR_PERSPECTIVE_SPAN: f32 = 3.5;
 /// reference views.
 pub const OBJECT_EDGE: f32 = 0.11;
 
+/// Linear gain below which a positioned object reads as present but silent.
+/// -36 dB, the floor the mockup settled on for gain-driven appearance.
+pub const OBJECT_SILENT_GAIN: f32 = 0.015_848_932;
+
+/// How far a silent object is pushed toward `STAGE`. Fading toward the ground
+/// is the same mechanism air perspective uses, so a silent object recedes the
+/// way a distant one does instead of introducing a second visual language.
+pub const OBJECT_SILENT_FADE: f32 = 0.55;
+
 /// Outer shoulder width of the listener, in world units. This is the scale
 /// anchor: three head-and-shoulder envelopes span the room height. The complete
 /// canonical Minecraft figure is twice this height, so a standing body occupies

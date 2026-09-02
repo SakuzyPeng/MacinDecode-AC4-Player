@@ -49,8 +49,12 @@ pub struct PlayerApp {
     figure: scene3d::figure::Figure,
     /// Reused across frames so rebuilding the scene does not reallocate.
     scene_mesh: scene3d::mesh::MeshBuilder,
-    /// False when eframe is not on the wgpu backend; the stage then falls back
-    /// to its text-only presentation.
+    /// This frame's objects, copied out of the audio thread's mirror. Also
+    /// reused rather than rebuilt, for the same reason.
+    scene_objects: Vec<scene3d::scene::SceneObject>,
+    /// False when eframe is not on the wgpu backend. The stage then draws
+    /// nothing at all but its frame, which is why it is checked rather than
+    /// assumed.
     scene_renderer_ready: bool,
 }
 
@@ -268,6 +272,7 @@ impl PlayerApp {
             camera: scene3d::camera::Camera::default(),
             figure: scene3d::figure::Figure::default(),
             scene_mesh: scene3d::mesh::MeshBuilder::default(),
+            scene_objects: Vec::with_capacity(crate::scene_view::MAX_VIEW_OBJECTS),
             scene_renderer_ready,
         }
     }
@@ -745,11 +750,14 @@ impl PlayerApp {
             let scaled = u16::try_from(scaled).unwrap_or(u16::MAX);
             self.timeline_preview = f32::from(scaled) / 10_000.0;
         }
-        if matches!(
-            self.output.snapshot().phase(),
-            OutputPhase::Initializing | OutputPhase::Playing
-        ) {
-            context.request_repaint_after(Duration::from_millis(50));
+        match self.output.snapshot().phase() {
+            // Objects move while playing, and the stage now shows them, so the
+            // repaint has to keep up with motion rather than with a text label:
+            // 50 ms was invisible under a phase message and is a visible stutter
+            // under a travelling object.
+            OutputPhase::Playing => context.request_repaint_after(Duration::from_millis(16)),
+            OutputPhase::Initializing => context.request_repaint_after(Duration::from_millis(50)),
+            _ => {}
         }
         #[cfg(target_os = "windows")]
         context.request_repaint_after(Duration::from_secs(2));
@@ -1074,6 +1082,7 @@ impl PlayerApp {
             .inner_margin(egui::Margin::same(18));
         let margins = frame.total_margin();
         let content_height = (available_height - margins.top - margins.bottom).max(180.0);
+        let hidden_objects = self.sync_scene_objects();
         frame.show(ui, |ui| {
             ui.set_min_height(content_height);
             // The stage claims drag and scroll itself so the camera never fights
@@ -1096,8 +1105,11 @@ impl PlayerApp {
                     &self.camera,
                     rect.height(),
                     scene3d::scene::SceneInput {
-                        objects: &PROBE_OBJECTS,
-                        // Increment 4 takes both of these from the mirror.
+                        objects: &self.scene_objects,
+                        // Not from the mirror: the presentation's LFE layout is
+                        // known as soon as the decoder reports metrics, well
+                        // before the render callback produces a first quantum,
+                        // and the slot should be drawn correctly from then on.
                         has_lfe: decoder.metrics().is_some_and(DecodeMetrics::has_lfe),
                         figure: self.figure,
                     },
@@ -1110,8 +1122,35 @@ impl PlayerApp {
             }
 
             self.draw_camera_presets(ui, rect);
-            self.draw_camera_readout(ui, rect);
+            self.draw_camera_readout(ui, rect, hidden_objects);
         });
+    }
+
+    /// Copy this frame's objects out of the audio thread's mirror, returning how
+    /// many the scene carried beyond the view's budget.
+    ///
+    /// The mirror is gated on the decoder's current playback key, so a frame
+    /// written before a seek, a source change, or a device recovery is rejected
+    /// rather than drawn, and the stage falls back to an empty room until the
+    /// new stream produces its first quantum. Off Windows nothing ever writes
+    /// it, so that empty room is the permanent state.
+    fn sync_scene_objects(&mut self) -> usize {
+        self.scene_objects.clear();
+        let Some(frame) = self.output.scene_view().read(self.decoder.playback_key()) else {
+            return 0;
+        };
+        self.scene_objects
+            .extend(
+                frame
+                    .objects()
+                    .iter()
+                    .map(|object| scene3d::scene::SceneObject {
+                        position: object.position,
+                        active: object.active,
+                        gain: object.gain,
+                    }),
+            );
+        frame.hidden_objects()
     }
 
     /// Live camera state, bottom-left of the stage.
@@ -1120,8 +1159,20 @@ impl PlayerApp {
     /// the viewer. It drops below three as the view approaches an axis, which is
     /// exactly when three-tone shading stops separating faces and the projection
     /// stops carrying depth — so it is worth showing rather than discovering.
-    fn draw_camera_readout(&self, ui: &mut egui::Ui, stage: egui::Rect) {
+    fn draw_camera_readout(&self, ui: &mut egui::Ui, stage: egui::Rect, hidden_objects: usize) {
         let faces = scene3d::mesh::visible_face_count(self.camera.direction());
+        if hidden_objects > 0 {
+            // The object array is fixed so the audio thread never allocates, so
+            // a scene past the budget is genuinely incomplete on screen and has
+            // to admit it rather than quietly showing the first twenty.
+            ui.painter().text(
+                egui::pos2(stage.left(), stage.bottom() - 18.0),
+                Align2::LEFT_BOTTOM,
+                format!("+{hidden_objects} more not shown"),
+                egui::FontId::monospace(10.0),
+                theme::WARNING,
+            );
+        }
         let text = format!(
             "{}   az {:.0}°   el {:.0}°   zoom {:.2}   faces/box {faces}",
             self.camera.projection_mode().label(),
@@ -2212,23 +2263,6 @@ fn metric_strip(ui: &mut egui::Ui, decoder: &DecoderSnapshot) {
         left = right;
     }
 }
-
-/// Objects drawn while the audio-thread mirror does not exist yet.
-///
-/// They exist to exercise the `solid` pipeline — culling, depth, and the drop
-/// line and footprint that carry height and depth when the projection cannot.
-/// Increment 4 replaces them with the real scene.
-const PROBE_OBJECTS: [scene3d::scene::SceneObject; 3] = [
-    scene3d::scene::SceneObject {
-        position: [0.55, 0.30, -0.40],
-    },
-    scene3d::scene::SceneObject {
-        position: [-0.62, -0.15, 0.35],
-    },
-    scene3d::scene::SceneObject {
-        position: [0.10, 0.70, 0.62],
-    },
-];
 
 #[allow(
     clippy::too_many_lines,

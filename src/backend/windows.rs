@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -12,10 +13,12 @@ use super::{
     OutputDeviceInfo, OutputDeviceSelection, OutputPhase, OutputSnapshot, OutputStreamConfig,
 };
 use crate::decoder::SceneQueueReader;
+use crate::scene_view::SceneViewMirror;
 
 pub(super) fn spawn(
     config: &OutputStreamConfig,
     reader: SceneQueueReader,
+    mirror: Arc<SceneViewMirror>,
 ) -> Result<Renderer, String> {
     Renderer::spawn(
         StreamConfig {
@@ -27,6 +30,7 @@ pub(super) fn spawn(
         },
         Box::new(SceneRenderSource::new(
             reader,
+            mirror,
             config.sample_rate,
             config.dynamic_object_count,
             config.has_lfe,
@@ -40,10 +44,12 @@ pub(super) fn replace_source(
     renderer: &Renderer,
     config: &OutputStreamConfig,
     reader: SceneQueueReader,
+    mirror: Arc<SceneViewMirror>,
 ) -> Result<(), String> {
     renderer.replace_source(
         Box::new(SceneRenderSource::new(
             reader,
+            mirror,
             config.sample_rate,
             config.dynamic_object_count,
             config.has_lfe,

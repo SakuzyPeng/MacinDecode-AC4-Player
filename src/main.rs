@@ -13,6 +13,7 @@ pub mod decoder;
 mod inspection;
 mod model;
 mod scene3d;
+mod scene_view;
 mod theme;
 
 fn main() -> eframe::Result {
