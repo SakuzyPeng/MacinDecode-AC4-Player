@@ -33,12 +33,42 @@ pub enum PartTone {
     Facing,
 }
 
-/// One axis-aligned box in world space.
+/// One box in world space. `axes` are its local X/Y/Z unit vectors; body parts
+/// use the identity basis, while the complete head assembly shares one rigid
+/// rotation about the neck.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Part {
     pub centre: [f32; 3],
     pub size: [f32; 3],
+    pub axes: [[f32; 3]; 3],
     pub tone: PartTone,
+}
+
+const IDENTITY_AXES: [[f32; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+
+impl Part {
+    const fn axis_aligned(centre: [f32; 3], size: [f32; 3], tone: PartTone) -> Self {
+        Self {
+            centre,
+            size,
+            axes: IDENTITY_AXES,
+            tone,
+        }
+    }
+
+    const fn oriented(
+        centre: [f32; 3],
+        size: [f32; 3],
+        axes: [[f32; 3]; 3],
+        tone: PartTone,
+    ) -> Self {
+        Self {
+            centre,
+            size,
+            axes,
+            tone,
+        }
+    }
 }
 
 /// Listener pose.
@@ -91,102 +121,70 @@ impl Figure {
         let torso_centre = floor_y + leg_height + torso_height / 2.0;
         // The neck: where the head turns, and Minecraft's own pivot.
         let neck = floor_y + leg_height + torso_height;
-        let head_centre = neck + head_height / 2.0;
 
         let leg = [4.0 * u, leg_height, 4.0 * u];
         let arm = [4.0 * u, torso_height, 4.0 * u];
 
-        // Facing cues rotate about the neck; the head and hat are centred on
-        // that axis, so rotation leaves them where they are and they stay
-        // axis-aligned.
-        //
-        // Their depth is derived from the hat's front plane rather than written
-        // down, because both ways of getting it wrong look like a modelling
-        // mistake: the hat is opaque here — Minecraft's is a texture with
-        // transparency — so a cue set behind the plane is swallowed whole and
-        // the figure has no readable front, while one set clear of it floats off
-        // the face with daylight behind it.
-        let eye_left = self.about_neck([-1.7, 4.9, cue_depth(EYE_EDGE)], u, neck);
-        let eye_right = self.about_neck([1.7, 4.9, cue_depth(EYE_EDGE)], u, neck);
-        let wedge = self.about_neck([0.0, 2.4, cue_depth(WEDGE_EDGE)], u, neck);
+        // The complete head assembly shares one rigid transform. Rotating only
+        // the cue centres is not enough: an axis-aligned eye can disappear
+        // inside the opaque hat at a diagonal yaw, and pitching about the neck
+        // moves the head centre itself. Keeping the same basis on all four boxes
+        // makes their overlap invariant under both rotations.
+        let head_axes = self.head_axes();
+        let head_centre = Self::about_neck([0.0, 4.0, 0.0], u, neck, head_axes);
+
+        // Cue depth is derived from the hat's local front plane rather than
+        // written down. Its rear face stays slightly embedded while its front
+        // protrudes, then the shared head transform carries that relationship
+        // into world space.
+        let eye_left = Self::about_neck([-1.7, 4.9, cue_depth(EYE_EDGE)], u, neck, head_axes);
+        let eye_right = Self::about_neck([1.7, 4.9, cue_depth(EYE_EDGE)], u, neck, head_axes);
+        let wedge = Self::about_neck([0.0, 2.4, cue_depth(WEDGE_EDGE)], u, neck, head_axes);
 
         [
-            Part {
-                centre: [-2.0 * u, leg_centre, 0.0],
-                size: leg,
-                tone: PartTone::Cloth,
-            },
-            Part {
-                centre: [2.0 * u, leg_centre, 0.0],
-                size: leg,
-                tone: PartTone::Cloth,
-            },
-            Part {
-                centre: [0.0, torso_centre, 0.0],
-                size: [8.0 * u, torso_height, 4.0 * u],
-                tone: PartTone::Cloth,
-            },
-            Part {
-                centre: [-6.0 * u, torso_centre, 0.0],
-                size: arm,
-                tone: PartTone::Skin,
-            },
-            Part {
-                centre: [6.0 * u, torso_centre, 0.0],
-                size: arm,
-                tone: PartTone::Skin,
-            },
-            Part {
-                centre: [0.0, head_centre, 0.0],
-                size: [head_height; 3],
-                tone: PartTone::Skin,
-            },
+            Part::axis_aligned([-2.0 * u, leg_centre, 0.0], leg, PartTone::Cloth),
+            Part::axis_aligned([2.0 * u, leg_centre, 0.0], leg, PartTone::Cloth),
+            Part::axis_aligned(
+                [0.0, torso_centre, 0.0],
+                [8.0 * u, torso_height, 4.0 * u],
+                PartTone::Cloth,
+            ),
+            Part::axis_aligned([-6.0 * u, torso_centre, 0.0], arm, PartTone::Skin),
+            Part::axis_aligned([6.0 * u, torso_centre, 0.0], arm, PartTone::Skin),
+            Part::oriented(head_centre, [head_height; 3], head_axes, PartTone::Skin),
             // The hat layer: the head shell inflated by half a unit a side. It
             // is where a headphone band would eventually hang.
-            Part {
-                centre: [0.0, head_centre, 0.0],
-                size: [9.0 * u; 3],
-                tone: PartTone::Hat,
-            },
-            Part {
-                centre: eye_left,
-                size: [EYE_EDGE * u; 3],
-                tone: PartTone::Eye,
-            },
-            Part {
-                centre: eye_right,
-                size: [EYE_EDGE * u; 3],
-                tone: PartTone::Eye,
-            },
+            Part::oriented(head_centre, [9.0 * u; 3], head_axes, PartTone::Hat),
+            Part::oriented(eye_left, [EYE_EDGE * u; 3], head_axes, PartTone::Eye),
+            Part::oriented(eye_right, [EYE_EDGE * u; 3], head_axes, PartTone::Eye),
             // An untextured cube has no front, so this wedge is what makes the
             // facing legible — and once head tracking lands it is the thing that
             // sweeps around the ring.
-            Part {
-                centre: wedge,
-                size: [WEDGE_EDGE * u; 3],
-                tone: PartTone::Facing,
-            },
+            Part::oriented(wedge, [WEDGE_EDGE * u; 3], head_axes, PartTone::Facing),
+        ]
+    }
+
+    /// Local X/Y/Z axes after applying the head's pitch then yaw.
+    fn head_axes(self) -> [[f32; 3]; 3] {
+        let pitch = self.head_pitch.to_radians();
+        let yaw = self.head_yaw.to_radians();
+        let (pitch_sin, pitch_cos) = pitch.sin_cos();
+        let (yaw_sin, yaw_cos) = yaw.sin_cos();
+
+        [
+            [yaw_cos, 0.0, -yaw_sin],
+            [yaw_sin * pitch_sin, pitch_cos, yaw_cos * pitch_sin],
+            [yaw_sin * pitch_cos, -pitch_sin, yaw_cos * pitch_cos],
         ]
     }
 
     /// Take a point given in model units relative to the neck, apply the head's
-    /// pitch then yaw, and return it in world space.
-    fn about_neck(self, local: [f32; 3], unit: f32, neck: f32) -> [f32; 3] {
-        let pitch = self.head_pitch.to_radians();
-        let yaw = self.head_yaw.to_radians();
-
-        // Pitch about X. The front is -Z, so a standard rotation raises the
-        // face for a positive angle, matching the documented sense.
-        let pitched = [
-            local[0],
-            local[1] * pitch.cos() - local[2] * pitch.sin(),
-            local[1] * pitch.sin() + local[2] * pitch.cos(),
-        ];
-        // Yaw about Y, chosen so that zero keeps the front pointing at -Z.
+    /// basis, and return it in world space.
+    fn about_neck(local: [f32; 3], unit: f32, neck: f32, axes: [[f32; 3]; 3]) -> [f32; 3] {
         let rotated = [
-            pitched[0] * yaw.cos() + pitched[2] * yaw.sin(),
-            pitched[1],
-            -pitched[0] * yaw.sin() + pitched[2] * yaw.cos(),
+            axes[0][0] * local[0] + axes[1][0] * local[1] + axes[2][0] * local[2],
+            axes[0][1] * local[0] + axes[1][1] * local[1] + axes[2][1] * local[2],
+            axes[0][2] * local[0] + axes[1][2] * local[1] + axes[2][2] * local[2],
         ];
         [
             rotated[0] * unit,
@@ -208,6 +206,16 @@ mod tests {
 
     fn same_point(a: [f32; 3], b: [f32; 3]) -> bool {
         a.iter().zip(b.iter()).all(|(x, y)| close(*x, *y))
+    }
+
+    fn same_axes(a: [[f32; 3]; 3], b: [[f32; 3]; 3]) -> bool {
+        a.into_iter()
+            .zip(b)
+            .all(|(left, right)| same_point(left, right))
+    }
+
+    fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+        a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
     }
 
     /// Require all three dimensions when classifying a voxel as a cube.
@@ -336,7 +344,7 @@ mod tests {
     }
 
     #[test]
-    fn head_yaw_moves_only_the_head_and_its_cues() {
+    fn head_yaw_rotates_only_the_head_assembly() {
         let still = parts();
         let turned = Figure {
             head_yaw: 55.0,
@@ -344,70 +352,118 @@ mod tests {
         }
         .parts(FLOOR);
 
-        for (before, after) in still.iter().zip(turned.iter()) {
-            match before.tone {
-                PartTone::Eye | PartTone::Facing => {
-                    assert!(
-                        !same_point(before.centre, after.centre),
-                        "cue did not turn: {before:?}"
-                    );
-                }
-                // The head and hat are centred on the neck axis, so turning
-                // leaves them exactly where they were — and keeps them axis
-                // aligned, which is why the box itself is never rotated.
-                _ => assert!(
-                    same_point(before.centre, after.centre),
-                    "body moved: {before:?}"
-                ),
-            }
+        for (before, after) in still[..5].iter().zip(&turned[..5]) {
+            assert_eq!(before, after, "body moved: {before:?}");
+        }
+        for (before, after) in still[5..].iter().zip(&turned[5..]) {
+            assert!(
+                !same_axes(before.axes, after.axes),
+                "head part did not rotate: {before:?}"
+            );
+        }
+        for (before, after) in still[7..].iter().zip(&turned[7..]) {
+            assert!(
+                !same_point(before.centre, after.centre),
+                "cue did not turn: {before:?}"
+            );
         }
     }
 
     #[test]
-    fn head_pitch_raises_and_lowers_the_facing_wedge() {
-        let level = Figure::default().parts(FLOOR)[PART_COUNT - 1].centre[1];
+    fn head_pitch_moves_the_complete_head_assembly() {
+        let level = Figure::default().parts(FLOOR);
         let up = Figure {
             head_yaw: 0.0,
             head_pitch: 40.0,
         }
-        .parts(FLOOR)[PART_COUNT - 1]
-            .centre[1];
+        .parts(FLOOR);
         let down = Figure {
             head_yaw: 0.0,
             head_pitch: -40.0,
         }
-        .parts(FLOOR)[PART_COUNT - 1]
-            .centre[1];
-        assert!(up > level && level > down, "{down} / {level} / {up}");
+        .parts(FLOOR);
+
+        let wedge_y = [
+            down[PART_COUNT - 1].centre[1],
+            level[PART_COUNT - 1].centre[1],
+            up[PART_COUNT - 1].centre[1],
+        ];
+        assert!(wedge_y[0] < wedge_y[1] && wedge_y[1] < wedge_y[2]);
+
+        // Pitch is about the neck rather than the cube's own centre, so the
+        // head and hat move with the cues instead of staying behind as a fixed
+        // shell.
+        assert!(up[5].centre[2] > level[5].centre[2]);
+        assert!(down[5].centre[2] < level[5].centre[2]);
+        for index in 5..PART_COUNT {
+            assert!(!same_axes(level[index].axes, up[index].axes));
+            assert!(!same_axes(level[index].axes, down[index].axes));
+        }
     }
 
     #[test]
     fn facing_cues_are_welded_to_the_hat_and_still_protrude() {
-        // Both ways of missing look like a modelling mistake, and one of them
-        // shipped: the wedge's rear face sat half a unit clear of the shell, so
-        // the nose floated in front of the face with daylight behind it.
-        let parts = parts();
-        let hat = parts
-            .iter()
-            .find(|part| part.tone == PartTone::Hat)
-            .expect("hat");
-        let hat_front = hat.centre[2] - hat.size[2] / 2.0;
+        // The diagonal yaw and downward pitch are the two former failures: the
+        // fixed AABB swallowed one eye around 26 degrees, while rotating only
+        // the cue centres left every cue detached when looking down.
+        for pose in [
+            Figure::default(),
+            Figure {
+                head_yaw: 26.22,
+                head_pitch: 0.0,
+            },
+            Figure {
+                head_yaw: 0.0,
+                head_pitch: -40.0,
+            },
+            Figure {
+                head_yaw: 55.0,
+                head_pitch: 35.0,
+            },
+        ] {
+            let parts = pose.parts(FLOOR);
+            let hat = parts
+                .iter()
+                .find(|part| part.tone == PartTone::Hat)
+                .expect("hat");
 
-        for cue in parts
-            .iter()
-            .filter(|part| matches!(part.tone, PartTone::Eye | PartTone::Facing))
-        {
-            let rear = cue.centre[2] + cue.size[2] / 2.0;
-            let front = cue.centre[2] - cue.size[2] / 2.0;
-            assert!(
-                rear > hat_front,
-                "cue floats clear of the head by {}: {cue:?}",
-                hat_front - rear
-            );
-            assert!(
-                front < hat_front,
-                "cue is swallowed by the opaque hat shell: {cue:?}"
-            );
+            for cue in parts
+                .iter()
+                .filter(|part| matches!(part.tone, PartTone::Eye | PartTone::Facing))
+            {
+                assert!(
+                    same_axes(cue.axes, hat.axes),
+                    "cue and hat do not share one rigid rotation at {pose:?}: {cue:?}"
+                );
+                let delta = [
+                    cue.centre[0] - hat.centre[0],
+                    cue.centre[1] - hat.centre[1],
+                    cue.centre[2] - hat.centre[2],
+                ];
+                let local = hat.axes.map(|axis| dot(delta, axis));
+                for (axis, &coordinate) in local.iter().enumerate().take(2) {
+                    let cue_min = coordinate - cue.size[axis] / 2.0;
+                    let cue_max = coordinate + cue.size[axis] / 2.0;
+                    let hat_half = hat.size[axis] / 2.0;
+                    assert!(
+                        cue_min < hat_half && cue_max > -hat_half,
+                        "cue misses the hat on local axis {axis} at {pose:?}: {cue:?}"
+                    );
+                }
+
+                let hat_front = -hat.size[2] / 2.0;
+                let rear = local[2] + cue.size[2] / 2.0;
+                let front = local[2] - cue.size[2] / 2.0;
+                assert!(
+                    rear > hat_front,
+                    "cue floats clear of the head by {} at {pose:?}: {cue:?}",
+                    hat_front - rear
+                );
+                assert!(
+                    front < hat_front,
+                    "cue is swallowed by the opaque hat at {pose:?}: {cue:?}"
+                );
+            }
         }
     }
 
@@ -423,6 +479,7 @@ mod tests {
             .find(|part| part.tone == PartTone::Hat)
             .unwrap();
         assert!(same_point(head.centre, hat.centre));
+        assert!(same_axes(head.axes, hat.axes));
         assert!(hat.size[0] > head.size[0]);
     }
 }

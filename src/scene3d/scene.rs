@@ -104,7 +104,7 @@ fn add_figure(mesh: &mut MeshBuilder, figure: Figure, view: &ViewContext) {
             PartTone::Eye => view.ink.lerp(Rgb::from_color32(theme::TEXT), 0.20),
             PartTone::Facing => Rgb::from_color32(theme::ACCENT),
         };
-        mesh.add_box(part.centre, part.size, base, view);
+        mesh.add_oriented_box(part.centre, part.size, part.axes, base, view);
     }
 }
 

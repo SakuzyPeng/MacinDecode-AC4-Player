@@ -161,10 +161,29 @@ impl MeshBuilder {
     /// general view leaves exactly three — the number
     /// [`visible_face_count`] pins down.
     pub fn add_box(&mut self, centre: [f32; 3], size: [f32; 3], base: Rgb, view: &ViewContext) {
-        let [cx, cy, cz] = centre;
-        let (x0, x1) = (cx - size[0] / 2.0, cx + size[0] / 2.0);
-        let (y0, y1) = (cy - size[1] / 2.0, cy + size[1] / 2.0);
-        let (z0, z1) = (cz - size[2] / 2.0, cz + size[2] / 2.0);
+        self.add_oriented_box(
+            centre,
+            size,
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            base,
+            view,
+        );
+    }
+
+    /// A box whose local X/Y/Z unit vectors are the columns in `axes`.
+    /// Winding and face tones follow the transformed geometry, so a rigidly
+    /// rotated assembly remains solid under back-face culling.
+    pub fn add_oriented_box(
+        &mut self,
+        centre: [f32; 3],
+        size: [f32; 3],
+        axes: [[f32; 3]; 3],
+        base: Rgb,
+        view: &ViewContext,
+    ) {
+        let (x0, x1) = (-size[0] / 2.0, size[0] / 2.0);
+        let (y0, y1) = (-size[1] / 2.0, size[1] / 2.0);
+        let (z0, z1) = (-size[2] / 2.0, size[2] / 2.0);
 
         let faces: [([f32; 3], [[f32; 3]; 4]); 6] = [
             (
@@ -193,7 +212,9 @@ impl MeshBuilder {
             ),
         ];
 
-        for (normal, corners) in faces {
+        for (local_normal, local_corners) in faces {
+            let normal = orient(local_normal, axes);
+            let corners = local_corners.map(|corner| add(centre, orient(corner, axes)));
             let toned = base.lerp(view.ink, 1.0 - face_tone(normal));
             let colour = faded(toned, centre, view).to_bytes();
             self.quad(
@@ -344,6 +365,14 @@ fn add(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
 }
 
+fn orient(local: [f32; 3], axes: [[f32; 3]; 3]) -> [f32; 3] {
+    [
+        axes[0][0] * local[0] + axes[1][0] * local[1] + axes[2][0] * local[2],
+        axes[0][1] * local[0] + axes[1][1] * local[1] + axes[2][1] * local[2],
+        axes[0][2] * local[0] + axes[1][2] * local[1] + axes[2][2] * local[2],
+    ]
+}
+
 fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
@@ -402,6 +431,40 @@ mod tests {
             assert!(
                 outward > 0.0,
                 "winding faces inward for a face at {a:?} (normal {normal:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn an_oriented_box_rotates_its_extents_without_reversing_winding() {
+        let mut mesh = MeshBuilder::default();
+        mesh.add_oriented_box(
+            [0.0, 0.0, 0.0],
+            [2.0, 4.0, 6.0],
+            [[0.0, 0.0, -1.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]],
+            Rgb::from_color32(Color32::from_rgb(206, 122, 59)),
+            &view([0.577, 0.577, 0.577], 0.01),
+        );
+
+        let bounds = (0..3).map(|axis| {
+            mesh.solid
+                .iter()
+                .map(|vertex| vertex.position[axis])
+                .fold((f32::INFINITY, f32::NEG_INFINITY), |(low, high), value| {
+                    (low.min(value), high.max(value))
+                })
+        });
+        assert_eq!(
+            bounds.collect::<Vec<_>>(),
+            vec![(-3.0, 3.0), (-2.0, 2.0), (-1.0, 1.0)]
+        );
+
+        for face in mesh.solid.chunks(6) {
+            let (a, b, c) = (face[0].position, face[1].position, face[2].position);
+            let normal = cross(sub(b, a), sub(c, a));
+            assert!(
+                dot(normal, a) > 0.0,
+                "rotated face winding points inward at {a:?}"
             );
         }
     }
