@@ -25,11 +25,10 @@
 //! itself uses, so the view can never show PCM positions from a playback the
 //! stream has already moved past.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, PoisonError};
 
 use crate::decoder::PlaybackKey;
-use crate::scene3d::params::{FUTURE_SAMPLES, TRAIL_INTERVAL_MILLISECONDS, TRAIL_SAMPLES};
+use crate::scene3d::params::{TRAIL_INTERVAL_MILLISECONDS, TRAIL_SAMPLES};
 
 /// Objects the view will draw. The design budget is 20 dynamic objects plus the
 /// static LFE slot; a scene beyond it is truncated and reported, never grown,
@@ -79,12 +78,6 @@ pub struct SceneViewFrame {
     pending_jump: [bool; MAX_VIEW_OBJECTS],
     /// Presentation frame at which the next breadcrumb is due.
     next_trail_frame: i64,
-    /// Where each object is *going*, nearest first: the positions already
-    /// decoded and waiting in the Scene FIFO, resampled onto the trail's clock.
-    future: [[[f32; 3]; FUTURE_SAMPLES]; MAX_VIEW_OBJECTS],
-    future_lens: [usize; MAX_VIEW_OBJECTS],
-    /// The same for the path ahead: which samples the object will arrive at.
-    future_jumps: [[bool; FUTURE_SAMPLES]; MAX_VIEW_OBJECTS],
     /// `None` until the first write. Distinguishes "no playback yet" from a
     /// playback that legitimately carries no objects.
     key: Option<PlaybackKey>,
@@ -100,9 +93,6 @@ impl Default for SceneViewFrame {
             trail_jumps: [[false; TRAIL_SAMPLES]; MAX_VIEW_OBJECTS],
             pending_jump: [false; MAX_VIEW_OBJECTS],
             next_trail_frame: 0,
-            future: [[[0.0; 3]; FUTURE_SAMPLES]; MAX_VIEW_OBJECTS],
-            future_lens: [0; MAX_VIEW_OBJECTS],
-            future_jumps: [[false; FUTURE_SAMPLES]; MAX_VIEW_OBJECTS],
             key: None,
         }
     }
@@ -127,19 +117,6 @@ impl SceneViewFrame {
         }
     }
 
-    /// Where the object in `slot` is going, nearest first.
-    ///
-    /// Empty until the first path is sampled, and shorter than
-    /// [`FUTURE_SAMPLES`] whenever the FIFO holds less than a full buffer — so
-    /// the drawn length is a reading of the buffer depth.
-    #[must_use]
-    pub fn future(&self, slot: usize) -> &[[f32; 3]] {
-        match self.future_lens.get(slot) {
-            Some(&len) => &self.future[slot][..len],
-            None => &[],
-        }
-    }
-
     /// Which of `slot`'s breadcrumbs the object arrived at instantly, aligned
     /// with [`Self::trail`]. A set flag means the object did not travel from the
     /// previous mark — it was somewhere else and then it was here.
@@ -147,15 +124,6 @@ impl SceneViewFrame {
     pub fn trail_jumps(&self, slot: usize) -> &[bool] {
         match self.trail_lens.get(slot) {
             Some(&len) => &self.trail_jumps[slot][..len],
-            None => &[],
-        }
-    }
-
-    /// The same for the path ahead, aligned with [`Self::future`].
-    #[must_use]
-    pub fn future_jumps(&self, slot: usize) -> &[bool] {
-        match self.future_lens.get(slot) {
-            Some(&len) => &self.future_jumps[slot][..len],
             None => &[],
         }
     }
@@ -168,12 +136,8 @@ impl SceneViewFrame {
     }
 }
 
-/// Spacing between samples of an object's path, in presentation frames, at least
-/// one so the cadence can never stall on a pathological sample rate.
-///
-/// One interval serves both tenses. The trail's marks and the future path's
-/// dashes are then the same clock read in two directions, which is what lets a
-/// gap on either side of the object mean the same thing — speed.
+/// Breadcrumb spacing in presentation frames, at least one so the cadence can
+/// never stall on a pathological sample rate.
 pub fn sample_interval_frames(sample_rate: u32) -> i64 {
     let frames = u64::from(sample_rate) * u64::from(TRAIL_INTERVAL_MILLISECONDS) / 1000;
     i64::try_from(frames).unwrap_or(i64::MAX).max(1)
@@ -198,215 +162,17 @@ fn push_trail(
     jumps[TRAIL_SAMPLES - 1] = jumped;
 }
 
-/// The audio thread's scratch buffer for the path ahead.
-///
-/// It lives here rather than in `backend` because its shape is the view's: the
-/// same twenty slots, in the same element-ID order, as everything else the
-/// mirror carries. What it does *not* know is how to read a Scene block — that
-/// stays in `backend::state`, which fills this by walking the FIFO through the
-/// very same `element_state_at` the audio uses. A parallel derivation would
-/// drift from what is actually heard on every ramp.
-///
-/// One instance is kept per render source and refilled in place, so sampling
-/// the path allocates nothing.
-#[derive(Debug, Clone, Copy)]
-#[cfg_attr(
-    not(target_os = "windows"),
-    allow(
-        dead_code,
-        reason = "only the Windows render callback walks the Scene FIFO"
-    )
-)]
-pub struct FuturePath {
-    positions: [[[f32; 3]; FUTURE_SAMPLES]; MAX_VIEW_OBJECTS],
-    lens: [usize; MAX_VIEW_OBJECTS],
-    /// Which samples the object arrives at rather than travels to.
-    jumps: [[bool; FUTURE_SAMPLES]; MAX_VIEW_OBJECTS],
-    /// A discontinuity seen since the last sample. Kept across blocks because a
-    /// block can be short enough that no sample lands inside it at all, and the
-    /// jump inside such a block still belongs to the sample that follows it.
-    pending: [bool; MAX_VIEW_OBJECTS],
-    /// A slot stops accepting points once its object reaches a moment with no
-    /// position. The path ends there rather than leaping the gap and drawing a
-    /// segment the object will not travel.
-    closed: [bool; MAX_VIEW_OBJECTS],
-    /// Slots in use, so a scene of three objects does not wait for twenty.
-    objects: usize,
-    /// Next absolute presentation frame to sample.
-    next_frame: i64,
-}
-
-impl Default for FuturePath {
-    fn default() -> Self {
-        Self {
-            positions: [[[0.0; 3]; FUTURE_SAMPLES]; MAX_VIEW_OBJECTS],
-            lens: [0; MAX_VIEW_OBJECTS],
-            jumps: [[false; FUTURE_SAMPLES]; MAX_VIEW_OBJECTS],
-            pending: [false; MAX_VIEW_OBJECTS],
-            closed: [false; MAX_VIEW_OBJECTS],
-            objects: 0,
-            next_frame: 0,
-        }
-    }
-}
-
-#[cfg_attr(
-    not(target_os = "windows"),
-    allow(
-        dead_code,
-        reason = "only the Windows render callback walks the Scene FIFO"
-    )
-)]
-impl FuturePath {
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Begin a fresh path for `objects` slots, with the first sample due one
-    /// interval after `frame`. Everything sampled before is discarded: the
-    /// future is re-derived rather than extended, because the FIFO ahead has
-    /// moved since it was last read.
-    pub fn restart(&mut self, frame: i64, objects: usize) {
-        self.lens = [0; MAX_VIEW_OBJECTS];
-        self.closed = [false; MAX_VIEW_OBJECTS];
-        self.pending = [false; MAX_VIEW_OBJECTS];
-        self.objects = objects.min(MAX_VIEW_OBJECTS);
-        self.next_frame = frame;
-    }
-
-    /// The absolute presentation frame the next sample is due at.
-    #[must_use]
-    pub const fn next_frame(&self) -> i64 {
-        self.next_frame
-    }
-
-    /// Move the sampling clock to `frame`, skipping any grid point before it.
-    pub const fn skip_to(&mut self, frame: i64) {
-        if frame > self.next_frame {
-            self.next_frame = frame;
-        }
-    }
-
-    /// Advance the sampling clock by one interval.
-    pub const fn advance(&mut self, interval_frames: i64) {
-        self.next_frame = self.next_frame.saturating_add(interval_frames);
-    }
-
-    /// Note that `slot`'s object is due to jump before its next sample.
-    pub const fn mark_jump(&mut self, slot: usize) {
-        if slot < MAX_VIEW_OBJECTS {
-            self.pending[slot] = true;
-        }
-    }
-
-    /// Record where `slot`'s object is at the current sample, or `None` if it
-    /// has no position there, which ends that object's path. Consumes whatever
-    /// [`Self::mark_jump`] noted since the previous sample.
-    pub const fn push(&mut self, slot: usize, point: Option<[f32; 3]>) {
-        if slot >= MAX_VIEW_OBJECTS || self.closed[slot] {
-            return;
-        }
-        let jumped = self.pending[slot];
-        self.pending[slot] = false;
-        let Some(point) = point else {
-            self.closed[slot] = true;
-            return;
-        };
-        let len = self.lens[slot];
-        if len >= FUTURE_SAMPLES {
-            self.closed[slot] = true;
-            return;
-        }
-        self.positions[slot][len] = point;
-        self.jumps[slot][len] = jumped;
-        self.lens[slot] = len + 1;
-    }
-
-    /// Whether every slot in use has ended or filled, so walking further into
-    /// the FIFO cannot add anything.
-    #[must_use]
-    pub fn is_complete(&self) -> bool {
-        (0..self.objects).all(|slot| self.closed[slot] || self.lens[slot] >= FUTURE_SAMPLES)
-    }
-
-    /// Where `slot`'s object is going, nearest first.
-    ///
-    /// The buffer is published whole by [`SceneViewMirror::write_future`], so
-    /// nothing outside a test reads it a slot at a time.
-    #[cfg(test)]
-    #[must_use]
-    pub fn path(&self, slot: usize) -> &[[f32; 3]] {
-        match self.lens.get(slot) {
-            Some(&len) => &self.positions[slot][..len],
-            None => &[],
-        }
-    }
-
-    /// Which of `slot`'s samples the object arrives at, aligned with
-    /// [`Self::path`].
-    #[cfg(test)]
-    #[must_use]
-    pub fn jumps(&self, slot: usize) -> &[bool] {
-        match self.lens.get(slot) {
-            Some(&len) => &self.jumps[slot][..len],
-            None => &[],
-        }
-    }
-}
-
 /// The shared handle. `SpatialOutputController` owns it, the render source
 /// writes it, the UI reads it.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct SceneViewMirror {
     frame: Mutex<SceneViewFrame>,
-    /// Whether anything is drawing the scene.
-    ///
-    /// The render callback reads this to decide whether the FIFO walk behind the
-    /// path ahead is worth doing at all. While the window is hidden eframe runs
-    /// no egui pass, so nothing reads the mirror — and that walk is by far the
-    /// largest thing this module asks of the audio thread, entirely on behalf of
-    /// a picture nobody is looking at.
-    ///
-    /// `Relaxed` on both sides: it is a hint, and acting on it a quantum early
-    /// or a quantum late costs nothing either way.
-    observed: AtomicBool,
-}
-
-impl Default for SceneViewMirror {
-    fn default() -> Self {
-        Self {
-            frame: Mutex::new(SceneViewFrame::default()),
-            // A mirror nobody has said anything about is assumed to be watched.
-            // Guessing the other way would leave the scene blank for whoever is
-            // already looking at it.
-            observed: AtomicBool::new(true),
-        }
-    }
 }
 
 impl SceneViewMirror {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Tell the render callback whether the scene is being drawn. UI thread.
-    pub fn set_observed(&self, observed: bool) {
-        self.observed.store(observed, Ordering::Relaxed);
-    }
-
-    /// Whether the scene is being drawn. Audio thread.
-    #[cfg_attr(
-        not(target_os = "windows"),
-        allow(
-            dead_code,
-            reason = "only the Windows render callback weighs this against its own work"
-        )
-    )]
-    #[must_use]
-    pub fn is_observed(&self) -> bool {
-        self.observed.load(Ordering::Relaxed)
     }
 
     /// Publish the objects one render quantum resolved. Audio thread only.
@@ -457,7 +223,6 @@ impl SceneViewMirror {
         // travelled, straight from where it used to be to where it now is.
         if frame.key != Some(key) {
             frame.trail_lens = [0; MAX_VIEW_OBJECTS];
-            frame.future_lens = [0; MAX_VIEW_OBJECTS];
             frame.pending_jump = [false; MAX_VIEW_OBJECTS];
             frame.next_trail_frame = timeline_frame;
         }
@@ -467,7 +232,6 @@ impl SceneViewMirror {
         for (slot, previous) in frame.objects.iter().enumerate() {
             if previous.element_id != staged[slot].element_id {
                 frame.trail_lens[slot] = 0;
-                frame.future_lens[slot] = 0;
                 frame.pending_jump[slot] = false;
             }
         }
@@ -498,37 +262,6 @@ impl SceneViewMirror {
                 );
             }
         }
-    }
-
-    /// Publish a freshly sampled path ahead. Audio thread only.
-    ///
-    /// Written separately from [`Self::write`] because it is recomputed on the
-    /// path's own interval rather than every quantum — walking the whole FIFO
-    /// for each 10 ms callback would be pure waste, and the near end could not
-    /// be more than one sample stale anyway, which is this path's own
-    /// resolution.
-    ///
-    /// A frame stamped with a different key is left alone rather than adopted:
-    /// the path ahead is only meaningful beside the positions it continues, and
-    /// `write` is what establishes those.
-    #[cfg_attr(
-        not(target_os = "windows"),
-        allow(
-            dead_code,
-            reason = "only the Windows render callback walks the Scene FIFO"
-        )
-    )]
-    pub fn write_future(&self, key: PlaybackKey, path: &FuturePath) {
-        let Ok(mut guard) = self.frame.try_lock() else {
-            return;
-        };
-        let frame = &mut *guard;
-        if frame.key != Some(key) {
-            return;
-        }
-        frame.future = path.positions;
-        frame.future_lens = path.lens;
-        frame.future_jumps = path.jumps;
     }
 
     /// Take a copy of the current frame if it belongs to `key`. UI thread.
@@ -574,20 +307,6 @@ mod tests {
     /// Publish one quantum's worth of objects at a presentation position.
     fn write_at(mirror: &SceneViewMirror, key: PlaybackKey, frame: i64, objects: &[ObjectView]) {
         mirror.write(key, objects.iter().copied(), frame, RATE);
-    }
-
-    #[test]
-    fn a_fresh_mirror_is_observed_until_told_otherwise() {
-        // Inverted, this would silently stand the scene down for whoever is
-        // already looking at it — a blank stage rather than a slow one, and
-        // nothing in the picture would say why.
-        let mirror = SceneViewMirror::new();
-        assert!(mirror.is_observed());
-
-        mirror.set_observed(false);
-        assert!(!mirror.is_observed());
-        mirror.set_observed(true);
-        assert!(mirror.is_observed());
     }
 
     #[test]
@@ -734,15 +453,6 @@ mod tests {
         );
     }
 
-    fn path_of(points: &[[f32; 3]]) -> FuturePath {
-        let mut path = FuturePath::new();
-        path.restart(0, 1);
-        for point in points {
-            path.push(0, Some(*point));
-        }
-        path
-    }
-
     #[test]
     fn a_jump_seen_between_breadcrumbs_lands_on_the_next_one() {
         // Quanta are roughly a quarter of the sampling interval, so the update
@@ -778,48 +488,6 @@ mod tests {
             [false],
             "a jump from the playback before the seek was attributed to this one"
         );
-    }
-
-    #[test]
-    fn a_path_ahead_is_not_adopted_by_a_frame_from_another_playback() {
-        // The path only means anything beside the positions it continues, and
-        // `write` is what establishes those. Stamping a path from a superseded
-        // playback onto the live frame would draw the object heading somewhere
-        // the stream has already left.
-        let mirror = SceneViewMirror::new();
-        let live = PlaybackKey::new(2, 0);
-        write_at(&mirror, live, 0, &[object(1, 0.0)]);
-        mirror.write_future(PlaybackKey::new(2, 1), &path_of(&[[0.5, 0.0, 0.0]]));
-
-        assert!(mirror.read(live).expect("frame").future(0).is_empty());
-    }
-
-    #[test]
-    fn a_seek_discards_the_path_ahead_along_with_the_trail() {
-        let mirror = SceneViewMirror::new();
-        let before = PlaybackKey::new(2, 0);
-        write_at(&mirror, before, 0, &[object(1, 0.0)]);
-        mirror.write_future(before, &path_of(&[[0.5, 0.0, 0.0], [0.6, 0.0, 0.0]]));
-        assert_eq!(mirror.read(before).expect("frame").future(0).len(), 2);
-
-        let after = PlaybackKey::new(2, 1);
-        write_at(&mirror, after, 500_000, &[object(1, 0.9)]);
-        assert!(
-            mirror.read(after).expect("frame").future(0).is_empty(),
-            "the path ahead survived a seek and points somewhere never reached"
-        );
-    }
-
-    #[test]
-    fn a_slot_that_changes_element_does_not_inherit_the_previous_path_ahead() {
-        let mirror = SceneViewMirror::new();
-        let key = PlaybackKey::new(2, 0);
-        write_at(&mirror, key, 0, &[object(11, 0.0)]);
-        mirror.write_future(key, &path_of(&[[0.5, 0.0, 0.0]]));
-        assert_eq!(mirror.read(key).expect("frame").future(0).len(), 1);
-
-        write_at(&mirror, key, 1, &[object(22, 0.0)]);
-        assert!(mirror.read(key).expect("frame").future(0).is_empty());
     }
 
     #[test]

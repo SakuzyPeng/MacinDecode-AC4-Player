@@ -110,25 +110,6 @@ pub const FLOOR_TRAIL_WEIGHT: f32 = 0.45;
 /// trail does not read as a second row of objects.
 pub const TRAIL_MARK_SCALE: f32 = 0.30;
 
-/// Samples of the path ahead kept per object. At [`TRAIL_INTERVAL_MILLISECONDS`]
-/// apart this is 1.92 seconds, just under the Scene FIFO's two-second capacity,
-/// so **the length of the dashed path is the buffer depth**: when the decoder
-/// falls behind, the line ahead of each object visibly shortens.
-///
-/// The sampling interval is deliberately the trail's, not a third number. Past
-/// and future are then the same clock read in two directions, and a recompute
-/// can never lag by more than one sample of the path's own resolution.
-pub const FUTURE_SAMPLES: usize = 48;
-
-/// Fraction of each future segment actually drawn, leaving the rest as the gap.
-/// Because the samples are evenly spaced in time, **the dash length is speed**,
-/// the same reading the breadcrumb spacing gives — one convention, two tenses.
-pub const FUTURE_DASH_DUTY: f32 = 0.55;
-
-/// How far the farthest future segment is pushed toward `STAGE`. The mirror of
-/// [`TRAIL_FADE`]: history fades backwards, the path ahead fades forwards.
-pub const FUTURE_FADE: f32 = 0.85;
-
 /// How far two consecutive samples have to be apart, in normalized units,
 /// before an instant metadata update is worth annotating as a jump.
 ///

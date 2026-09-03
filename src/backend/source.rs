@@ -8,14 +8,9 @@ use macindecode_windows_spatial_audio::{
 use crate::decoder::{
     DecodedSceneBlock, PlaybackKey, SceneLfePcm, SceneObjectPcm, SceneQueueReader, SceneSignature,
 };
-use crate::scene_view::{
-    FuturePath, MAX_VIEW_OBJECTS, ObjectView, SceneViewMirror, sample_interval_frames,
-};
+use crate::scene_view::{MAX_VIEW_OBJECTS, ObjectView, SceneViewMirror};
 
-use super::state::{
-    FuturePathTick, element_state_at, future_path_tick, has_instant_update, lfe_render_state,
-    sample_future_path, windows_render_state,
-};
+use super::state::{element_state_at, has_instant_update, lfe_render_state, windows_render_state};
 
 pub(super) struct SceneRenderSource {
     reader: SceneQueueReader,
@@ -31,19 +26,6 @@ pub(super) struct SceneRenderSource {
     scene_signature: SceneSignature,
     timeline_frame: i64,
     current: Option<BlockCursor>,
-    /// Scratch buffer for the path ahead, refilled in place so walking the FIFO
-    /// never allocates.
-    future: FuturePath,
-    /// Presentation frame at which that walk is due again. The path is
-    /// recomputed on its own sampling interval rather than every quantum: the
-    /// whole FIFO would be re-read a hundred times a second for a near end that
-    /// cannot be more than one sample stale, and one sample is this path's own
-    /// resolution.
-    next_future_frame: i64,
-    /// Whether the walk is currently stood down because nothing is drawing the
-    /// scene. Kept so the empty path that stands it down is published once
-    /// rather than every quantum.
-    future_suspended: bool,
 }
 
 impl SceneRenderSource {
@@ -70,10 +52,6 @@ impl SceneRenderSource {
                 start_frame.cast_signed()
             },
             current: None,
-            future: FuturePath::new(),
-            // Sample on the very first quantum, before any interval has passed.
-            next_future_frame: i64::MIN,
-            future_suspended: false,
         }
     }
 
@@ -174,7 +152,6 @@ impl SceneRenderSource {
             self.timeline_frame,
             self.sample_rate,
         );
-        self.publish_future_path();
         Ok(RenderQuantum {
             objects: objects.into_values().collect(),
             lfe: lfe.map(LfeQuantumAccumulator::finish),
@@ -182,41 +159,6 @@ impl SceneRenderSource {
             end_of_stream,
             underrun,
         })
-    }
-
-    /// Re-derive the path ahead from the FIFO and publish it, if it is due.
-    ///
-    /// The lock order is the point: the walk holds the FIFO lock, releases it,
-    /// and only then takes the mirror's. The two are never held together, which
-    /// is what keeps a slow UI frame from ever reaching back into the decode
-    /// worker's path.
-    fn publish_future_path(&mut self) {
-        let due = self.timeline_frame >= self.next_future_frame;
-        match future_path_tick(due, self.mirror.is_observed(), self.future_suspended) {
-            FuturePathTick::Idle => {}
-            FuturePathTick::Suspend => {
-                // Hand the view an empty path so that coming back cannot flash a
-                // line describing a buffer that has long since drained, then stop
-                // walking the FIFO for a picture nobody is looking at.
-                self.future_suspended = true;
-                self.future.restart(self.timeline_frame, 0);
-                self.mirror.write_future(self.key, &self.future);
-            }
-            FuturePathTick::Rebuild => {
-                self.future_suspended = false;
-                let interval = sample_interval_frames(self.sample_rate);
-                self.next_future_frame = self.timeline_frame.saturating_add(interval);
-                rebuild_future_path(
-                    &mut self.future,
-                    &self.reader,
-                    self.current.as_ref(),
-                    self.scene_signature.object_element_ids(),
-                    self.timeline_frame.saturating_add(interval),
-                    interval,
-                );
-                self.mirror.write_future(self.key, &self.future);
-            }
-        }
     }
 
     fn load_next_block(&mut self) -> Result<bool, String> {
@@ -251,39 +193,6 @@ impl SceneRenderSource {
             return Ok(true);
         }
     }
-}
-
-/// Walk forward from the block being played into the queued ones, sampling each
-/// object's position onto the path's grid.
-///
-/// Taken as explicit pieces rather than `&mut self` so the FIFO borrow and the
-/// scratch buffer's are plainly disjoint at the call site.
-fn rebuild_future_path(
-    future: &mut FuturePath,
-    reader: &SceneQueueReader,
-    current: Option<&BlockCursor>,
-    element_ids: &[u64],
-    from_frame: i64,
-    interval_frames: i64,
-) {
-    future.restart(from_frame, element_ids.len());
-    // Start in the block already being played, not at the head of the queue:
-    // its unplayed remainder is the nearest part of the path, and skipping it
-    // would push the whole line up to a block ahead of the object.
-    if let Some(cursor) = current {
-        sample_future_path(future, &cursor.block, element_ids, interval_frames);
-    }
-    if future.is_complete() {
-        return;
-    }
-    reader.with_queued_blocks(|blocks| {
-        for block in blocks {
-            if future.is_complete() {
-                break;
-            }
-            sample_future_path(future, block, element_ids, interval_frames);
-        }
-    });
 }
 
 impl SpatialSource for SceneRenderSource {

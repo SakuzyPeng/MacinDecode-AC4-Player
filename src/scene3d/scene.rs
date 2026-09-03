@@ -37,14 +37,9 @@ pub struct SceneObject<'a> {
     /// Where this object has been, oldest first, in the same normalized
     /// coordinates as `position`.
     pub trail: &'a [[f32; 3]],
-    /// Where this object is going, nearest first: positions already decoded and
-    /// waiting in the Scene FIFO, in the same normalized coordinates.
-    pub future: &'a [[f32; 3]],
     /// Aligned with `trail`: which marks the object arrived at instantly rather
     /// than travelled to.
     pub trail_jumps: &'a [bool],
-    /// Aligned with `future`, same meaning.
-    pub future_jumps: &'a [bool],
 }
 
 /// Everything one frame of the scene depends on.
@@ -84,7 +79,6 @@ pub fn build(
     // honest reading of "we do not know where this is".
     for object in input.objects.iter().filter(|object| object.active) {
         add_trail(mesh, object, &view);
-        add_future_path(mesh, object, &view);
         add_object(mesh, object, &view);
     }
 }
@@ -375,92 +369,17 @@ fn trail_jump_at(object: &SceneObject<'_>, index: usize) -> bool {
     object.trail_jumps.get(index).copied().unwrap_or(false) && travelled_far(*previous, *point)
 }
 
-/// The same for the path ahead, where sample zero's predecessor is the object.
-fn future_jump_at(object: &SceneObject<'_>, index: usize) -> bool {
-    let Some(point) = object.future.get(index) else {
-        return false;
-    };
-    let previous = match index.checked_sub(1) {
-        Some(earlier) => object.future[earlier],
-        None => object.position,
-    };
-    object.future_jumps.get(index).copied().unwrap_or(false) && travelled_far(previous, *point)
-}
-
 /// Whether a discontinuity moved the object far enough to annotate.
 ///
 /// Whether it *was* a discontinuity is settled in `backend::state` by the
 /// bitstream itself. This is the separate, perceptual question: a stream that
 /// sends instant updates for every small correction would otherwise turn the
-/// whole path into a chain of hollow marks, and nobody loses track of an object
+/// whole trail into a chain of hollow marks, and nobody loses track of an object
 /// that moved two hundredths of a room.
 fn travelled_far(from: [f32; 3], to: [f32; 3]) -> bool {
     let span = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
     let squared = span[0].mul_add(span[0], span[1].mul_add(span[1], span[2] * span[2]));
     squared >= params::JUMP_MIN_DISTANCE * params::JUMP_MIN_DISTANCE
-}
-
-/// The object's path ahead, as a dashed hairline.
-///
-/// Past and future are drawn in deliberately different visual categories, so
-/// the tense is readable at a glance: history is discrete marks, the path ahead
-/// is a line. Only the leading [`params::FUTURE_DASH_DUTY`] of each segment is
-/// drawn, and since the samples are evenly spaced in time **the dash length is
-/// speed** — the same reading the breadcrumb spacing gives.
-///
-/// The path starts at the object itself rather than at its first sample, so the
-/// line stays welded to the cube however stale the last recompute is. It gets no
-/// floor projection: the drop line and the trail's projection already anchor the
-/// object to the grid, and a third set of floor marks only silts it up.
-fn add_future_path(mesh: &mut MeshBuilder, object: &SceneObject<'_>, view: &ViewContext) {
-    let Ok(count) = u16::try_from(object.future.len()) else {
-        return;
-    };
-    if count == 0 {
-        return;
-    }
-    let colour = Rgb::from_color32(theme::ACCENT);
-    let mut from = object_world_position(object.position);
-
-    for (index, point) in object.future.iter().enumerate() {
-        let to = object_world_position(*point);
-        if future_jump_at(object, index) {
-            // The dash length is how far the object continuously travels in one
-            // interval, and across a jump that distance is zero — so the rule
-            // that governs every other segment is what removes this one. Both
-            // ends get a marker instead, and an arrow says which way it went.
-            //
-            // Sample zero's predecessor is the object itself, already drawn as a
-            // cube; marking it again would only thicken it.
-            if index > 0 {
-                jump_mark(mesh, from, view);
-            }
-            jump_mark(mesh, to, view);
-            jump_arrow(mesh, from, to, view);
-            from = to;
-            continue;
-        }
-        // Fading forwards mirrors the trail fading backwards, which is what
-        // makes the two read as one axis through the object rather than as two
-        // unrelated decorations.
-        let distance = f32::from(u16::try_from(index).unwrap_or(u16::MAX).saturating_add(1))
-            / f32::from(count);
-        let faded = colour.lerp(view.stage, params::FUTURE_FADE * distance);
-        let dash = [
-            from[0] + (to[0] - from[0]) * params::FUTURE_DASH_DUTY,
-            from[1] + (to[1] - from[1]) * params::FUTURE_DASH_DUTY,
-            from[2] + (to[2] - from[2]) * params::FUTURE_DASH_DUTY,
-        ];
-        mesh.add_line(
-            Layer::Line,
-            from,
-            dash,
-            faded,
-            params::HAIRLINE_POINTS,
-            view,
-        );
-        from = to;
-    }
 }
 
 /// Map the normalized acoustic coordinates into the display room. The floor is
@@ -492,9 +411,7 @@ mod tests {
             active: true,
             gain: 1.0,
             trail: &[],
-            future: &[],
             trail_jumps: &[],
-            future_jumps: &[],
         }
     }
 
@@ -723,122 +640,30 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_path_ahead_draws_one_dash_per_queued_sample() {
-        let future = [[0.2, 0.0, 0.0], [0.4, 0.0, 0.0], [0.6, 0.0, 0.0]];
-        let bare = built(&[sounding([0.0, 0.0, 0.0])]);
-        let ahead = built(&[SceneObject {
-            future: &future,
-            ..sounding([0.0, 0.0, 0.0])
-        }]);
-
-        // One camera-facing quad, six vertices, per sample. Fewer would mean the
-        // drawn line is shorter than the buffer it is supposed to be reporting.
-        assert_eq!(ahead.line.len() - bare.line.len(), future.len() * 6);
-    }
-
-    #[test]
-    fn each_dash_stops_short_of_the_sample_it_leads() {
-        // The gap is what carries the reading: evenly spaced samples mean the
-        // dash length is speed. A solid line would say nothing but "ahead".
-        let future = [[1.0, 0.0, 0.0]];
-        let empty = built(&[]);
-        let ahead = built(&[SceneObject {
-            future: &future,
-            ..sounding([0.0, 0.0, 0.0])
-        }]);
-
-        // The path is emitted before its object, so it starts where the
-        // objectless scene ends.
-        let dash = &ahead.line[empty.line.len()..empty.line.len() + 6];
-        let far = dash
-            .iter()
-            .map(|vertex| vertex.position[0])
-            .fold(f32::NEG_INFINITY, f32::max);
-        let expected = ROOM_HALF_WIDTH * params::FUTURE_DASH_DUTY;
-        assert!(
-            (far - expected).abs() < 1e-4,
-            "the dash reaches {far}, expected to stop at {expected}"
-        );
-    }
-
-    #[test]
-    fn the_path_ahead_fades_away_from_the_object() {
-        // The mirror image of the trail's fade. Together they read as one axis
-        // running through the object rather than as two separate decorations.
-        let future = [[0.2, 0.0, 0.0], [0.9, 0.0, 0.0]];
-        let empty = built(&[]);
-        let ahead = built(&[SceneObject {
-            future: &future,
-            ..sounding([0.0, 0.0, 0.0])
-        }]);
-
-        let dashes = &ahead.line[empty.line.len()..];
-        let brightness = |quad: &[crate::scene3d::mesh::Vertex]| {
-            let sum: u32 = quad
-                .iter()
-                .map(|vertex| u32::from(vertex.colour[0]) + u32::from(vertex.colour[2]))
-                .sum();
-            sum / u32::try_from(quad.len()).unwrap_or(1)
-        };
-        let near = brightness(&dashes[..6]);
-        let far = brightness(&dashes[6..12]);
-        assert!(
-            far > near,
-            "the farthest dash ({far}) is not the most faded ({near})"
-        );
-    }
-
     /// A wire box is twelve hairline quads; a solid box, six faces of two
-    /// triangles; a hairline, one quad. The arrow is three hairlines.
+    /// triangles. The arrow is three hairlines.
     const WIRE_BOX: usize = 12 * 6;
     const SOLID_BOX: usize = 6 * 6;
-    const HAIRLINE: usize = 6;
     const ARROW: usize = 3 * 6;
 
     #[test]
-    fn a_jump_ahead_replaces_its_dash_with_markers_and_a_direction() {
-        // The dash length is the distance continuously travelled in one
-        // interval. Across an instant update that distance is zero, so the rule
-        // that draws every other segment is what removes this one — and with the
-        // line gone, the arrow is the only thing left saying where it went.
-        let future = [[1.0, 0.0, 0.0]];
-        let object = sounding([0.0, 0.0, 0.0]);
-        let travelled = built(&[SceneObject {
-            future: &future,
-            ..object
-        }]);
-        let jumped = built(&[SceneObject {
-            future: &future,
-            future_jumps: &[true],
-            ..object
-        }]);
-
-        // Sample zero's departure is the object's own cube, so only the arrival
-        // gets a marker.
-        assert_eq!(
-            jumped.line.len() - travelled.line.len(),
-            WIRE_BOX + ARROW - HAIRLINE
-        );
-    }
-
-    #[test]
-    fn a_jump_too_small_to_lose_track_of_is_drawn_as_an_ordinary_segment() {
+    fn a_jump_too_small_to_lose_track_of_keeps_ordinary_breadcrumbs() {
         // Whether it was a discontinuity is settled from the bitstream; whether
         // it is worth annotating is not. A stream that sends instant updates for
-        // every small correction would otherwise become a chain of markers.
-        let future = [[0.05, 0.0, 0.0]];
-        let object = sounding([0.0, 0.0, 0.0]);
+        // every small correction would otherwise become a chain of hollow marks.
+        let trail = [[0.0, 0.0, 0.0], [0.05, 0.0, 0.0]];
+        let object = sounding([0.05, 0.0, 0.0]);
         let travelled = built(&[SceneObject {
-            future: &future,
+            trail: &trail,
             ..object
         }]);
         let jumped = built(&[SceneObject {
-            future: &future,
-            future_jumps: &[true],
+            trail: &trail,
+            trail_jumps: &[false, true],
             ..object
         }]);
 
+        assert_eq!(jumped.solid.len(), travelled.solid.len());
         assert_eq!(jumped.line.len(), travelled.line.len());
     }
 
@@ -865,18 +690,6 @@ mod tests {
             jumped.line.len() - travelled.line.len(),
             2 * WIRE_BOX + ARROW
         );
-    }
-
-    #[test]
-    fn an_inactive_object_draws_no_future_path_either() {
-        let future = [[0.2, 0.0, 0.0], [0.4, 0.0, 0.0]];
-        let empty = built(&[]);
-        let inactive = built(&[SceneObject {
-            future: &future,
-            active: false,
-            ..sounding([0.3, 0.4, -0.2])
-        }]);
-        assert_eq!(inactive.line.len(), empty.line.len());
     }
 
     #[test]
