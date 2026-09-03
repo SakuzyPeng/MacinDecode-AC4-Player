@@ -37,6 +37,9 @@ pub struct SceneObject<'a> {
     /// Where this object has been, oldest first, in the same normalized
     /// coordinates as `position`.
     pub trail: &'a [[f32; 3]],
+    /// Where this object is going, nearest first: positions already decoded and
+    /// waiting in the Scene FIFO, in the same normalized coordinates.
+    pub future: &'a [[f32; 3]],
 }
 
 /// Everything one frame of the scene depends on.
@@ -76,6 +79,7 @@ pub fn build(
     // honest reading of "we do not know where this is".
     for object in input.objects.iter().filter(|object| object.active) {
         add_trail(mesh, object, &view);
+        add_future_path(mesh, object, &view);
         add_object(mesh, object, &view);
     }
 }
@@ -281,6 +285,53 @@ fn add_trail(mesh: &mut MeshBuilder, object: &SceneObject<'_>, view: &ViewContex
     }
 }
 
+/// The object's path ahead, as a dashed hairline.
+///
+/// Past and future are drawn in deliberately different visual categories, so
+/// the tense is readable at a glance: history is discrete marks, the path ahead
+/// is a line. Only the leading [`params::FUTURE_DASH_DUTY`] of each segment is
+/// drawn, and since the samples are evenly spaced in time **the dash length is
+/// speed** — the same reading the breadcrumb spacing gives.
+///
+/// The path starts at the object itself rather than at its first sample, so the
+/// line stays welded to the cube however stale the last recompute is. It gets no
+/// floor projection: the drop line and the trail's projection already anchor the
+/// object to the grid, and a third set of floor marks only silts it up.
+fn add_future_path(mesh: &mut MeshBuilder, object: &SceneObject<'_>, view: &ViewContext) {
+    let Ok(count) = u16::try_from(object.future.len()) else {
+        return;
+    };
+    if count == 0 {
+        return;
+    }
+    let colour = Rgb::from_color32(theme::ACCENT);
+    let mut from = object_world_position(object.position);
+
+    for (index, point) in object.future.iter().enumerate() {
+        let to = object_world_position(*point);
+        // Fading forwards mirrors the trail fading backwards, which is what
+        // makes the two read as one axis through the object rather than as two
+        // unrelated decorations.
+        let distance = f32::from(u16::try_from(index).unwrap_or(u16::MAX).saturating_add(1))
+            / f32::from(count);
+        let faded = colour.lerp(view.stage, params::FUTURE_FADE * distance);
+        let dash = [
+            from[0] + (to[0] - from[0]) * params::FUTURE_DASH_DUTY,
+            from[1] + (to[1] - from[1]) * params::FUTURE_DASH_DUTY,
+            from[2] + (to[2] - from[2]) * params::FUTURE_DASH_DUTY,
+        ];
+        mesh.add_line(
+            Layer::Line,
+            from,
+            dash,
+            faded,
+            params::HAIRLINE_POINTS,
+            view,
+        );
+        from = to;
+    }
+}
+
 /// Map the normalized acoustic coordinates into the display room. The floor is
 /// farther below the head than the ceiling is above it, so elevation uses two
 /// linear halves and keeps zero exactly at the listener's head.
@@ -310,6 +361,7 @@ mod tests {
             active: true,
             gain: 1.0,
             trail: &[],
+            future: &[],
         }
     }
 
@@ -536,6 +588,84 @@ mod tests {
             oldest > newest,
             "the oldest mark ({oldest}) is not the most faded ({newest})"
         );
+    }
+
+    #[test]
+    fn the_path_ahead_draws_one_dash_per_queued_sample() {
+        let future = [[0.2, 0.0, 0.0], [0.4, 0.0, 0.0], [0.6, 0.0, 0.0]];
+        let bare = built(&[sounding([0.0, 0.0, 0.0])]);
+        let ahead = built(&[SceneObject {
+            future: &future,
+            ..sounding([0.0, 0.0, 0.0])
+        }]);
+
+        // One camera-facing quad, six vertices, per sample. Fewer would mean the
+        // drawn line is shorter than the buffer it is supposed to be reporting.
+        assert_eq!(ahead.line.len() - bare.line.len(), future.len() * 6);
+    }
+
+    #[test]
+    fn each_dash_stops_short_of_the_sample_it_leads() {
+        // The gap is what carries the reading: evenly spaced samples mean the
+        // dash length is speed. A solid line would say nothing but "ahead".
+        let future = [[1.0, 0.0, 0.0]];
+        let empty = built(&[]);
+        let ahead = built(&[SceneObject {
+            future: &future,
+            ..sounding([0.0, 0.0, 0.0])
+        }]);
+
+        // The path is emitted before its object, so it starts where the
+        // objectless scene ends.
+        let dash = &ahead.line[empty.line.len()..empty.line.len() + 6];
+        let far = dash
+            .iter()
+            .map(|vertex| vertex.position[0])
+            .fold(f32::NEG_INFINITY, f32::max);
+        let expected = ROOM_HALF_WIDTH * params::FUTURE_DASH_DUTY;
+        assert!(
+            (far - expected).abs() < 1e-4,
+            "the dash reaches {far}, expected to stop at {expected}"
+        );
+    }
+
+    #[test]
+    fn the_path_ahead_fades_away_from_the_object() {
+        // The mirror image of the trail's fade. Together they read as one axis
+        // running through the object rather than as two separate decorations.
+        let future = [[0.2, 0.0, 0.0], [0.9, 0.0, 0.0]];
+        let empty = built(&[]);
+        let ahead = built(&[SceneObject {
+            future: &future,
+            ..sounding([0.0, 0.0, 0.0])
+        }]);
+
+        let dashes = &ahead.line[empty.line.len()..];
+        let brightness = |quad: &[crate::scene3d::mesh::Vertex]| {
+            let sum: u32 = quad
+                .iter()
+                .map(|vertex| u32::from(vertex.colour[0]) + u32::from(vertex.colour[2]))
+                .sum();
+            sum / u32::try_from(quad.len()).unwrap_or(1)
+        };
+        let near = brightness(&dashes[..6]);
+        let far = brightness(&dashes[6..12]);
+        assert!(
+            far > near,
+            "the farthest dash ({far}) is not the most faded ({near})"
+        );
+    }
+
+    #[test]
+    fn an_inactive_object_draws_no_future_path_either() {
+        let future = [[0.2, 0.0, 0.0], [0.4, 0.0, 0.0]];
+        let empty = built(&[]);
+        let inactive = built(&[SceneObject {
+            future: &future,
+            active: false,
+            ..sounding([0.3, 0.4, -0.2])
+        }]);
+        assert_eq!(inactive.line.len(), empty.line.len());
     }
 
     #[test]

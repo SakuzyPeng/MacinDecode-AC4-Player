@@ -1099,6 +1099,7 @@ impl PlayerApp {
                     active: object.active,
                     gain: object.gain,
                     trail: mirrored.trail(slot),
+                    future: mirrored.future(slot),
                 };
                 object_count = object_count.saturating_add(1);
             }

@@ -715,6 +715,26 @@ impl SharedSceneQueue {
         Some(block)
     }
 
+    /// Read the blocks still waiting to be played, without consuming them.
+    ///
+    /// `visit` runs while the queue lock is held and is called from the render
+    /// callback, so it must neither allocate nor block. Nothing about the queue
+    /// changes: `buffered_frames` is untouched and the condvar is deliberately
+    /// not notified, so a peek can never be mistaken by the decode worker for
+    /// space having been freed.
+    #[cfg(any(target_os = "windows", test))]
+    pub(super) fn with_queued_blocks(
+        &self,
+        key: PlaybackKey,
+        visit: impl FnOnce(&mut dyn Iterator<Item = &DecodedSceneBlock>),
+    ) {
+        let queue = lock_recover(&self.state.0);
+        if queue.key != key {
+            return;
+        }
+        visit(&mut queue.blocks.iter());
+    }
+
     #[cfg(any(target_os = "windows", test))]
     pub(super) fn mark_end_of_stream(&self, key: PlaybackKey) {
         let (mutex, changed) = &*self.state;
@@ -767,6 +787,22 @@ impl SceneQueueReader {
     #[cfg(target_os = "windows")]
     pub(crate) fn is_end_of_stream(&self) -> bool {
         self.queue.is_end_of_stream(self.key)
+    }
+
+    /// Peek at the decoded blocks the stream has not reached yet. See
+    /// [`SharedSceneQueue::with_queued_blocks`] for what the closure may do.
+    ///
+    /// Unlike its neighbours this is also built under `test`, so the elided
+    /// higher-ranked lifetime in the closure's `&mut dyn Iterator` argument gets
+    /// compiled somewhere other than Windows. Nothing else in this file exercises
+    /// that shape, and it is not the kind of signature to discover is wrong on a
+    /// machine you cannot build on.
+    #[cfg(any(target_os = "windows", test))]
+    pub(crate) fn with_queued_blocks(
+        &self,
+        visit: impl FnOnce(&mut dyn Iterator<Item = &DecodedSceneBlock>),
+    ) {
+        self.queue.with_queued_blocks(self.key, visit);
     }
 
     /// The playback this reader is bound to.
@@ -1199,6 +1235,75 @@ mod tests {
             Some(48_000)
         );
         assert!(queue.try_push(key, block(48_000, 1)).is_ok());
+    }
+
+    #[test]
+    fn peeking_at_queued_blocks_consumes_nothing() {
+        // The scene view reads the path ahead out of the FIFO on the audio
+        // thread. If that read behaved at all like a pop, the picture would be
+        // eating the audio's own buffer.
+        let queue = SharedSceneQueue::new();
+        let key = PlaybackKey::new(5, 3);
+        queue.reset(key);
+        assert!(queue.try_push(key, block(48_000, 2_048)).is_ok());
+        let snapshot = queue
+            .try_push(key, block(48_000, 1_024))
+            .expect("second block fits");
+
+        let mut seen = Vec::new();
+        queue.with_queued_blocks(key, |blocks| {
+            seen.extend(blocks.map(DecodedSceneBlock::duration_frames));
+        });
+        assert_eq!(seen, vec![2_048, 1_024]);
+
+        let after = queue
+            .try_push(key, block(48_000, 512))
+            .expect("the queue still has its capacity");
+        assert_eq!(
+            after.buffered_frames,
+            snapshot.buffered_frames + 512,
+            "the peek released buffered frames"
+        );
+        assert_eq!(
+            queue.try_pop(key).map(|first| first.duration_frames()),
+            Some(2_048),
+            "the peek consumed the head of the queue"
+        );
+    }
+
+    #[test]
+    fn a_reader_peeks_through_its_own_key() {
+        let queue = SharedSceneQueue::new();
+        let key = PlaybackKey::new(6, 1);
+        queue.reset(key);
+        assert!(queue.try_push(key, block(48_000, 2_048)).is_ok());
+        let reader = SceneQueueReader {
+            queue: queue.clone(),
+            key,
+        };
+
+        let mut durations = Vec::new();
+        reader.with_queued_blocks(|blocks| {
+            durations.extend(blocks.map(DecodedSceneBlock::duration_frames));
+        });
+        assert_eq!(durations, vec![2_048]);
+    }
+
+    #[test]
+    fn peeking_with_a_superseded_key_sees_nothing() {
+        let queue = SharedSceneQueue::new();
+        let current = PlaybackKey::new(5, 4);
+        queue.reset(current);
+        assert!(queue.try_push(current, block(48_000, 2_048)).is_ok());
+
+        let mut visited = false;
+        queue.with_queued_blocks(PlaybackKey::new(5, 3), |blocks| {
+            visited = blocks.next().is_some();
+        });
+        assert!(
+            !visited,
+            "a seek must not leak the new queue to the old view"
+        );
     }
 
     #[test]

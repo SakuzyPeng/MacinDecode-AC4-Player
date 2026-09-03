@@ -14,6 +14,7 @@
 //!   the picture with what they heard.
 
 use crate::decoder::{DecodedSceneBlock, SpatialObjectState, SpatialPosition};
+use crate::scene_view::FuturePath;
 
 /// The element's state `offset_frames` into `block`, following every metadata
 /// update up to that point and interpolating whichever ramp is still running.
@@ -155,9 +156,57 @@ pub(super) fn lfe_render_state(state: Option<SpatialObjectState>) -> (bool, f32)
     )
 }
 
+/// Sample every grid point of `path` that falls inside `block`.
+///
+/// `element_ids` is the Scene signature's object list, which is sorted, so a
+/// slot is a binary search away and matches the mirror's slot order exactly —
+/// both are element ID ascending. Nothing is allocated: this runs on the audio
+/// thread, and for the queued blocks it runs while the FIFO lock is held.
+///
+/// An object with no position at some moment ends its own path there; the rest
+/// carry on. Positions come from the same `element_state_at` the audio uses, so
+/// the drawn path is the one that will actually be heard.
+pub(super) fn sample_future_path(
+    path: &mut FuturePath,
+    block: &DecodedSceneBlock,
+    element_ids: &[u64],
+    interval_frames: i64,
+) {
+    if interval_frames <= 0 {
+        return;
+    }
+    let start = block.start_frame();
+    let Some(end) = start.checked_add(i64::from(block.duration_frames())) else {
+        return;
+    };
+    // A forward timeline gap carries no element state at all. Re-anchoring the
+    // grid to the next block that does is the alternative to ending every
+    // object's path at the first gap; one dash comes out short, which is a far
+    // smaller lie than the path disappearing.
+    path.skip_to(start);
+
+    while path.next_frame() < end {
+        let Ok(offset) = u32::try_from(path.next_frame() - start) else {
+            return;
+        };
+        for object in block.objects() {
+            let Ok(slot) = element_ids.binary_search(&object.element_id()) else {
+                continue;
+            };
+            let state =
+                element_state_at(block, object.element_id(), object.initial_state(), offset);
+            let (active, position, _) = windows_render_state(state);
+            path.push(slot, active.then_some(position));
+        }
+        path.advance(interval_frames);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::decoder::{SceneMetadataUpdate, SceneObjectPcm};
+    use crate::scene_view::sample_interval_frames;
+    use crate::scene3d::params::FUTURE_SAMPLES;
 
     use super::*;
 
@@ -168,6 +217,47 @@ mod tests {
             Some(gain),
             true,
         )
+    }
+
+    const RATE: u32 = 48_000;
+
+    fn positioned(x: f32) -> SpatialObjectState {
+        SpatialObjectState::new(
+            true,
+            Some(SpatialPosition::new(x, 0.0, 0.0)),
+            Some(1.0),
+            true,
+        )
+    }
+
+    /// A Scene block carrying element state but no PCM: the sampler never reads
+    /// samples, only metadata.
+    fn block(
+        start_frame: i64,
+        duration_frames: u32,
+        objects: Vec<SceneObjectPcm>,
+        updates: Vec<SceneMetadataUpdate>,
+    ) -> DecodedSceneBlock {
+        DecodedSceneBlock::new(
+            RATE,
+            start_frame,
+            duration_frames,
+            1,
+            0,
+            None,
+            true,
+            objects,
+            None,
+            updates,
+        )
+    }
+
+    fn interval() -> i64 {
+        sample_interval_frames(RATE)
+    }
+
+    fn xs(path: &FuturePath, slot: usize) -> Vec<f32> {
+        path.path(slot).iter().map(|point| point[0]).collect()
     }
 
     #[test]
@@ -256,5 +346,214 @@ mod tests {
 
         let inactive = SpatialObjectState::new(false, None, Some(0.8), true);
         assert_eq!(lfe_render_state(Some(inactive)), (false, 0.8));
+    }
+
+    #[test]
+    fn the_path_is_sampled_on_the_interval_and_follows_the_ramp_the_audio_will_hear() {
+        // The whole point of routing this through `element_state_at`: the line
+        // drawn ahead of an object is the trajectory that will actually be
+        // rendered, not a parallel guess that drifts across every ramp.
+        let step = interval();
+        let span = u32::try_from(step * 5).expect("span fits a u32");
+        let block = block(
+            0,
+            span,
+            vec![SceneObjectPcm::new(7, Some(positioned(-1.0)), Vec::new())],
+            vec![SceneMetadataUpdate::new(
+                7,
+                0,
+                span,
+                u32::MAX,
+                positioned(1.0),
+            )],
+        );
+
+        let mut path = FuturePath::new();
+        path.restart(0, 1);
+        sample_future_path(&mut path, &block, &[7], step);
+
+        // Five grid points fall inside the block, and the ramp is linear across
+        // it, so each is two fifths of the way along from the one before.
+        let sampled = xs(&path, 0);
+        assert_eq!(sampled.len(), 5);
+        for (index, actual) in sampled.iter().enumerate() {
+            #[allow(
+                clippy::cast_precision_loss,
+                reason = "five sample indices convert exactly"
+            )]
+            let expected = -1.0 + 0.4 * index as f32;
+            assert!(
+                (actual - expected).abs() < 1e-5,
+                "sample {index} is {actual}, expected {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_object_that_loses_its_position_ends_only_its_own_path() {
+        let step = interval();
+        let span = u32::try_from(step * 5).expect("span fits a u32");
+        let silent = SpatialObjectState::new(
+            false,
+            Some(SpatialPosition::new(0.5, 0.0, 0.0)),
+            Some(1.0),
+            true,
+        );
+        let block = block(
+            0,
+            span,
+            vec![
+                SceneObjectPcm::new(3, Some(positioned(-0.5)), Vec::new()),
+                SceneObjectPcm::new(9, Some(positioned(0.5)), Vec::new()),
+            ],
+            vec![SceneMetadataUpdate::new(
+                9,
+                u32::try_from(step * 2).expect("offset fits a u32"),
+                0,
+                u32::MAX,
+                silent,
+            )],
+        );
+
+        let mut path = FuturePath::new();
+        path.restart(0, 2);
+        sample_future_path(&mut path, &block, &[3, 9], step);
+
+        assert_eq!(path.path(0).len(), 5, "a live object stopped early");
+        assert_eq!(
+            path.path(1).len(),
+            2,
+            "the path continued past the point the object stops being placed"
+        );
+    }
+
+    #[test]
+    fn a_path_closed_once_is_not_reopened_by_a_later_block() {
+        // Without this the line would leap the silent stretch and draw a segment
+        // the object never travels.
+        let step = interval();
+        let span = u32::try_from(step).expect("span fits a u32");
+        let ids = [4];
+        let mut path = FuturePath::new();
+        path.restart(0, 1);
+
+        let absent = block(
+            0,
+            span,
+            vec![SceneObjectPcm::new(4, None, Vec::new())],
+            vec![],
+        );
+        sample_future_path(&mut path, &absent, &ids, step);
+        assert!(path.path(0).is_empty());
+
+        let back = block(
+            step,
+            span,
+            vec![SceneObjectPcm::new(4, Some(positioned(0.25)), Vec::new())],
+            vec![],
+        );
+        sample_future_path(&mut path, &back, &ids, step);
+        assert!(path.path(0).is_empty(), "a closed path accepted new points");
+        assert!(path.is_complete());
+    }
+
+    #[test]
+    fn contiguous_blocks_continue_one_path_without_repeating_a_sample() {
+        let step = interval();
+        let span = u32::try_from(step * 2).expect("span fits a u32");
+        let ids = [7];
+        let first = block(
+            0,
+            span,
+            vec![SceneObjectPcm::new(7, Some(positioned(-1.0)), Vec::new())],
+            vec![],
+        );
+        let second = block(
+            step * 2,
+            span,
+            vec![SceneObjectPcm::new(7, Some(positioned(1.0)), Vec::new())],
+            vec![],
+        );
+
+        let mut path = FuturePath::new();
+        path.restart(0, 1);
+        sample_future_path(&mut path, &first, &ids, step);
+        sample_future_path(&mut path, &second, &ids, step);
+
+        assert_eq!(xs(&path, 0), vec![-1.0, -1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn a_forward_gap_re_anchors_the_grid_instead_of_ending_the_path() {
+        // A gap carries no element state at all. Ending every path at the first
+        // one would make the line vanish over a pre-roll; re-anchoring costs one
+        // short dash.
+        let step = interval();
+        let span = u32::try_from(step).expect("span fits a u32");
+        let ids = [7];
+        let before = block(
+            0,
+            span,
+            vec![SceneObjectPcm::new(7, Some(positioned(-1.0)), Vec::new())],
+            vec![],
+        );
+        let after = block(
+            step * 4,
+            span,
+            vec![SceneObjectPcm::new(7, Some(positioned(1.0)), Vec::new())],
+            vec![],
+        );
+
+        let mut path = FuturePath::new();
+        path.restart(0, 1);
+        sample_future_path(&mut path, &before, &ids, step);
+        sample_future_path(&mut path, &after, &ids, step);
+
+        assert_eq!(xs(&path, 0), vec![-1.0, 1.0]);
+    }
+
+    #[test]
+    fn the_path_stops_at_its_capacity_and_reports_itself_complete() {
+        let step = interval();
+        let samples = i64::try_from(FUTURE_SAMPLES).expect("the budget fits an i64");
+        let span = u32::try_from(step * (samples + 10)).expect("span fits a u32");
+        let block = block(
+            0,
+            span,
+            vec![SceneObjectPcm::new(7, Some(positioned(0.0)), Vec::new())],
+            vec![],
+        );
+
+        let mut path = FuturePath::new();
+        path.restart(0, 1);
+        sample_future_path(&mut path, &block, &[7], step);
+
+        assert_eq!(path.path(0).len(), FUTURE_SAMPLES);
+        assert!(path.is_complete());
+    }
+
+    #[test]
+    fn slots_follow_the_signature_order_the_mirror_uses() {
+        // The mirror fills its slots from a BTreeMap keyed by element ID, and
+        // the signature's list is sorted, so the two agree only if the sampler
+        // resolves slots by that list rather than by the block's own order.
+        let step = interval();
+        let span = u32::try_from(step).expect("span fits a u32");
+        let block = block(
+            0,
+            span,
+            vec![
+                SceneObjectPcm::new(9, Some(positioned(0.9)), Vec::new()),
+                SceneObjectPcm::new(3, Some(positioned(0.3)), Vec::new()),
+            ],
+            vec![],
+        );
+
+        let mut path = FuturePath::new();
+        path.restart(0, 2);
+        sample_future_path(&mut path, &block, &[3, 9], step);
+
+        assert_eq!(xs(&path, 0), vec![0.3]);
+        assert_eq!(xs(&path, 1), vec![0.9]);
     }
 }
