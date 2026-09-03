@@ -74,8 +74,8 @@ pub const AIR_PERSPECTIVE_SPAN: f32 = 3.5;
 /// reference views.
 pub const OBJECT_EDGE: f32 = 0.11;
 
-/// Fraction of an object's face available to its element-ID label. The label
-/// scales down as the ID gains digits, but never spills over the cube edges.
+/// Fraction of an element face available to its scene number. The label scales
+/// down as the number gains digits and also fits the shallow LFE cabinet faces.
 pub const OBJECT_LABEL_FACE_FILL: f32 = 0.72;
 
 /// Distance the label sits above the cube face, in world units. It is large

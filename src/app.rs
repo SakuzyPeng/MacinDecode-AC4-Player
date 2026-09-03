@@ -44,8 +44,9 @@ pub struct PlayerApp {
     bitstream_details_open: bool,
     diagnostics_open: bool,
     camera: scene3d::camera::Camera,
-    /// Whether stable Scene element IDs are printed on every object face.
-    object_labels_visible: bool,
+    /// Whether zero-based LFE / one-based dynamic-object numbers are printed
+    /// on every element face.
+    object_numbers_visible: bool,
     /// Listener pose. Head tracking will drive the two angles; until then the
     /// listener faces the room's front.
     figure: scene3d::figure::Figure,
@@ -62,6 +63,13 @@ pub struct PlayerApp {
 }
 
 const OUTPUT_DEVICE_STORAGE_KEY: &str = "preferred-output-device-v1";
+
+/// Visible dynamic-object numbers describe the fixed scene slots, not Core's
+/// lifetime-stable element IDs. LFE owns zero separately, so the dynamic range
+/// remains 1..=20 whether or not the presentation carries LFE.
+fn object_display_number(slot: usize) -> u64 {
+    u64::try_from(slot.saturating_add(1)).unwrap_or(u64::MAX)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OutputSyncAction {
@@ -308,7 +316,7 @@ impl PlayerApp {
             bitstream_details_open: false,
             diagnostics_open: false,
             camera: scene3d::camera::Camera::default(),
-            object_labels_visible: true,
+            object_numbers_visible: true,
             figure: scene3d::figure::Figure::default(),
             scene_mesh: scene3d::mesh::MeshBuilder::default(),
             scene_renderer_ready,
@@ -1141,7 +1149,7 @@ impl PlayerApp {
             hidden_objects = mirrored.hidden_objects();
             for (slot, object) in mirrored.objects().iter().enumerate() {
                 objects[slot] = scene3d::scene::SceneObject {
-                    element_id: object.element_id,
+                    display_number: object_display_number(slot),
                     position: object.position,
                     active: object.active,
                     gain: object.gain,
@@ -1175,7 +1183,7 @@ impl PlayerApp {
                     rect.height(),
                     scene3d::scene::SceneInput {
                         objects,
-                        show_object_labels: self.object_labels_visible,
+                        show_element_numbers: self.object_numbers_visible,
                         // Not from the mirror: the presentation's LFE layout is
                         // known as soon as the decoder reports metrics, well
                         // before the render callback produces a first quantum,
@@ -1309,10 +1317,10 @@ impl PlayerApp {
                 }
                 ui.add_space(4.0);
 
-                let labels_hint = if self.object_labels_visible {
-                    "Hide object element IDs"
+                let labels_hint = if self.object_numbers_visible {
+                    "Hide scene element numbers"
                 } else {
-                    "Show object element IDs"
+                    "Show scene element numbers"
                 };
                 if ui
                     .add_sized(
@@ -1320,12 +1328,12 @@ impl PlayerApp {
                         egui::Button::new(
                             RichText::new("IDs").size(10.0).strong().color(theme::MUTED),
                         )
-                        .selected(self.object_labels_visible),
+                        .selected(self.object_numbers_visible),
                     )
                     .on_hover_text(labels_hint)
                     .clicked()
                 {
-                    self.object_labels_visible = !self.object_labels_visible;
+                    self.object_numbers_visible = !self.object_numbers_visible;
                 }
                 ui.add_space(4.0);
 
@@ -2532,6 +2540,15 @@ fn draw_drop_overlay(context: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dynamic_object_numbers_are_one_based_and_do_not_reserve_lfe_zero() {
+        assert_eq!(object_display_number(0), 1);
+        assert_eq!(
+            object_display_number(crate::scene_view::MAX_VIEW_OBJECTS - 1),
+            20
+        );
+    }
 
     #[test]
     fn output_sync_preserves_same_request_during_buffering() {
