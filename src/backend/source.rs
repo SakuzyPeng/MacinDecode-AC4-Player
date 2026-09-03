@@ -37,6 +37,10 @@ pub(super) struct SceneRenderSource {
     /// cannot be more than one sample stale, and one sample is this path's own
     /// resolution.
     next_future_frame: i64,
+    /// Whether the walk is currently stood down because nothing is drawing the
+    /// scene. Kept so the empty path that stands it down is published once
+    /// rather than every quantum.
+    future_suspended: bool,
 }
 
 impl SceneRenderSource {
@@ -66,6 +70,7 @@ impl SceneRenderSource {
             future: FuturePath::new(),
             // Sample on the very first quantum, before any interval has passed.
             next_future_frame: i64::MIN,
+            future_suspended: false,
         }
     }
 
@@ -183,20 +188,32 @@ impl SceneRenderSource {
     /// is what keeps a slow UI frame from ever reaching back into the decode
     /// worker's path.
     fn publish_future_path(&mut self) {
-        if self.timeline_frame < self.next_future_frame {
-            return;
+        let due = self.timeline_frame >= self.next_future_frame;
+        match future_path_tick(due, self.mirror.is_observed(), self.future_suspended) {
+            FuturePathTick::Idle => {}
+            FuturePathTick::Suspend => {
+                // Hand the view an empty path so that coming back cannot flash a
+                // line describing a buffer that has long since drained, then stop
+                // walking the FIFO for a picture nobody is looking at.
+                self.future_suspended = true;
+                self.future.restart(self.timeline_frame, 0);
+                self.mirror.write_future(self.key, &self.future);
+            }
+            FuturePathTick::Rebuild => {
+                self.future_suspended = false;
+                let interval = sample_interval_frames(self.sample_rate);
+                self.next_future_frame = self.timeline_frame.saturating_add(interval);
+                rebuild_future_path(
+                    &mut self.future,
+                    &self.reader,
+                    self.current.as_ref(),
+                    self.scene_signature.object_element_ids(),
+                    self.timeline_frame.saturating_add(interval),
+                    interval,
+                );
+                self.mirror.write_future(self.key, &self.future);
+            }
         }
-        let interval = sample_interval_frames(self.sample_rate);
-        self.next_future_frame = self.timeline_frame.saturating_add(interval);
-        rebuild_future_path(
-            &mut self.future,
-            &self.reader,
-            self.current.as_ref(),
-            self.scene_signature.object_element_ids(),
-            self.timeline_frame.saturating_add(interval),
-            interval,
-        );
-        self.mirror.write_future(self.key, &self.future);
     }
 
     fn load_next_block(&mut self) -> Result<bool, String> {

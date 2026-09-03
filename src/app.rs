@@ -53,6 +53,10 @@ pub struct PlayerApp {
     /// nothing at all but its frame, which is why it is checked rather than
     /// assumed.
     scene_renderer_ready: bool,
+    /// Set by [`eframe::App::ui`], taken by [`eframe::App::logic`]. See there
+    /// for why this, rather than `ViewportInfo`, is what says whether anything
+    /// is on screen.
+    stage_drawn: bool,
 }
 
 const OUTPUT_DEVICE_STORAGE_KEY: &str = "preferred-output-device-v1";
@@ -229,18 +233,29 @@ fn should_handle_completed_item(
 /// what this returns is the only thing keeping a backgrounded player moving
 /// through its playlist — nothing else asks for the pass that would notice the
 /// current item ended.
-const fn output_repaint_delay(phase: OutputPhase, playback_intent: bool) -> Option<Duration> {
+const fn output_repaint_delay(
+    phase: OutputPhase,
+    playback_intent: bool,
+    showing: bool,
+) -> Option<Duration> {
     match phase {
         // Objects move while playing, and the stage now shows them, so the
         // repaint has to keep up with motion rather than with a text label:
         // 50 ms was invisible under a phase message and is a visible stutter
         // under a travelling object.
-        OutputPhase::Playing => Some(Duration::from_millis(16)),
+        OutputPhase::Playing if showing => Some(Duration::from_millis(16)),
+        // Motion only needs a frame rate when there is a frame. Hidden, the
+        // tick exists solely to keep playback correct, and everything that
+        // depends on it — errors, device recovery, the seek index landing — is
+        // event-driven and none the worse for a quarter of a second.
+        OutputPhase::Playing => Some(Duration::from_millis(250)),
         OutputPhase::Initializing => Some(Duration::from_millis(50)),
         // The item finished and the next one is still being opened. Poll until
         // the hand-off lands, rather than leaving a second of silence between
-        // tracks. This is self-limiting: completing the hand-off leaves `Ended`,
-        // and reaching the end of the playlist clears the intent.
+        // tracks. Deliberately not conditioned on `showing`: the hand-off is
+        // exactly what has to stay prompt when nobody is watching. This is
+        // self-limiting anyway — completing it leaves `Ended`, and reaching the
+        // end of the playlist clears the intent.
         OutputPhase::Ended if playback_intent => Some(Duration::from_millis(20)),
         _ => None,
     }
@@ -294,6 +309,10 @@ impl PlayerApp {
             figure: scene3d::figure::Figure::default(),
             scene_mesh: scene3d::mesh::MeshBuilder::default(),
             scene_renderer_ready,
+            // Assume the window is showing until a `logic` without a `ui`
+            // proves otherwise. Guessing the other way would stand the scene
+            // down for whoever is already looking at it.
+            stage_drawn: true,
         }
     }
 
@@ -542,7 +561,7 @@ impl PlayerApp {
         clippy::too_many_lines,
         reason = "output synchronization keeps decode, device, renderer, and UI revisions atomic"
     )]
-    fn sync_output(&mut self, context: &egui::Context) {
+    fn sync_output(&mut self, context: &egui::Context, showing: bool) {
         let request_id = self.decoder.request_id();
         let playback_epoch = self.decoder.playback_epoch();
         let master_gain = if self.muted { 0.0 } else { self.volume };
@@ -770,9 +789,11 @@ impl PlayerApp {
             let scaled = u16::try_from(scaled).unwrap_or(u16::MAX);
             self.timeline_preview = f32::from(scaled) / 10_000.0;
         }
-        if let Some(delay) =
-            output_repaint_delay(self.output.snapshot().phase(), self.playback_intent)
-        {
+        if let Some(delay) = output_repaint_delay(
+            self.output.snapshot().phase(),
+            self.playback_intent,
+            showing,
+        ) {
             context.request_repaint_after(delay);
         }
         #[cfg(target_os = "windows")]
@@ -1955,12 +1976,23 @@ impl eframe::App for PlayerApp {
     /// eframe calls this immediately before every `ui` as well, so the visible
     /// path keeps the order it always had.
     fn logic(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
+        // eframe calls `logic` immediately before every `ui`, and *only* `logic`
+        // while the window is hidden, so what the flag carries into this call is
+        // exactly "was anything drawn since the last one". Reading it beats
+        // re-deriving visibility from `ViewportInfo`: the rule that actually
+        // decides whether a pass runs is eframe's own, and copying it here would
+        // leave two versions to drift apart.
+        let showing = std::mem::take(&mut self.stage_drawn);
+        // The render callback weighs this against walking the whole Scene FIFO
+        // every 40 ms for a path ahead that, hidden, nobody can see.
+        self.output.scene_view().set_observed(showing);
         self.sync_inspection(context);
         self.sync_decoder(context);
-        self.sync_output(context);
+        self.sync_output(context, showing);
     }
 
     fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.stage_drawn = true;
         let context = root.ctx().clone();
         // Deliberately not in `logic`: while the window is hidden the input is
         // frozen at the last shown pass, so re-reading the drop list there would
@@ -2602,24 +2634,48 @@ mod tests {
         // it. Returning None in a state that still has work to do is what left a
         // minimized player stopped at the end of a track.
         assert_eq!(
-            output_repaint_delay(OutputPhase::Playing, true),
+            output_repaint_delay(OutputPhase::Playing, true, true),
             Some(Duration::from_millis(16))
         );
         assert_eq!(
-            output_repaint_delay(OutputPhase::Initializing, true),
+            output_repaint_delay(OutputPhase::Initializing, true, true),
             Some(Duration::from_millis(50))
         );
         assert!(
-            output_repaint_delay(OutputPhase::Ended, true).is_some(),
+            output_repaint_delay(OutputPhase::Ended, true, true).is_some(),
             "an item ended with more to play and nothing would drive the hand-off"
         );
         assert_eq!(
-            output_repaint_delay(OutputPhase::Ended, false),
+            output_repaint_delay(OutputPhase::Ended, false, true),
             None,
             "a finished playlist must settle instead of polling forever"
         );
-        assert_eq!(output_repaint_delay(OutputPhase::Paused, true), None);
-        assert_eq!(output_repaint_delay(OutputPhase::Ready, true), None);
+        assert_eq!(output_repaint_delay(OutputPhase::Paused, true, true), None);
+        assert_eq!(output_repaint_delay(OutputPhase::Ready, true, true), None);
+    }
+
+    #[test]
+    fn a_hidden_player_slows_down_without_dropping_the_hand_off() {
+        // Motion only needs a frame rate when there is a frame. What must not
+        // slow down is the one thing a listener notices with the window away:
+        // the gap between one item and the next.
+        let showing = output_repaint_delay(OutputPhase::Playing, true, true);
+        let hidden = output_repaint_delay(OutputPhase::Playing, true, false);
+        assert!(
+            hidden > showing,
+            "hidden playback still asks for a frame rate: {hidden:?}"
+        );
+
+        assert_eq!(
+            output_repaint_delay(OutputPhase::Ended, true, false),
+            output_repaint_delay(OutputPhase::Ended, true, true),
+            "the playlist hand-off must not slow down just because nobody looks"
+        );
+        assert_eq!(
+            output_repaint_delay(OutputPhase::Ended, false, false),
+            None,
+            "a finished playlist must settle whether or not it is on screen"
+        );
     }
 
     #[test]

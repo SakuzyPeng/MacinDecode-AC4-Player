@@ -156,6 +156,46 @@ pub(super) fn lfe_render_state(state: Option<SpatialObjectState>) -> (bool, f32)
     )
 }
 
+/// What one quantum owes the scene view's path ahead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FuturePathTick {
+    /// Walk the FIFO and publish the result.
+    Rebuild,
+    /// Nobody is drawing the scene. Publish one empty path, then stop walking.
+    Suspend,
+    /// Nothing to do: not due yet, or already suspended.
+    Idle,
+}
+
+/// Decide what the render callback owes the path ahead this quantum.
+///
+/// Split out of `backend::source` because the part that is easy to get wrong is
+/// not the walk but the edge: the empty path has to be published **exactly
+/// once** when the window goes away. Publishing it every quantum would keep the
+/// cost this is meant to remove, and never publishing it would leave the mirror
+/// holding a line that described the buffer minutes ago, which flashes on screen
+/// the moment the window comes back.
+///
+/// Suspending does not wait for the throttle. Clearing a stale path is cheap and
+/// wants to happen promptly, and resuming deliberately skips the throttle too —
+/// the timeline has long since passed the due frame, so the path reappears on
+/// the first quantum after the window returns rather than up to an interval
+/// later.
+pub(super) const fn future_path_tick(due: bool, observed: bool, suspended: bool) -> FuturePathTick {
+    if !observed {
+        return if suspended {
+            FuturePathTick::Idle
+        } else {
+            FuturePathTick::Suspend
+        };
+    }
+    if due {
+        FuturePathTick::Rebuild
+    } else {
+        FuturePathTick::Idle
+    }
+}
+
 /// Whether an instant metadata update for `element_id` lands in
 /// `[from_offset, to_offset)` of `block`.
 ///
@@ -441,6 +481,35 @@ mod tests {
 
         let inactive = SpatialObjectState::new(false, None, Some(0.8), true);
         assert_eq!(lfe_render_state(Some(inactive)), (false, 0.8));
+    }
+
+    #[test]
+    fn an_unobserved_scene_clears_its_path_once_and_then_stops_walking() {
+        // The FIFO walk is the largest thing the scene view asks of the audio
+        // thread, and while the window is hidden every bit of it is for a
+        // picture nobody sees.
+        assert_eq!(
+            future_path_tick(false, false, false),
+            FuturePathTick::Suspend,
+            "suspending must not wait for the throttle: the stale path goes now"
+        );
+        assert_eq!(
+            future_path_tick(true, false, true),
+            FuturePathTick::Idle,
+            "the empty path must be published once, not every quantum"
+        );
+        assert_eq!(future_path_tick(false, false, true), FuturePathTick::Idle);
+    }
+
+    #[test]
+    fn an_observed_scene_walks_the_fifo_on_the_interval() {
+        assert_eq!(future_path_tick(true, true, false), FuturePathTick::Rebuild);
+        assert_eq!(future_path_tick(false, true, false), FuturePathTick::Idle);
+        assert_eq!(
+            future_path_tick(true, true, true),
+            FuturePathTick::Rebuild,
+            "coming back has to resume the walk, not stay suspended"
+        );
     }
 
     #[test]

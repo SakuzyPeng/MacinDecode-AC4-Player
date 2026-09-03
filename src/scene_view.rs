@@ -25,6 +25,7 @@
 //! itself uses, so the view can never show PCM positions from a playback the
 //! stream has already moved past.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, PoisonError};
 
 use crate::decoder::PlaybackKey;
@@ -356,15 +357,56 @@ impl FuturePath {
 
 /// The shared handle. `SpatialOutputController` owns it, the render source
 /// writes it, the UI reads it.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SceneViewMirror {
     frame: Mutex<SceneViewFrame>,
+    /// Whether anything is drawing the scene.
+    ///
+    /// The render callback reads this to decide whether the FIFO walk behind the
+    /// path ahead is worth doing at all. While the window is hidden eframe runs
+    /// no egui pass, so nothing reads the mirror — and that walk is by far the
+    /// largest thing this module asks of the audio thread, entirely on behalf of
+    /// a picture nobody is looking at.
+    ///
+    /// `Relaxed` on both sides: it is a hint, and acting on it a quantum early
+    /// or a quantum late costs nothing either way.
+    observed: AtomicBool,
+}
+
+impl Default for SceneViewMirror {
+    fn default() -> Self {
+        Self {
+            frame: Mutex::new(SceneViewFrame::default()),
+            // A mirror nobody has said anything about is assumed to be watched.
+            // Guessing the other way would leave the scene blank for whoever is
+            // already looking at it.
+            observed: AtomicBool::new(true),
+        }
+    }
 }
 
 impl SceneViewMirror {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Tell the render callback whether the scene is being drawn. UI thread.
+    pub fn set_observed(&self, observed: bool) {
+        self.observed.store(observed, Ordering::Relaxed);
+    }
+
+    /// Whether the scene is being drawn. Audio thread.
+    #[cfg_attr(
+        not(target_os = "windows"),
+        allow(
+            dead_code,
+            reason = "only the Windows render callback weighs this against its own work"
+        )
+    )]
+    #[must_use]
+    pub fn is_observed(&self) -> bool {
+        self.observed.load(Ordering::Relaxed)
     }
 
     /// Publish the objects one render quantum resolved. Audio thread only.
@@ -532,6 +574,20 @@ mod tests {
     /// Publish one quantum's worth of objects at a presentation position.
     fn write_at(mirror: &SceneViewMirror, key: PlaybackKey, frame: i64, objects: &[ObjectView]) {
         mirror.write(key, objects.iter().copied(), frame, RATE);
+    }
+
+    #[test]
+    fn a_fresh_mirror_is_observed_until_told_otherwise() {
+        // Inverted, this would silently stand the scene down for whoever is
+        // already looking at it — a blank stage rather than a slow one, and
+        // nothing in the picture would say why.
+        let mirror = SceneViewMirror::new();
+        assert!(mirror.is_observed());
+
+        mirror.set_observed(false);
+        assert!(!mirror.is_observed());
+        mirror.set_observed(true);
+        assert!(mirror.is_observed());
     }
 
     #[test]
