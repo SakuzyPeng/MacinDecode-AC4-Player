@@ -207,8 +207,8 @@ fn add_floor_grid(mesh: &mut MeshBuilder, view: &ViewContext) {
     }
 }
 
-/// One dynamic object: a solid cube, a hairline drop line to the floor, and the
-/// footprint that drop line lands on.
+/// One dynamic object: a solid cube, the gain halo around it, a hairline drop
+/// line to the floor, and the footprint that drop line lands on.
 ///
 /// The drop line and footprint are not decoration. In an orthographic view an
 /// airborne cube's height and depth are ambiguous, and at an axis-aligned angle
@@ -221,10 +221,12 @@ fn add_object(
 ) {
     let [x, y, z] = object_world_position(object.position);
     let edge = params::OBJECT_EDGE;
-    mesh.add_box([x, y, z], [edge; 3], object_colour(object, view), view);
+    let colour = object_colour(object, view);
+    mesh.add_box([x, y, z], [edge; 3], colour, view);
     if show_label {
         add_box_number(mesh, object.display_number, [x, y, z], [edge; 3], view);
     }
+    add_gain_halo(mesh, [x, y, z], colour, object.gain, view);
 
     let drop = Rgb::from_color32(theme::MUTED).lerp(Rgb::from_color32(theme::BORDER), 0.35);
     mesh.add_line(
@@ -397,6 +399,51 @@ fn object_colour(object: &SceneObject<'_>, view: &ViewContext) -> Rgb {
     } else {
         accent.lerp(view.stage, params::OBJECT_SILENT_FADE)
     }
+}
+
+/// The halo's extent for a gain, as a multiple of [`params::OBJECT_EDGE`].
+///
+/// Read in decibels between [`params::OBJECT_SILENT_GAIN`] and unity, because a
+/// linear reading crushes the lower thirty decibels flat against the floor.
+/// Sharing that floor with [`object_colour`] is what keeps the halo bottoming
+/// out and the cube fading to its silent colour at the same gain.
+///
+/// Both degenerate inputs land on the floor rather than in the geometry: zero
+/// takes `log10` to negative infinity and clamps, and a NaN is absorbed by
+/// `max`, which returns whichever operand is not NaN.
+fn halo_scale(gain: f32) -> f32 {
+    let quiet = (gain.max(0.0).log10() / params::OBJECT_SILENT_GAIN.log10()).clamp(0.0, 1.0);
+    params::HALO_MAX_SCALE + (params::HALO_MIN_SCALE - params::HALO_MAX_SCALE) * quiet
+}
+
+/// Gain, as an outline around the cube rather than as the cube's own size.
+///
+/// Until now gain had only two states — accent above the silence floor, faded
+/// below it — so -35 dB and 0 dB drew identically, and gain is the second thing
+/// an object carries. The cube has to keep its fixed size: it is the reference
+/// the halo is measured against, and the scene number printed on its faces
+/// needs a stable one to stay readable.
+///
+/// Only the outline is drawn, and that is correctness rather than taste. Under
+/// the orthographic projection a concentric box projects to the cube's own
+/// projection scaled about the same centre, so a full wire box would lay its
+/// near-corner edges straight across the three visible number faces. The
+/// outline is the boundary of that projection, so it cannot.
+fn add_gain_halo(
+    mesh: &mut MeshBuilder,
+    centre: [f32; 3],
+    colour: Rgb,
+    gain: f32,
+    view: &ViewContext,
+) {
+    let edge = params::OBJECT_EDGE * halo_scale(gain);
+    mesh.add_silhouette_box(
+        centre,
+        [edge; 3],
+        colour,
+        params::HAIRLINE_POINTS * 0.7,
+        view,
+    );
 }
 
 /// The object's recent path, as discrete marks at a fixed time interval.
@@ -575,6 +622,13 @@ mod tests {
         }
     }
 
+    fn sounding_at_gain(gain: f32) -> SceneObject<'static> {
+        SceneObject {
+            gain,
+            ..sounding([0.3, 0.4, -0.2])
+        }
+    }
+
     fn built(objects: &[SceneObject]) -> MeshBuilder {
         with_input(SceneInput {
             objects,
@@ -683,13 +737,99 @@ mod tests {
     }
 
     #[test]
-    fn every_object_brings_a_cube_a_drop_line_and_a_footprint() {
+    fn every_object_brings_a_cube_a_halo_a_drop_line_and_a_footprint() {
         let empty = built(&[]);
         let one = built(&[sounding([0.3, 0.4, -0.2])]);
 
         assert_eq!(one.solid.len() - empty.solid.len(), 6 * 6, "six cube faces");
-        assert_eq!(one.line.len() - empty.line.len(), 6, "one drop line");
+        assert_eq!(
+            one.line.len() - empty.line.len(),
+            (1 + 6) * 6,
+            "one drop line and the halo's six outline edges"
+        );
         assert_eq!(one.decal.len() - empty.decal.len(), 6, "one footprint");
+    }
+
+    #[test]
+    fn the_halo_grows_with_gain_between_the_silence_floor_and_unity() {
+        assert!(
+            (halo_scale(1.0) - params::HALO_MAX_SCALE).abs() < 1e-6,
+            "unity gain must reach the full extent"
+        );
+        assert!(
+            (halo_scale(params::OBJECT_SILENT_GAIN) - params::HALO_MIN_SCALE).abs() < 1e-5,
+            "the silence floor must sit at the minimum extent"
+        );
+        assert!(
+            (halo_scale(4.0) - params::HALO_MAX_SCALE).abs() < 1e-6,
+            "gain past unity clamps rather than growing into the neighbours"
+        );
+
+        let mut previous = halo_scale(params::OBJECT_SILENT_GAIN);
+        for step in 1_u8..=32 {
+            let gain = params::OBJECT_SILENT_GAIN.powf(1.0 - f32::from(step) / 32.0);
+            let scale = halo_scale(gain);
+            assert!(scale >= previous, "not monotonic at gain {gain}: {scale}");
+            previous = scale;
+        }
+
+        // Read in decibels, not in linear gain: half way up the decibel range
+        // lands half way up the extent, where a linear reading would still be
+        // pinned against the floor.
+        let midpoint = params::OBJECT_SILENT_GAIN.sqrt();
+        let expected = f32::midpoint(params::HALO_MIN_SCALE, params::HALO_MAX_SCALE);
+        assert!(
+            (halo_scale(midpoint) - expected).abs() < 1e-5,
+            "-18 dB should sit mid-extent, got {}",
+            halo_scale(midpoint)
+        );
+    }
+
+    /// The halo and the cube's colour read the same threshold, so they can never
+    /// disagree about where silence begins. Written as a test because the two
+    /// live in different functions and would otherwise be free to drift.
+    #[test]
+    fn the_halo_bottoms_out_exactly_where_the_cube_fades_to_silent() {
+        let view = ViewContext {
+            direction: [0.4, 0.3, 0.866],
+            degeneracy: 0.0,
+            world_units_per_point: 0.001,
+            ink: Rgb::from_color32(theme::INK),
+            stage: Rgb::from_color32(theme::STAGE),
+        };
+        let accent = Rgb::from_color32(theme::ACCENT);
+        let floor = params::OBJECT_SILENT_GAIN;
+
+        assert_eq!(object_colour(&sounding_at_gain(floor), &view), accent);
+        assert!(
+            (halo_scale(floor) - params::HALO_MIN_SCALE).abs() < 1e-5,
+            "the last audible gain is also the smallest halo"
+        );
+
+        let below = floor * 0.99;
+        assert_ne!(
+            object_colour(&sounding_at_gain(below), &view),
+            accent,
+            "just under the floor the cube must already read as silent"
+        );
+        assert!(
+            (halo_scale(below) - params::HALO_MIN_SCALE).abs() < 1e-5,
+            "and the halo must already be at its minimum, not still shrinking"
+        );
+    }
+
+    /// Neither degenerate gain may reach the geometry: a NaN extent would
+    /// produce NaN vertices, which survive all the way to the vertex buffer.
+    #[test]
+    fn a_zero_or_missing_gain_lands_on_the_floor_rather_than_in_the_geometry() {
+        for gain in [0.0, -1.0, f32::NAN, f32::NEG_INFINITY] {
+            let scale = halo_scale(gain);
+            assert!(scale.is_finite(), "gain {gain} produced {scale}");
+            assert!(
+                (scale - params::HALO_MIN_SCALE).abs() < 1e-5,
+                "gain {gain} should read as silent, got {scale}"
+            );
+        }
     }
 
     #[test]

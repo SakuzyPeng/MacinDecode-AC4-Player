@@ -95,6 +95,25 @@ pub const OBJECT_SILENT_GAIN: f32 = 0.015_848_932;
 /// way a distant one does instead of introducing a second visual language.
 pub const OBJECT_SILENT_FADE: f32 = 0.55;
 
+/// Gain halo extent, as a multiple of [`OBJECT_EDGE`]. The cube itself stays a
+/// fixed size — it is the reference frame the halo is read against, and the
+/// scene number printed on its faces needs a stable size to stay legible — so
+/// gain rides on the outline around it instead.
+///
+/// The scale is read in decibels, not in linear gain: a linear map crushes the
+/// whole lower thirty decibels against the floor, where most of the interesting
+/// range lives.
+///
+/// **The floor is [`OBJECT_SILENT_GAIN`], deliberately not a second constant.**
+/// The mockup's table listed a `-36 dB` halo floor, which is the same number
+/// this already is. Sharing it means the halo bottoming out and the cube fading
+/// to its silent colour happen at exactly the same gain by construction — one
+/// threshold, two channels, and no way for them to drift apart later.
+pub const HALO_MIN_SCALE: f32 = 1.25;
+/// Halo extent at unity gain and above. Gains past unity clamp here rather than
+/// growing without bound into the neighbouring objects.
+pub const HALO_MAX_SCALE: f32 = 2.40;
+
 /// Trail breadcrumbs kept per object, and how far apart in time they are taken.
 /// Forty at forty milliseconds is 1.6 seconds of history.
 ///

@@ -321,6 +321,47 @@ impl MeshBuilder {
         self.add_line(layer, tip, sub(back, side), colour, spec.width_points, view);
     }
 
+    /// The outline of an axis-aligned box: the six edges where a front-facing
+    /// side meets a back-facing one, or four at an axis-aligned view.
+    ///
+    /// Unlike [`Self::add_wire_box`] this is exactly the boundary of the box's
+    /// projection, so drawn around a concentric smaller box it is guaranteed to
+    /// enclose that box and never cross it. A full wire box cannot promise
+    /// that: its near corner projects close to the centre of the inner box's
+    /// silhouette and the three edges meeting there run straight across the
+    /// faces — which is where an object's scene number is printed.
+    pub fn add_silhouette_box(
+        &mut self,
+        centre: [f32; 3],
+        size: [f32; 3],
+        colour: Rgb,
+        width_points: f32,
+        view: &ViewContext,
+    ) {
+        for axis in 0..3 {
+            let (across, along) = ((axis + 1) % 3, (axis + 2) % 3);
+            for (side, end) in [(-1.0, -1.0), (-1.0, 1.0), (1.0, -1.0), (1.0, 1.0)] {
+                // An edge is on the outline when exactly one of the two faces
+                // meeting there is turned toward the eye. Exactly edge-on
+                // (`dot == 0`) counts as turned away, which is what leaves an
+                // axis-aligned view with the four edges bounding its single
+                // visible face rather than with nothing drawn at all.
+                let facing: f32 = side * view.direction[across];
+                let ending: f32 = end * view.direction[along];
+                if (facing > 0.0) == (ending > 0.0) {
+                    continue;
+                }
+                let mut from = centre;
+                from[across] += side * size[across] / 2.0;
+                from[along] += end * size[along] / 2.0;
+                let mut to = from;
+                from[axis] -= size[axis] / 2.0;
+                to[axis] += size[axis] / 2.0;
+                self.add_line(Layer::Line, from, to, colour, width_points, view);
+            }
+        }
+    }
+
     /// The twelve edges of an axis-aligned box, as hairlines.
     pub fn add_wire_box(
         &mut self,
@@ -488,6 +529,83 @@ mod tests {
                 outward > 0.0,
                 "winding faces inward for a face at {a:?} (normal {normal:?})"
             );
+        }
+    }
+
+    /// The rule that picks outline edges has one failure mode worth a test of
+    /// its own: written as a sign product rather than as this exclusive-or, an
+    /// exactly axis-aligned direction multiplies by a zero component, satisfies
+    /// nothing, and silently draws no outline at all — at the TOP, BACK and SIDE
+    /// presets, which are buttons the user can press.
+    #[test]
+    fn a_boxs_outline_is_six_edges_generally_and_four_down_an_axis_but_never_none() {
+        let colour = Rgb::from_color32(Color32::from_rgb(206, 122, 59));
+        for (direction, edges, what) in [
+            ([0.577, 0.577, 0.577], 6, "isometric"),
+            ([0.0, 0.0, 1.0], 4, "straight down the Z axis"),
+            ([0.0, 1.0, 0.0], 4, "straight down at the floor"),
+            ([1.0, 0.0, 0.0], 4, "straight along the X axis"),
+            ([0.0, -0.707, 0.707], 6, "perpendicular to one axis only"),
+        ] {
+            let mut mesh = MeshBuilder::default();
+            mesh.add_silhouette_box(
+                [0.0, 0.0, 0.0],
+                [2.0; 3],
+                colour,
+                1.0,
+                &view(direction, 0.01),
+            );
+            assert_eq!(
+                mesh.line.len(),
+                edges * 6,
+                "{what}: expected {edges} outline edges"
+            );
+        }
+    }
+
+    /// Why the halo draws an outline instead of a wire box, as a property.
+    ///
+    /// The projection is affine, so a concentric box scaled by `k` projects to
+    /// the inner box's projection scaled by `k` about the same centre — and a
+    /// convex region scaled about an interior point strictly contains itself.
+    /// The outline is that projection's boundary, so it encloses the cube and
+    /// can never cross the scene number printed on its faces. A wire box has no
+    /// such guarantee: its near-corner edges are interior to the projection.
+    #[test]
+    fn a_larger_concentric_outline_is_the_smaller_one_scaled_about_the_centre() {
+        let colour = Rgb::from_color32(Color32::from_rgb(206, 122, 59));
+        let centre = [0.3, -0.2, 0.1];
+        let scale = 2.4;
+
+        let mut inner = MeshBuilder::default();
+        let mut outer = MeshBuilder::default();
+        let context = view([0.4, 0.3, 0.866], 0.01);
+        inner.add_silhouette_box(centre, [0.11; 3], colour, 1.0, &context);
+        outer.add_silhouette_box(centre, [0.11 * scale; 3], colour, 1.0, &context);
+
+        assert_eq!(
+            inner.line.len(),
+            outer.line.len(),
+            "the same faces are turned toward the eye, so the same edges are chosen"
+        );
+        assert!(!inner.line.is_empty(), "the fixture must actually draw");
+        // Per-edge midpoints rather than raw vertices: a hairline is expanded
+        // into a quad of a fixed screen width, and that width is the same for
+        // both boxes rather than scaled with them. The six vertices of each
+        // quad average back to the edge's midpoint, which cancels it.
+        for (small, large) in inner.line.chunks(6).zip(outer.line.chunks(6)) {
+            let midpoint = |quad: &[Vertex], axis: usize| {
+                quad.iter().map(|vertex| vertex.position[axis]).sum::<f32>() / 6.0
+            };
+            for axis in 0..3 {
+                let want = (midpoint(small, axis) - centre[axis]).mul_add(scale, centre[axis]);
+                assert!(
+                    (midpoint(large, axis) - want).abs() < 1e-5,
+                    "outline edge at {:?} is not {scale}x {:?} about {centre:?}",
+                    midpoint(large, axis),
+                    midpoint(small, axis)
+                );
+            }
         }
     }
 
