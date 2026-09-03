@@ -9,6 +9,7 @@
 //! hit-testing; deriving either side separately guarantees they drift.
 
 use eframe::egui::{Pos2, Rect};
+use serde::{Deserialize, Serialize};
 
 use super::params;
 
@@ -16,7 +17,7 @@ use super::params;
 pub type Matrix4 = [f32; 16];
 
 /// Projection used to inspect the same listener-relative scene.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum ProjectionMode {
     #[default]
     Orthographic,
@@ -115,7 +116,85 @@ impl Default for Camera {
     }
 }
 
+/// The part of the view worth surviving a restart.
+///
+/// A separate snapshot rather than serde on [`Camera`] itself, for two
+/// reasons. A preset easing is per-session state that has no business on disk.
+/// And a value read back has to pass through the same limits the live controls
+/// enforce: `eframe`'s store is a plain JSON file, so it can be stale from an
+/// older build or edited by hand, and [`Camera::from_state`] therefore treats
+/// every field as untrusted rather than as something [`Camera::state`] wrote.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct CameraState {
+    azimuth_degrees: f32,
+    elevation_degrees: f32,
+    ortho_height: f32,
+    target: [f32; 3],
+    projection_mode: ProjectionMode,
+}
+
 impl Camera {
+    /// Rebuild a camera from a persisted snapshot, forcing every value back
+    /// inside the range the live controls hold it to.
+    ///
+    /// The clamping is load-bearing, not defensive politeness. A non-finite
+    /// elevation would carry NaN through the view matrix into every vertex in
+    /// the scene, and an `ortho_height` of zero would collapse the projection
+    /// outright. Neither is reachable by dragging; both are one hand-edit away
+    /// in the store.
+    #[must_use]
+    pub fn from_state(state: CameraState) -> Self {
+        Self {
+            // Azimuth wraps rather than clamps, exactly as `orbit` does.
+            azimuth_degrees: if state.azimuth_degrees.is_finite() {
+                wrap_degrees(state.azimuth_degrees)
+            } else {
+                params::ISO_AZIMUTH_DEGREES
+            },
+            elevation_degrees: restored(
+                state.elevation_degrees,
+                -params::MAX_ELEVATION_DEGREES,
+                params::MAX_ELEVATION_DEGREES,
+                params::ISO_ELEVATION_DEGREES,
+            ),
+            ortho_height: restored(
+                state.ortho_height,
+                params::MIN_ORTHO_HEIGHT,
+                params::MAX_ORTHO_HEIGHT,
+                params::DEFAULT_ORTHO_HEIGHT,
+            ),
+            target: state
+                .target
+                .map(|axis| restored(axis, -params::MAX_PAN, params::MAX_PAN, 0.0)),
+            projection_mode: state.projection_mode,
+            animation: None,
+        }
+    }
+
+    /// The view worth writing to the store.
+    #[must_use]
+    pub fn state(&self) -> CameraState {
+        // A preset in flight is on its way somewhere the user asked for, so
+        // persist that destination rather than whichever frame of the ease the
+        // window happened to close on.
+        let (azimuth_degrees, elevation_degrees, ortho_height, target) = self.animation.map_or(
+            (
+                self.azimuth_degrees,
+                self.elevation_degrees,
+                self.ortho_height,
+                self.target,
+            ),
+            |animation| animation.to,
+        );
+        CameraState {
+            azimuth_degrees,
+            elevation_degrees,
+            ortho_height,
+            target,
+            projection_mode: self.projection_mode,
+        }
+    }
+
     #[must_use]
     pub fn azimuth_degrees(&self) -> f32 {
         self.azimuth_degrees
@@ -483,6 +562,19 @@ fn nearest(value: f32, candidates: &[f32]) -> (f32, f32) {
                 best
             }
         })
+}
+
+/// Bring one persisted scalar back inside `min..=max`.
+///
+/// The finite check has to come first: `f32::clamp` passes NaN straight
+/// through, which is the whole reason this is a function and not a `clamp`
+/// call at each field.
+fn restored(value: f32, min: f32, max: f32, fallback: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(min, max)
+    } else {
+        fallback
+    }
 }
 
 fn wrap_degrees(degrees: f32) -> f32 {
@@ -932,5 +1024,60 @@ mod tests {
         assert!((angle_delta(350.0, 10.0) - 20.0).abs() < 1e-4);
         assert!((angle_delta(10.0, 350.0) + 20.0).abs() < 1e-4);
         assert!((angle_delta(0.0, 180.0).abs() - 180.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_worked_view_survives_a_round_trip_through_the_store() {
+        let mut camera = Camera::default();
+        camera.orbit([-140.0, 55.0]);
+        camera.zoom(-260.0);
+        camera.pan([48.0, -22.0], VIEWPORT.height());
+        camera.toggle_projection();
+
+        let encoded = serde_json::to_string(&camera.state()).expect("serialize camera state");
+        let decoded: CameraState =
+            serde_json::from_str(&encoded).expect("deserialize camera state");
+        let reopened = Camera::from_state(decoded);
+
+        assert_eq!(reopened, camera, "the stored view came back changed");
+    }
+
+    #[test]
+    fn a_corrupt_stored_view_lands_inside_the_live_limits() {
+        // Nothing here is reachable by dragging; all of it is one hand-edit
+        // away in the JSON, and NaN in particular survives `f32::clamp`.
+        let camera = Camera::from_state(CameraState {
+            azimuth_degrees: f32::NAN,
+            elevation_degrees: 9000.0,
+            ortho_height: 0.0,
+            target: [f32::INFINITY, -1e30, f32::NAN],
+            projection_mode: ProjectionMode::Perspective,
+        });
+
+        assert!((camera.azimuth_degrees() - params::ISO_AZIMUTH_DEGREES).abs() < 1e-4);
+        assert!((camera.elevation_degrees() - params::MAX_ELEVATION_DEGREES).abs() < 1e-4);
+        assert!((camera.ortho_height() - params::MIN_ORTHO_HEIGHT).abs() < 1e-4);
+        assert_eq!(camera.projection_mode(), ProjectionMode::Perspective);
+
+        // The whole point of the clamp is that no NaN reaches the vertices.
+        for value in camera.view_projection(VIEWPORT.aspect_ratio()) {
+            assert!(value.is_finite(), "a stored NaN reached the view matrix");
+        }
+    }
+
+    #[test]
+    fn a_view_saved_mid_preset_stores_where_it_was_heading() {
+        // Quitting during the 220 ms ease should not freeze the camera on an
+        // arbitrary frame of a transition the user already asked to end.
+        let aspect = VIEWPORT.aspect_ratio();
+        let mut interrupted = Camera::default();
+        interrupted.apply_preset(Preset::Top, aspect);
+        assert!(interrupted.advance(0.02), "the preset ease ended too early");
+
+        let mut settled = Camera::default();
+        settled.apply_preset(Preset::Top, aspect);
+        while settled.advance(0.02) {}
+
+        assert_eq!(Camera::from_state(interrupted.state()), settled);
     }
 }

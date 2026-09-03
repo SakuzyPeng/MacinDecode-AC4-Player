@@ -63,6 +63,7 @@ pub struct PlayerApp {
 }
 
 const OUTPUT_DEVICE_STORAGE_KEY: &str = "preferred-output-device-v1";
+const SCENE_CAMERA_STORAGE_KEY: &str = "scene-camera-v1";
 
 /// Visible dynamic-object numbers describe the fixed scene slots, not Core's
 /// lifetime-stable element IDs. LFE owns zero separately, so the dynamic range
@@ -288,6 +289,15 @@ impl PlayerApp {
             .unwrap_or_default();
         let mut output = SpatialOutputController::new();
         output.set_preferred_device(preferred_device);
+        // A view angle is something the user worked to find; losing it on every
+        // restart is a small tax on the whole point of a free camera.
+        let camera = creation_context
+            .storage
+            .and_then(|storage| eframe::get_value(storage, SCENE_CAMERA_STORAGE_KEY))
+            .map_or_else(
+                scene3d::camera::Camera::default,
+                scene3d::camera::Camera::from_state,
+            );
         let scene_renderer_ready = creation_context
             .wgpu_render_state
             .as_ref()
@@ -315,7 +325,7 @@ impl PlayerApp {
             muted: false,
             bitstream_details_open: false,
             diagnostics_open: false,
-            camera: scene3d::camera::Camera::default(),
+            camera,
             object_numbers_visible: true,
             figure: scene3d::figure::Figure::default(),
             scene_mesh: scene3d::mesh::MeshBuilder::default(),
@@ -2053,6 +2063,7 @@ impl eframe::App for PlayerApp {
             OUTPUT_DEVICE_STORAGE_KEY,
             self.output.preferred_device(),
         );
+        eframe::set_value(storage, SCENE_CAMERA_STORAGE_KEY, &self.camera.state());
     }
 }
 
