@@ -222,6 +222,30 @@ fn should_handle_completed_item(
     output_phase == OutputPhase::Ended && playback_intent && output_matches_decoder
 }
 
+/// How soon the next pass has to run, given what the output is doing.
+///
+/// This is not only a smoothness knob. While the window is minimized or hidden,
+/// eframe runs no egui pass at all and drives [`eframe::App::logic`] instead, so
+/// what this returns is the only thing keeping a backgrounded player moving
+/// through its playlist — nothing else asks for the pass that would notice the
+/// current item ended.
+const fn output_repaint_delay(phase: OutputPhase, playback_intent: bool) -> Option<Duration> {
+    match phase {
+        // Objects move while playing, and the stage now shows them, so the
+        // repaint has to keep up with motion rather than with a text label:
+        // 50 ms was invisible under a phase message and is a visible stutter
+        // under a travelling object.
+        OutputPhase::Playing => Some(Duration::from_millis(16)),
+        OutputPhase::Initializing => Some(Duration::from_millis(50)),
+        // The item finished and the next one is still being opened. Poll until
+        // the hand-off lands, rather than leaving a second of silence between
+        // tracks. This is self-limiting: completing the hand-off leaves `Ended`,
+        // and reaching the end of the playlist clears the intent.
+        OutputPhase::Ended if playback_intent => Some(Duration::from_millis(20)),
+        _ => None,
+    }
+}
+
 const fn should_replay_current_on_completion(mode: PlaybackMode, item_count: usize) -> bool {
     match mode {
         PlaybackMode::RepeatOne => true,
@@ -746,14 +770,10 @@ impl PlayerApp {
             let scaled = u16::try_from(scaled).unwrap_or(u16::MAX);
             self.timeline_preview = f32::from(scaled) / 10_000.0;
         }
-        match self.output.snapshot().phase() {
-            // Objects move while playing, and the stage now shows them, so the
-            // repaint has to keep up with motion rather than with a text label:
-            // 50 ms was invisible under a phase message and is a visible stutter
-            // under a travelling object.
-            OutputPhase::Playing => context.request_repaint_after(Duration::from_millis(16)),
-            OutputPhase::Initializing => context.request_repaint_after(Duration::from_millis(50)),
-            _ => {}
+        if let Some(delay) =
+            output_repaint_delay(self.output.snapshot().phase(), self.playback_intent)
+        {
+            context.request_repaint_after(delay);
         }
         #[cfg(target_os = "windows")]
         context.request_repaint_after(Duration::from_secs(2));
@@ -785,6 +805,9 @@ impl PlayerApp {
         });
         if !paths.is_empty() {
             self.append_sources(paths);
+            // The synchronisation that opens the file runs in `logic`, which is
+            // the pass after this one. Nothing else would ask for it.
+            context.request_repaint();
         }
     }
 
@@ -1917,12 +1940,30 @@ fn speaker_button(ui: &mut egui::Ui, muted: bool, volume: f32) -> egui::Response
 }
 
 impl eframe::App for PlayerApp {
+    /// The half of the frame that has to keep running with nothing on screen.
+    ///
+    /// eframe runs **no egui pass at all** while the window is minimized or
+    /// hidden — it calls this instead, precisely so that app logic keeps
+    /// ticking. With the synchronisation living in [`Self::ui`], a backgrounded
+    /// player reached the end of an item and simply stopped: nothing polled the
+    /// output, so nothing saw `Ended` and nothing advanced the playlist, and
+    /// because the repaint requests are issued from here too, nothing asked for
+    /// the pass that would have noticed. The window slept until it was restored.
+    ///
+    /// eframe calls this immediately before every `ui` as well, so the visible
+    /// path keeps the order it always had.
+    fn logic(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
+        self.sync_inspection(context);
+        self.sync_decoder(context);
+        self.sync_output(context);
+    }
+
     fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let context = root.ctx().clone();
+        // Deliberately not in `logic`: while the window is hidden the input is
+        // frozen at the last shown pass, so re-reading the drop list there would
+        // append the same files again on every tick.
         self.accept_dropped_files(&context);
-        self.sync_inspection(&context);
-        self.sync_decoder(&context);
-        self.sync_output(&context);
         self.draw_header(root);
         self.draw_source_sidebar(root);
         self.draw_transport(root);
@@ -2549,6 +2590,34 @@ mod tests {
             PlaybackMode::Sequential,
             1
         ));
+    }
+
+    #[test]
+    fn a_backgrounded_player_keeps_asking_for_the_passes_it_needs() {
+        // While the window is hidden these delays are the only thing that runs
+        // the player at all: eframe skips the egui pass entirely and drives
+        // `App::logic`, which is reached only because a previous pass asked for
+        // it. Returning None in a state that still has work to do is what left a
+        // minimized player stopped at the end of a track.
+        assert_eq!(
+            output_repaint_delay(OutputPhase::Playing, true),
+            Some(Duration::from_millis(16))
+        );
+        assert_eq!(
+            output_repaint_delay(OutputPhase::Initializing, true),
+            Some(Duration::from_millis(50))
+        );
+        assert!(
+            output_repaint_delay(OutputPhase::Ended, true).is_some(),
+            "an item ended with more to play and nothing would drive the hand-off"
+        );
+        assert_eq!(
+            output_repaint_delay(OutputPhase::Ended, false),
+            None,
+            "a finished playlist must settle instead of polling forever"
+        );
+        assert_eq!(output_repaint_delay(OutputPhase::Paused, true), None);
+        assert_eq!(output_repaint_delay(OutputPhase::Ready, true), None);
     }
 
     #[test]
