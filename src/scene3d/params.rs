@@ -95,24 +95,37 @@ pub const OBJECT_SILENT_GAIN: f32 = 0.015_848_932;
 /// way a distant one does instead of introducing a second visual language.
 pub const OBJECT_SILENT_FADE: f32 = 0.55;
 
-/// Gain halo extent, as a multiple of [`OBJECT_EDGE`]. The cube itself stays a
-/// fixed size — it is the reference frame the halo is read against, and the
-/// scene number printed on its faces needs a stable size to stay legible — so
-/// gain rides on the outline around it instead.
+/// Footprint edge at the silence floor, as a multiple of [`OBJECT_EDGE`]. The
+/// footprint carries gain by growing, which is why it is not a fixed size.
+///
+/// Gain rides on the floor rather than on anything wrapped around the cube. An
+/// outline concentric with a solid box is the universal signature of a debug
+/// collision volume, and reads as one however faintly it is drawn — the problem
+/// is the shape, not the weight. The footprint is already there, is coplanar
+/// with the floor, and so can never cross a face or hide the scene number; a
+/// pool that widens under a louder object is the reading, and the floor grid is
+/// already the ruler it is measured against.
 ///
 /// The scale is read in decibels, not in linear gain: a linear map crushes the
 /// whole lower thirty decibels against the floor, where most of the interesting
 /// range lives.
 ///
 /// **The floor is [`OBJECT_SILENT_GAIN`], deliberately not a second constant.**
-/// The mockup's table listed a `-36 dB` halo floor, which is the same number
-/// this already is. Sharing it means the halo bottoming out and the cube fading
-/// to its silent colour happen at exactly the same gain by construction — one
-/// threshold, two channels, and no way for them to drift apart later.
-pub const HALO_MIN_SCALE: f32 = 1.25;
-/// Halo extent at unity gain and above. Gains past unity clamp here rather than
-/// growing without bound into the neighbouring objects.
-pub const HALO_MAX_SCALE: f32 = 2.40;
+/// The mockup's table listed a `-36 dB` gain floor, which is the same number
+/// this already is. Sharing it means the footprint bottoming out and the cube
+/// fading to its silent colour happen at exactly the same gain by construction
+/// — one threshold, two channels, and no way for them to drift apart later.
+///
+/// The minimum stays clearly visible: the footprint is also the depth cue that
+/// places an airborne object on the grid at a grazing view, so a silent object
+/// may not lose it. It is below `1.0` on purpose, which does mean a straight-down
+/// view hides any footprint narrower than the cube above it — reading gain is not
+/// what the TOP preset is for, the two-state colour still carries the coarse
+/// reading there, and keeping the quiet end small is what keeps the floor calm.
+pub const FOOTPRINT_MIN_SCALE: f32 = 0.45;
+/// Footprint edge at unity gain and above. Gains past unity clamp here rather
+/// than growing without bound across the neighbouring objects' floor.
+pub const FOOTPRINT_MAX_SCALE: f32 = 1.60;
 
 /// Trail breadcrumbs kept per object, and how far apart in time they are taken.
 /// Forty at forty milliseconds is 1.6 seconds of history.
