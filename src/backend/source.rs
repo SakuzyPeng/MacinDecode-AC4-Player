@@ -12,7 +12,10 @@ use crate::scene_view::{
     FuturePath, MAX_VIEW_OBJECTS, ObjectView, SceneViewMirror, sample_interval_frames,
 };
 
-use super::state::{element_state_at, lfe_render_state, sample_future_path, windows_render_state};
+use super::state::{
+    FuturePathTick, element_state_at, future_path_tick, has_instant_update, lfe_render_state,
+    sample_future_path, windows_render_state,
+};
 
 pub(super) struct SceneRenderSource {
     reader: SceneQueueReader,

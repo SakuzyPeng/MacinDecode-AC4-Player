@@ -261,6 +261,25 @@ const fn output_repaint_delay(
     }
 }
 
+/// Replace the hidden-window cadence when the egui pass proves the window is
+/// visible again.
+///
+/// [`eframe::App::logic`] runs before [`eframe::App::ui`], so the first logic
+/// call after restoring a window can only know that the *previous* pass was
+/// hidden. Without this correction it schedules the next playing pass 250 ms
+/// away even though the UI is already back on screen.
+const fn restored_stage_repaint_delay(
+    was_observed: bool,
+    phase: OutputPhase,
+    playback_intent: bool,
+) -> Option<Duration> {
+    if was_observed {
+        None
+    } else {
+        output_repaint_delay(phase, playback_intent, true)
+    }
+}
+
 const fn should_replay_current_on_completion(mode: PlaybackMode, item_count: usize) -> bool {
     match mode {
         PlaybackMode::RepeatOne => true,
@@ -1992,8 +2011,22 @@ impl eframe::App for PlayerApp {
     }
 
     fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.stage_drawn = true;
         let context = root.ctx().clone();
+        // `logic` necessarily sees the previous pass: on the first pass after
+        // restoring a hidden window it therefore marks the scene unobserved and
+        // schedules the hidden 250 ms cadence. The fact that `ui` is running is
+        // authoritative evidence that the stage is visible now, so correct the
+        // mirror immediately and replace that cadence with the visible one.
+        let was_observed = self.output.scene_view().is_observed();
+        self.stage_drawn = true;
+        self.output.scene_view().set_observed(true);
+        if let Some(delay) = restored_stage_repaint_delay(
+            was_observed,
+            self.output.snapshot().phase(),
+            self.playback_intent,
+        ) {
+            context.request_repaint_after(delay);
+        }
         // Deliberately not in `logic`: while the window is hidden the input is
         // frozen at the last shown pass, so re-reading the drop list there would
         // append the same files again on every tick.
@@ -2675,6 +2708,20 @@ mod tests {
             output_repaint_delay(OutputPhase::Ended, false, false),
             None,
             "a finished playlist must settle whether or not it is on screen"
+        );
+    }
+
+    #[test]
+    fn a_restored_stage_immediately_replaces_the_hidden_cadence() {
+        assert_eq!(
+            restored_stage_repaint_delay(false, OutputPhase::Playing, true),
+            Some(Duration::from_millis(16)),
+            "the first visible pass must not leave the next one 250 ms away"
+        );
+        assert_eq!(
+            restored_stage_repaint_delay(true, OutputPhase::Playing, true),
+            None,
+            "ordinary visible passes already scheduled their own cadence"
         );
     }
 

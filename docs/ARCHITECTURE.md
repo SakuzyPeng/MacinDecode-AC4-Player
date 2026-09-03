@@ -159,6 +159,9 @@ GPU 提交自动全免——但音频线程上的 `publish_future_path` 不会�
 
 判定用「`ui` 跑过没有」而不是读 `ViewportInfo`：真正决定跑不跑 pass 的是 eframe 自己的 `show_ui`
 （`is_visible || 后代可见`），照着 `ViewportInfo` 再推一遍等于把它的规则抄第二份，它一改就漂。
+这个信号天然晚一个 pass：窗口恢复后的第一次 `logic` 仍只能看到上一轮没有 `ui`。所以恢复时 `ui`
+会立即把 `observed` 改回 true，并用可见窗口的延迟覆盖刚刚排下的 250 ms 隐藏节奏；未来路径从下一个
+audio quantum 恢复，下一帧仍按 16 ms 到来。
 
 同理，`output_repaint_delay` 在隐藏时把 `Playing` 从 16 ms 放到 250 ms——运动只在有帧的时候才需要
 帧率。**`Ended` + 有播放意图那条不看可见性**：曲目交接正是后台最需要保持及时的一条。
