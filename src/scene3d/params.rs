@@ -118,10 +118,15 @@ pub const OBJECT_SILENT_FADE: f32 = 0.55;
 ///
 /// The minimum stays clearly visible: the footprint is also the depth cue that
 /// places an airborne object on the grid at a grazing view, so a silent object
-/// may not lose it. It is below `1.0` on purpose, which does mean a straight-down
-/// view hides any footprint narrower than the cube above it — reading gain is not
-/// what the TOP preset is for, the two-state colour still carries the coarse
-/// reading there, and keeping the quiet end small is what keeps the floor calm.
+/// may not lose it.
+///
+/// Below `1.0` on purpose, and the one view where that costs anything has its own
+/// answer. An *orthographic* straight-down view projects a cube and the footprint
+/// directly beneath it onto the same place, so anything narrower than the cube is
+/// hidden — a property of the projection, not of this encoding. Perspective
+/// separates them by parallax, by more the further the object sits from the view
+/// axis, and the toolbar already toggles between the two. So the quiet end can
+/// stay small and the floor stays calm.
 pub const FOOTPRINT_MIN_SCALE: f32 = 0.45;
 /// Footprint edge at unity gain and above. Gains past unity clamp here rather
 /// than growing without bound across the neighbouring objects' floor.
