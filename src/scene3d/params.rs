@@ -74,6 +74,18 @@ pub const AIR_PERSPECTIVE_SPAN: f32 = 3.5;
 /// reference views.
 pub const OBJECT_EDGE: f32 = 0.11;
 
+/// Fraction of an object's face available to its element-ID label. The label
+/// scales down as the ID gains digits, but never spills over the cube edges.
+pub const OBJECT_LABEL_FACE_FILL: f32 = 0.72;
+
+/// Distance the label sits above the cube face, in world units. It is large
+/// enough to win the strict depth test without reading as detached lettering.
+pub const OBJECT_LABEL_SURFACE_OFFSET: f32 = 0.0015;
+
+/// Stroke width of the face label in screen points. Like every other annotation
+/// it stays legible while zooming rather than scaling into a heavy world line.
+pub const OBJECT_LABEL_STROKE_POINTS: f32 = 1.15;
+
 /// Linear gain below which a positioned object reads as present but silent.
 /// -36 dB, the floor the mockup settled on for gain-driven appearance.
 pub const OBJECT_SILENT_GAIN: f32 = 0.015_848_932;

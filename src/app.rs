@@ -44,6 +44,8 @@ pub struct PlayerApp {
     bitstream_details_open: bool,
     diagnostics_open: bool,
     camera: scene3d::camera::Camera,
+    /// Whether stable Scene element IDs are printed on every object face.
+    object_labels_visible: bool,
     /// Listener pose. Head tracking will drive the two angles; until then the
     /// listener faces the room's front.
     figure: scene3d::figure::Figure,
@@ -306,6 +308,7 @@ impl PlayerApp {
             bitstream_details_open: false,
             diagnostics_open: false,
             camera: scene3d::camera::Camera::default(),
+            object_labels_visible: true,
             figure: scene3d::figure::Figure::default(),
             scene_mesh: scene3d::mesh::MeshBuilder::default(),
             scene_renderer_ready,
@@ -1138,6 +1141,7 @@ impl PlayerApp {
             hidden_objects = mirrored.hidden_objects();
             for (slot, object) in mirrored.objects().iter().enumerate() {
                 objects[slot] = scene3d::scene::SceneObject {
+                    element_id: object.element_id,
                     position: object.position,
                     active: object.active,
                     gain: object.gain,
@@ -1171,6 +1175,7 @@ impl PlayerApp {
                     rect.height(),
                     scene3d::scene::SceneInput {
                         objects,
+                        show_object_labels: self.object_labels_visible,
                         // Not from the mirror: the presentation's LFE layout is
                         // known as soon as the decoder reports metrics, well
                         // before the render callback produces a first quantum,
@@ -1301,6 +1306,26 @@ impl PlayerApp {
                     .clicked()
                 {
                     self.camera.toggle_projection();
+                }
+                ui.add_space(4.0);
+
+                let labels_hint = if self.object_labels_visible {
+                    "Hide object element IDs"
+                } else {
+                    "Show object element IDs"
+                };
+                if ui
+                    .add_sized(
+                        [44.0, 26.0],
+                        egui::Button::new(
+                            RichText::new("IDs").size(10.0).strong().color(theme::MUTED),
+                        )
+                        .selected(self.object_labels_visible),
+                    )
+                    .on_hover_text(labels_hint)
+                    .clicked()
+                {
+                    self.object_labels_visible = !self.object_labels_visible;
                 }
                 ui.add_space(4.0);
 

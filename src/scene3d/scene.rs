@@ -27,6 +27,8 @@ const CEILING_Y: f32 = params::ROOM_CEILING_Y;
 /// rectangular room.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SceneObject<'a> {
+    /// Stable Scene element ID, printed on every face when labels are enabled.
+    pub element_id: u64,
     pub position: [f32; 3],
     /// Whether the renderer is spatializing this element. An inactive one is
     /// not drawn at all — see [`build`].
@@ -46,6 +48,8 @@ pub struct SceneObject<'a> {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SceneInput<'a> {
     pub objects: &'a [SceneObject<'a>],
+    /// Print each object's stable element ID on all six cube faces.
+    pub show_object_labels: bool,
     /// Whether the presentation carries an LFE element. The slot is drawn either
     /// way; only its occupancy changes.
     pub has_lfe: bool,
@@ -79,7 +83,7 @@ pub fn build(
     // honest reading of "we do not know where this is".
     for object in input.objects.iter().filter(|object| object.active) {
         add_trail(mesh, object, &view);
-        add_object(mesh, object, &view);
+        add_object(mesh, object, input.show_object_labels, &view);
     }
 }
 
@@ -204,10 +208,18 @@ fn add_floor_grid(mesh: &mut MeshBuilder, view: &ViewContext) {
 /// The drop line and footprint are not decoration. In an orthographic view an
 /// airborne cube's height and depth are ambiguous, and at an axis-aligned angle
 /// the projection carries no depth at all — these two carry it instead.
-fn add_object(mesh: &mut MeshBuilder, object: &SceneObject<'_>, view: &ViewContext) {
+fn add_object(
+    mesh: &mut MeshBuilder,
+    object: &SceneObject<'_>,
+    show_label: bool,
+    view: &ViewContext,
+) {
     let [x, y, z] = object_world_position(object.position);
     let edge = params::OBJECT_EDGE;
     mesh.add_box([x, y, z], [edge; 3], object_colour(object, view), view);
+    if show_label {
+        add_object_label(mesh, object.element_id, [x, y, z], view);
+    }
 
     let drop = Rgb::from_color32(theme::MUTED).lerp(Rgb::from_color32(theme::BORDER), 0.35);
     mesh.add_line(
@@ -226,6 +238,109 @@ fn add_object(mesh: &mut MeshBuilder, object: &SceneObject<'_>, view: &ViewConte
         Rgb::from_color32(theme::MUTED).lerp(view.stage, 0.4),
         view,
     );
+}
+
+/// Seven strokes in a compact display digit: top, upper-left, upper-right,
+/// middle, lower-left, lower-right and bottom. The deliberately geometric form
+/// belongs on the voxel object and remains recognisable when a face is oblique.
+const DIGIT_STROKES: [[[f32; 2]; 2]; 7] = [
+    [[-0.35, 0.50], [0.35, 0.50]],
+    [[-0.35, 0.50], [-0.35, 0.00]],
+    [[0.35, 0.50], [0.35, 0.00]],
+    [[-0.35, 0.00], [0.35, 0.00]],
+    [[-0.35, 0.00], [-0.35, -0.50]],
+    [[0.35, 0.00], [0.35, -0.50]],
+    [[-0.35, -0.50], [0.35, -0.50]],
+];
+
+/// Bit masks into [`DIGIT_STROKES`] for decimal digits zero through nine.
+const DIGIT_MASKS: [u8; 10] = [
+    0b111_0111, 0b010_0100, 0b101_1101, 0b110_1101, 0b010_1110, 0b110_1011, 0b111_1011, 0b010_0101,
+    0b111_1111, 0b110_1111,
+];
+
+const DIGIT_WIDTH: f32 = 0.70;
+const DIGIT_GAP: f32 = 0.18;
+const MAX_U64_DIGITS: usize = 20;
+
+/// Face bases are right/up as seen from outside that face. Their cross product
+/// is the outward normal, so the same number is upright from every direction.
+const OBJECT_FACES: [([f32; 3], [f32; 3], [f32; 3]); 6] = [
+    ([0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, -1.0]),
+    ([0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]),
+    ([1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]),
+    ([-1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0]),
+    ([0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
+    ([0.0, 0.0, -1.0], [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
+];
+
+/// Print the same stable element ID on all six faces. Labels are real 3D
+/// geometry, just above each surface: the cube hides its back labels and nearer
+/// scene geometry hides farther ones without a parallel UI-side occlusion model.
+fn add_object_label(mesh: &mut MeshBuilder, element_id: u64, centre: [f32; 3], view: &ViewContext) {
+    let (digits, first) = decimal_digits(element_id);
+    let digits = &digits[first..];
+    let count = u16::try_from(digits.len()).unwrap_or(u16::MAX);
+    let total_width =
+        f32::from(count).mul_add(DIGIT_WIDTH, f32::from(count.saturating_sub(1)) * DIGIT_GAP);
+    let available = params::OBJECT_EDGE * params::OBJECT_LABEL_FACE_FILL;
+    let scale = (available / total_width).min(available);
+
+    for (normal, right, up) in OBJECT_FACES {
+        for (index, digit) in digits.iter().copied().enumerate() {
+            let index = f32::from(u16::try_from(index).unwrap_or(u16::MAX));
+            let digit_centre =
+                (-total_width / 2.0 + DIGIT_WIDTH / 2.0) + index * (DIGIT_WIDTH + DIGIT_GAP);
+            let mask = DIGIT_MASKS[usize::from(digit)];
+            for (stroke, [from, to]) in DIGIT_STROKES.iter().copied().enumerate() {
+                if mask & (1_u8 << stroke) == 0 {
+                    continue;
+                }
+                mesh.add_line(
+                    Layer::Line,
+                    face_label_point(centre, normal, right, up, digit_centre, from, scale),
+                    face_label_point(centre, normal, right, up, digit_centre, to, scale),
+                    view.ink,
+                    params::OBJECT_LABEL_STROKE_POINTS,
+                    view,
+                );
+            }
+        }
+    }
+}
+
+/// Decimal digits without formatting or allocation; the returned suffix is the
+/// complete number, including the single digit for zero.
+fn decimal_digits(mut value: u64) -> ([u8; MAX_U64_DIGITS], usize) {
+    let mut digits = [0; MAX_U64_DIGITS];
+    let mut first = digits.len();
+    loop {
+        first -= 1;
+        digits[first] = u8::try_from(value % 10).unwrap_or(0);
+        value /= 10;
+        if value == 0 {
+            return (digits, first);
+        }
+    }
+}
+
+fn face_label_point(
+    centre: [f32; 3],
+    normal: [f32; 3],
+    right: [f32; 3],
+    up: [f32; 3],
+    digit_centre: f32,
+    point: [f32; 2],
+    scale: f32,
+) -> [f32; 3] {
+    let normal_offset = params::OBJECT_EDGE / 2.0 + params::OBJECT_LABEL_SURFACE_OFFSET;
+    let x = (digit_centre + point[0]) * scale;
+    let y = point[1] * scale;
+    [
+        centre[0] + normal[0] * normal_offset + right[0] * x + up[0] * y,
+        centre[1] + normal[1] * normal_offset + right[1] * x + up[1] * y,
+        centre[2] + normal[2] * normal_offset + right[2] * x + up[2] * y,
+    ]
 }
 
 /// An object's base colour: accent while it is audible, faded toward the stage
@@ -407,6 +522,7 @@ mod tests {
     /// the geometry tests care about.
     fn sounding(position: [f32; 3]) -> SceneObject<'static> {
         SceneObject {
+            element_id: 1,
             position,
             active: true,
             gain: 1.0,
@@ -509,6 +625,47 @@ mod tests {
         assert_eq!(one.solid.len() - empty.solid.len(), 6 * 6, "six cube faces");
         assert_eq!(one.line.len() - empty.line.len(), 6, "one drop line");
         assert_eq!(one.decal.len() - empty.decal.len(), 6, "one footprint");
+    }
+
+    #[test]
+    fn an_enabled_element_id_is_printed_on_all_six_object_faces() {
+        let object = SceneObject {
+            element_id: 8,
+            ..sounding([0.3, 0.4, -0.2])
+        };
+        let hidden = with_input(SceneInput {
+            objects: &[object],
+            show_object_labels: false,
+            ..SceneInput::default()
+        });
+        let visible = with_input(SceneInput {
+            objects: &[object],
+            show_object_labels: true,
+            ..SceneInput::default()
+        });
+
+        let strokes = usize::try_from(DIGIT_MASKS[8].count_ones()).expect("seven strokes fit");
+        assert_eq!(
+            visible.line.len() - hidden.line.len(),
+            OBJECT_FACES.len() * strokes * 6,
+            "one seven-stroke eight should be repeated on every face"
+        );
+    }
+
+    #[test]
+    fn decimal_labels_preserve_zero_and_the_full_element_id() {
+        let values: [(u64, &[u8]); 3] = [
+            (0, &[0]),
+            (42, &[4, 2]),
+            (
+                u64::MAX,
+                &[1, 8, 4, 4, 6, 7, 4, 4, 0, 7, 3, 7, 0, 9, 5, 5, 1, 6, 1, 5],
+            ),
+        ];
+        for (value, expected) in values {
+            let (digits, first) = decimal_digits(value);
+            assert_eq!(&digits[first..], expected);
+        }
     }
 
     #[test]
