@@ -49,6 +49,11 @@ pub struct ObjectView {
     pub active: bool,
     pub position: [f32; 3],
     pub gain: f32,
+    /// Whether an instant (`ramp_frames == 0`) metadata update landed for this
+    /// element inside the quantum being published. The mirror latches it until
+    /// the next breadcrumb, because quanta are far shorter than the sampling
+    /// interval and the flag belongs to a sampled point, not to a quantum.
+    pub jumped: bool,
 }
 
 /// One instant of the scene, as the audio thread last saw it, plus the recent
@@ -65,12 +70,20 @@ pub struct SceneViewFrame {
     /// stitching two halves back together every frame.
     trails: [[[f32; 3]; TRAIL_SAMPLES]; MAX_VIEW_OBJECTS],
     trail_lens: [usize; MAX_VIEW_OBJECTS],
+    /// Which breadcrumbs the object arrived at rather than travelled to.
+    trail_jumps: [[bool; TRAIL_SAMPLES]; MAX_VIEW_OBJECTS],
+    /// A discontinuity seen since the last breadcrumb was taken. Latched here
+    /// because a quantum is roughly a quarter of the sampling interval, so the
+    /// update that jumped is usually not the one being sampled.
+    pending_jump: [bool; MAX_VIEW_OBJECTS],
     /// Presentation frame at which the next breadcrumb is due.
     next_trail_frame: i64,
     /// Where each object is *going*, nearest first: the positions already
     /// decoded and waiting in the Scene FIFO, resampled onto the trail's clock.
     future: [[[f32; 3]; FUTURE_SAMPLES]; MAX_VIEW_OBJECTS],
     future_lens: [usize; MAX_VIEW_OBJECTS],
+    /// The same for the path ahead: which samples the object will arrive at.
+    future_jumps: [[bool; FUTURE_SAMPLES]; MAX_VIEW_OBJECTS],
     /// `None` until the first write. Distinguishes "no playback yet" from a
     /// playback that legitimately carries no objects.
     key: Option<PlaybackKey>,
@@ -83,9 +96,12 @@ impl Default for SceneViewFrame {
             total_objects: 0,
             trails: [[[0.0; 3]; TRAIL_SAMPLES]; MAX_VIEW_OBJECTS],
             trail_lens: [0; MAX_VIEW_OBJECTS],
+            trail_jumps: [[false; TRAIL_SAMPLES]; MAX_VIEW_OBJECTS],
+            pending_jump: [false; MAX_VIEW_OBJECTS],
             next_trail_frame: 0,
             future: [[[0.0; 3]; FUTURE_SAMPLES]; MAX_VIEW_OBJECTS],
             future_lens: [0; MAX_VIEW_OBJECTS],
+            future_jumps: [[false; FUTURE_SAMPLES]; MAX_VIEW_OBJECTS],
             key: None,
         }
     }
@@ -123,6 +139,26 @@ impl SceneViewFrame {
         }
     }
 
+    /// Which of `slot`'s breadcrumbs the object arrived at instantly, aligned
+    /// with [`Self::trail`]. A set flag means the object did not travel from the
+    /// previous mark — it was somewhere else and then it was here.
+    #[must_use]
+    pub fn trail_jumps(&self, slot: usize) -> &[bool] {
+        match self.trail_lens.get(slot) {
+            Some(&len) => &self.trail_jumps[slot][..len],
+            None => &[],
+        }
+    }
+
+    /// The same for the path ahead, aligned with [`Self::future`].
+    #[must_use]
+    pub fn future_jumps(&self, slot: usize) -> &[bool] {
+        match self.future_lens.get(slot) {
+            Some(&len) => &self.future_jumps[slot][..len],
+            None => &[],
+        }
+    }
+
     /// Objects the scene carried beyond [`MAX_VIEW_OBJECTS`]. Non-zero means the
     /// view is showing an incomplete scene and has to say so.
     #[must_use]
@@ -142,14 +178,23 @@ pub fn sample_interval_frames(sample_rate: u32) -> i64 {
     i64::try_from(frames).unwrap_or(i64::MAX).max(1)
 }
 
-fn push_trail(trail: &mut [[f32; 3]; TRAIL_SAMPLES], len: &mut usize, point: [f32; 3]) {
+fn push_trail(
+    trail: &mut [[f32; 3]; TRAIL_SAMPLES],
+    jumps: &mut [bool; TRAIL_SAMPLES],
+    len: &mut usize,
+    point: [f32; 3],
+    jumped: bool,
+) {
     if let Some(slot) = trail.get_mut(*len) {
         *slot = point;
+        jumps[*len] = jumped;
         *len = len.saturating_add(1);
         return;
     }
     trail.copy_within(1.., 0);
+    jumps.copy_within(1.., 0);
     trail[TRAIL_SAMPLES - 1] = point;
+    jumps[TRAIL_SAMPLES - 1] = jumped;
 }
 
 /// The audio thread's scratch buffer for the path ahead.
@@ -174,6 +219,12 @@ fn push_trail(trail: &mut [[f32; 3]; TRAIL_SAMPLES], len: &mut usize, point: [f3
 pub struct FuturePath {
     positions: [[[f32; 3]; FUTURE_SAMPLES]; MAX_VIEW_OBJECTS],
     lens: [usize; MAX_VIEW_OBJECTS],
+    /// Which samples the object arrives at rather than travels to.
+    jumps: [[bool; FUTURE_SAMPLES]; MAX_VIEW_OBJECTS],
+    /// A discontinuity seen since the last sample. Kept across blocks because a
+    /// block can be short enough that no sample lands inside it at all, and the
+    /// jump inside such a block still belongs to the sample that follows it.
+    pending: [bool; MAX_VIEW_OBJECTS],
     /// A slot stops accepting points once its object reaches a moment with no
     /// position. The path ends there rather than leaping the gap and drawing a
     /// segment the object will not travel.
@@ -189,6 +240,8 @@ impl Default for FuturePath {
         Self {
             positions: [[[0.0; 3]; FUTURE_SAMPLES]; MAX_VIEW_OBJECTS],
             lens: [0; MAX_VIEW_OBJECTS],
+            jumps: [[false; FUTURE_SAMPLES]; MAX_VIEW_OBJECTS],
+            pending: [false; MAX_VIEW_OBJECTS],
             closed: [false; MAX_VIEW_OBJECTS],
             objects: 0,
             next_frame: 0,
@@ -216,6 +269,7 @@ impl FuturePath {
     pub fn restart(&mut self, frame: i64, objects: usize) {
         self.lens = [0; MAX_VIEW_OBJECTS];
         self.closed = [false; MAX_VIEW_OBJECTS];
+        self.pending = [false; MAX_VIEW_OBJECTS];
         self.objects = objects.min(MAX_VIEW_OBJECTS);
         self.next_frame = frame;
     }
@@ -238,12 +292,22 @@ impl FuturePath {
         self.next_frame = self.next_frame.saturating_add(interval_frames);
     }
 
+    /// Note that `slot`'s object is due to jump before its next sample.
+    pub const fn mark_jump(&mut self, slot: usize) {
+        if slot < MAX_VIEW_OBJECTS {
+            self.pending[slot] = true;
+        }
+    }
+
     /// Record where `slot`'s object is at the current sample, or `None` if it
-    /// has no position there, which ends that object's path.
+    /// has no position there, which ends that object's path. Consumes whatever
+    /// [`Self::mark_jump`] noted since the previous sample.
     pub const fn push(&mut self, slot: usize, point: Option<[f32; 3]>) {
         if slot >= MAX_VIEW_OBJECTS || self.closed[slot] {
             return;
         }
+        let jumped = self.pending[slot];
+        self.pending[slot] = false;
         let Some(point) = point else {
             self.closed[slot] = true;
             return;
@@ -254,6 +318,7 @@ impl FuturePath {
             return;
         }
         self.positions[slot][len] = point;
+        self.jumps[slot][len] = jumped;
         self.lens[slot] = len + 1;
     }
 
@@ -273,6 +338,17 @@ impl FuturePath {
     pub fn path(&self, slot: usize) -> &[[f32; 3]] {
         match self.lens.get(slot) {
             Some(&len) => &self.positions[slot][..len],
+            None => &[],
+        }
+    }
+
+    /// Which of `slot`'s samples the object arrives at, aligned with
+    /// [`Self::path`].
+    #[cfg(test)]
+    #[must_use]
+    pub fn jumps(&self, slot: usize) -> &[bool] {
+        match self.lens.get(slot) {
+            Some(&len) => &self.jumps[slot][..len],
             None => &[],
         }
     }
@@ -340,6 +416,7 @@ impl SceneViewMirror {
         if frame.key != Some(key) {
             frame.trail_lens = [0; MAX_VIEW_OBJECTS];
             frame.future_lens = [0; MAX_VIEW_OBJECTS];
+            frame.pending_jump = [false; MAX_VIEW_OBJECTS];
             frame.next_trail_frame = timeline_frame;
         }
         // A trail belongs to an element, not to an array index. If the scene's
@@ -349,6 +426,7 @@ impl SceneViewMirror {
             if previous.element_id != staged[slot].element_id {
                 frame.trail_lens[slot] = 0;
                 frame.future_lens[slot] = 0;
+                frame.pending_jump[slot] = false;
             }
         }
 
@@ -356,12 +434,26 @@ impl SceneViewMirror {
         frame.total_objects = total;
         frame.key = Some(key);
 
+        // Latched rather than consumed here: the discontinuity belongs to a
+        // sampled point, and the quantum that carries it is usually not the one
+        // a breadcrumb falls on.
+        for slot in 0..total.min(MAX_VIEW_OBJECTS) {
+            frame.pending_jump[slot] |= frame.objects[slot].jumped;
+        }
+
         if timeline_frame >= frame.next_trail_frame {
             frame.next_trail_frame =
                 timeline_frame.saturating_add(sample_interval_frames(sample_rate));
             for slot in 0..total.min(MAX_VIEW_OBJECTS) {
                 let point = frame.objects[slot].position;
-                push_trail(&mut frame.trails[slot], &mut frame.trail_lens[slot], point);
+                let jumped = std::mem::take(&mut frame.pending_jump[slot]);
+                push_trail(
+                    &mut frame.trails[slot],
+                    &mut frame.trail_jumps[slot],
+                    &mut frame.trail_lens[slot],
+                    point,
+                    jumped,
+                );
             }
         }
     }
@@ -394,6 +486,7 @@ impl SceneViewMirror {
         }
         frame.future = path.positions;
         frame.future_lens = path.lens;
+        frame.future_jumps = path.jumps;
     }
 
     /// Take a copy of the current frame if it belongs to `key`. UI thread.
@@ -418,6 +511,15 @@ mod tests {
             active: true,
             position: [x, 0.0, 0.0],
             gain: 1.0,
+            jumped: false,
+        }
+    }
+
+    /// An object whose quantum carried an instant metadata update.
+    fn jumping(element_id: u64, x: f32) -> ObjectView {
+        ObjectView {
+            jumped: true,
+            ..object(element_id, x)
         }
     }
 
@@ -583,6 +685,43 @@ mod tests {
             path.push(0, Some(*point));
         }
         path
+    }
+
+    #[test]
+    fn a_jump_seen_between_breadcrumbs_lands_on_the_next_one() {
+        // Quanta are roughly a quarter of the sampling interval, so the update
+        // that jumped is usually not the one a breadcrumb falls on. Dropping it
+        // on the floor would lose most jumps; attaching it to every subsequent
+        // mark would claim the object kept teleporting.
+        let mirror = SceneViewMirror::new();
+        let key = PlaybackKey::new(1, 0);
+        let interval = sample_interval_frames(RATE);
+
+        write_at(&mirror, key, 0, &[object(1, 0.0)]);
+        write_at(&mirror, key, interval / 2, &[jumping(1, 0.5)]);
+        write_at(&mirror, key, interval, &[object(1, 0.9)]);
+        write_at(&mirror, key, interval * 2, &[object(1, 0.9)]);
+
+        let frame = mirror.read(key).expect("frame");
+        assert_eq!(frame.trail_jumps(0), [false, true, false]);
+    }
+
+    #[test]
+    fn a_seek_discards_a_latched_jump_along_with_the_trail() {
+        let mirror = SceneViewMirror::new();
+        let interval = sample_interval_frames(RATE);
+        let before = PlaybackKey::new(1, 0);
+        write_at(&mirror, before, 0, &[object(1, 0.0)]);
+        write_at(&mirror, before, interval / 2, &[jumping(1, 0.5)]);
+
+        let after = PlaybackKey::new(1, 1);
+        write_at(&mirror, after, 900_000, &[object(1, -0.5)]);
+        let frame = mirror.read(after).expect("frame");
+        assert_eq!(
+            frame.trail_jumps(0),
+            [false],
+            "a jump from the playback before the seek was attributed to this one"
+        );
     }
 
     #[test]

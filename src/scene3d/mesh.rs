@@ -97,6 +97,17 @@ pub struct MeshBuilder {
     pub decal: Vec<Vertex>,
 }
 
+/// An annotation arrow's proportions, all in screen points except the head
+/// angle. Bundled so [`MeshBuilder::add_arrow`] keeps a readable signature and
+/// the values stay together with the constants that supply them.
+#[derive(Debug, Clone, Copy)]
+pub struct ArrowSpec {
+    pub shaft_points: f32,
+    pub head_points: f32,
+    pub head_degrees: f32,
+    pub width_points: f32,
+}
+
 /// Which stream a primitive belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Layer {
@@ -263,6 +274,51 @@ impl MeshBuilder {
             sub(to, offset),
             bytes,
         );
+    }
+
+    /// A fixed-size annotation arrow: shaft plus two barbs, three hairlines.
+    ///
+    /// Sized in screen points rather than world units because it annotates
+    /// rather than measures. An arrow that grew with the zoom would look broken,
+    /// and one that grew with the distance it spans would read as a path — which
+    /// is exactly the misreading it exists to prevent.
+    pub fn add_arrow(
+        &mut self,
+        layer: Layer,
+        from: [f32; 3],
+        toward: [f32; 3],
+        colour: Rgb,
+        spec: ArrowSpec,
+        view: &ViewContext,
+    ) {
+        let direction = sub(toward, from);
+        let span = norm(direction);
+        if span < 1e-9 {
+            return;
+        }
+        let along = scale(direction, 1.0 / span);
+        let across = cross(along, view.direction);
+        let across_length = norm(across);
+        if across_length < 1e-9 {
+            // Pointing straight at the camera: the arrow has no screen extent,
+            // and its two endpoints are on top of each other anyway.
+            return;
+        }
+        let across = scale(across, 1.0 / across_length);
+
+        let unit = view.world_units_per_point;
+        // Never overshoot what it annotates: on a short span the arrow shrinks
+        // rather than sticking out past its own target.
+        let shaft = (spec.shaft_points * unit).min(span * 0.9);
+        let barb = (spec.head_points * unit).min(shaft);
+        let tip = add(from, scale(along, shaft));
+        let (sin, cos) = spec.head_degrees.to_radians().sin_cos();
+        let back = add(tip, scale(along, -barb * cos));
+        let side = scale(across, barb * sin);
+
+        self.add_line(layer, from, tip, colour, spec.width_points, view);
+        self.add_line(layer, tip, add(back, side), colour, spec.width_points, view);
+        self.add_line(layer, tip, sub(back, side), colour, spec.width_points, view);
     }
 
     /// The twelve edges of an axis-aligned box, as hairlines.
@@ -502,6 +558,74 @@ mod tests {
 
         assert!((widths[0] - params::HAIRLINE_POINTS * 0.01).abs() < 1e-6);
         assert!((widths[1] / widths[0] - 4.0).abs() < 1e-4, "{widths:?}");
+    }
+
+    fn arrow_spec() -> ArrowSpec {
+        ArrowSpec {
+            shaft_points: 16.0,
+            head_points: 6.0,
+            head_degrees: 32.0,
+            width_points: params::HAIRLINE_POINTS,
+        }
+    }
+
+    #[test]
+    fn an_arrow_is_three_hairlines_measured_on_screen_rather_than_in_the_world() {
+        // It annotates rather than measures, so it has to stay the same size on
+        // screen at any zoom. An arrow that grew with the view would read as
+        // broken; one that grew with the distance it spans would read as a path,
+        // which is the exact misreading it exists to prevent.
+        let tips = [0.01_f32, 0.04].map(|world_units_per_point| {
+            let mut mesh = MeshBuilder::default();
+            mesh.add_arrow(
+                Layer::Line,
+                [0.0, 0.0, 0.0],
+                [10.0, 0.0, 0.0],
+                Rgb::from_color32(Color32::from_rgb(206, 122, 59)),
+                arrow_spec(),
+                &view([0.0, 1.0, 0.0], world_units_per_point),
+            );
+            assert_eq!(mesh.line.len(), 3 * 6, "shaft plus two barbs");
+            mesh.line[..6]
+                .iter()
+                .map(|vertex| vertex.position[0])
+                .fold(f32::NEG_INFINITY, f32::max)
+        });
+
+        assert!((tips[0] - 16.0 * 0.01).abs() < 1e-5, "{tips:?}");
+        assert!((tips[1] / tips[0] - 4.0).abs() < 1e-4, "{tips:?}");
+    }
+
+    #[test]
+    fn an_arrow_shrinks_rather_than_overshooting_what_it_annotates() {
+        let mut mesh = MeshBuilder::default();
+        mesh.add_arrow(
+            Layer::Line,
+            [0.0, 0.0, 0.0],
+            [0.1, 0.0, 0.0],
+            Rgb::from_color32(Color32::from_rgb(206, 122, 59)),
+            arrow_spec(),
+            &view([0.0, 1.0, 0.0], 0.01),
+        );
+        let tip = mesh.line[..6]
+            .iter()
+            .map(|vertex| vertex.position[0])
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!(tip < 0.1, "the arrow reached past its own target: {tip}");
+    }
+
+    #[test]
+    fn an_arrow_pointing_at_the_camera_is_dropped() {
+        let mut mesh = MeshBuilder::default();
+        mesh.add_arrow(
+            Layer::Line,
+            [0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            Rgb::from_color32(Color32::from_rgb(206, 122, 59)),
+            arrow_spec(),
+            &view([0.0, 1.0, 0.0], 0.01),
+        );
+        assert!(mesh.line.is_empty());
     }
 
     #[test]

@@ -156,6 +156,63 @@ pub(super) fn lfe_render_state(state: Option<SpatialObjectState>) -> (bool, f32)
     )
 }
 
+/// Whether an instant metadata update for `element_id` lands in
+/// `[from_offset, to_offset)` of `block`.
+///
+/// `ramp_frames == 0` is OAMD stating outright that nothing is interpolated:
+/// the element is at one position and then at another, with no moment in
+/// between at which it was anywhere else. That is a fact about the bitstream,
+/// not a guess from how far the object moved — whether the jump is *worth
+/// drawing a marker for* is a separate, perceptual question, and it is decided
+/// in `scene3d`.
+pub(super) fn has_instant_update(
+    block: &DecodedSceneBlock,
+    element_id: u64,
+    from_offset: u32,
+    to_offset: u32,
+) -> bool {
+    for update in block.metadata_updates() {
+        // Updates are in ascending offset order, the same assumption
+        // `element_state_at` makes.
+        if update.offset_frames() >= to_offset {
+            break;
+        }
+        if update.element_id() == element_id
+            && update.ramp_frames() == 0
+            && update.offset_frames() >= from_offset
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Note every slot whose element jumps in `[from_offset, to_offset)`.
+///
+/// One pass over the block's updates for the whole scene rather than
+/// [`has_instant_update`] per object: the sampler walks two spans per block and
+/// twenty slots, and the per-object form would multiply those together for no
+/// reason.
+fn mark_instant_updates(
+    path: &mut FuturePath,
+    block: &DecodedSceneBlock,
+    element_ids: &[u64],
+    from_offset: u32,
+    to_offset: u32,
+) {
+    for update in block.metadata_updates() {
+        if update.offset_frames() >= to_offset {
+            break;
+        }
+        if update.offset_frames() < from_offset || update.ramp_frames() != 0 {
+            continue;
+        }
+        if let Ok(slot) = element_ids.binary_search(&update.element_id()) {
+            path.mark_jump(slot);
+        }
+    }
+}
+
 /// Sample every grid point of `path` that falls inside `block`.
 ///
 /// `element_ids` is the Scene signature's object list, which is sorted, so a
@@ -179,16 +236,37 @@ pub(super) fn sample_future_path(
     let Some(end) = start.checked_add(i64::from(block.duration_frames())) else {
         return;
     };
+    // The previous sample, which is the boundary that matters: a block ending at
+    // or before it was fully attributed when that sample was taken, and marking
+    // it again would put a jump ahead of an object that already made it. A block
+    // ending merely before the *next* sample is not that — it sits in the gap
+    // between two samples, and whatever it carries belongs to the later one.
+    let previous_sample = path.next_frame().saturating_sub(interval_frames);
+    if end <= previous_sample {
+        return;
+    }
     // A forward timeline gap carries no element state at all. Re-anchoring the
     // grid to the next block that does is the alternative to ending every
     // object's path at the first gap; one dash comes out short, which is a far
     // smaller lie than the path disappearing.
     path.skip_to(start);
 
+    let mut sampled_offset = None;
     while path.next_frame() < end {
-        let Ok(offset) = u32::try_from(path.next_frame() - start) else {
+        let sample = path.next_frame();
+        let Ok(offset) = u32::try_from(sample - start) else {
             return;
         };
+        // Updates after the previous sample and up to this one are what this
+        // sample arrives from. Clipped into the block, since anything earlier
+        // was covered when the block holding it was walked.
+        let lower = sample
+            .saturating_sub(interval_frames)
+            .saturating_add(1)
+            .saturating_sub(start);
+        let from = u32::try_from(lower).unwrap_or(0);
+        mark_instant_updates(path, block, element_ids, from, offset.saturating_add(1));
+
         for object in block.objects() {
             let Ok(slot) = element_ids.binary_search(&object.element_id()) else {
                 continue;
@@ -198,8 +276,21 @@ pub(super) fn sample_future_path(
             let (active, position, _) = windows_render_state(state);
             path.push(slot, active.then_some(position));
         }
+        sampled_offset = Some(offset);
         path.advance(interval_frames);
     }
+
+    // Whatever happens after the last sample belongs to the next one, which may
+    // well be in a later block. Carrying it in `path` is what stops a jump
+    // vanishing inside a block short enough that no sample lands in it — at a
+    // 42 ms block and a 40 ms interval, that block exists.
+    let tail = match sampled_offset {
+        Some(offset) => offset.saturating_add(1),
+        // No sample landed in this block at all, so the region still to
+        // attribute begins right after the previous sample.
+        None => u32::try_from(previous_sample.saturating_add(1).saturating_sub(start)).unwrap_or(0),
+    };
+    mark_instant_updates(path, block, element_ids, tail, block.duration_frames());
 }
 
 #[cfg(test)]
@@ -254,6 +345,10 @@ mod tests {
 
     fn interval() -> i64 {
         sample_interval_frames(RATE)
+    }
+
+    fn step_frames(step: i64) -> u32 {
+        u32::try_from(step).expect("the interval fits a u32")
     }
 
     fn xs(path: &FuturePath, slot: usize) -> Vec<f32> {
@@ -530,6 +625,135 @@ mod tests {
 
         assert_eq!(path.path(0).len(), FUTURE_SAMPLES);
         assert!(path.is_complete());
+    }
+
+    /// An object whose state jumps to `to` at `offset`, instantly or over a ramp.
+    fn moves(element_id: u64, offset: u32, ramp_frames: u32, to: f32) -> SceneMetadataUpdate {
+        SceneMetadataUpdate::new(element_id, offset, ramp_frames, u32::MAX, positioned(to))
+    }
+
+    #[test]
+    fn an_instant_update_flags_the_sample_it_lands_before() {
+        let step = interval();
+        let span = u32::try_from(step * 5).expect("span fits a u32");
+        let offset = u32::try_from(step + 100).expect("offset fits a u32");
+        let block = block(
+            0,
+            span,
+            vec![SceneObjectPcm::new(7, Some(positioned(-1.0)), Vec::new())],
+            vec![moves(7, offset, 0, 1.0)],
+        );
+
+        let mut path = FuturePath::new();
+        path.restart(0, 1);
+        sample_future_path(&mut path, &block, &[7], step);
+
+        assert_eq!(xs(&path, 0), vec![-1.0, -1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(
+            path.jumps(0),
+            [false, false, true, false, false],
+            "the jump has to land on the sample the object arrives at"
+        );
+    }
+
+    #[test]
+    fn a_ramped_update_is_travelled_rather_than_jumped() {
+        // The whole distinction: a ramp is a position the object actually passes
+        // through, and drawing it as a discontinuity would be as wrong as
+        // drawing a discontinuity as a line.
+        let step = interval();
+        let span = u32::try_from(step * 5).expect("span fits a u32");
+        let offset = u32::try_from(step + 100).expect("offset fits a u32");
+        let block = block(
+            0,
+            span,
+            vec![SceneObjectPcm::new(7, Some(positioned(-1.0)), Vec::new())],
+            vec![moves(7, offset, step_frames(step), 1.0)],
+        );
+
+        let mut path = FuturePath::new();
+        path.restart(0, 1);
+        sample_future_path(&mut path, &block, &[7], step);
+
+        assert!(
+            path.jumps(0).iter().all(|jumped| !jumped),
+            "{:?}",
+            path.jumps(0)
+        );
+    }
+
+    #[test]
+    fn a_jump_inside_a_block_no_sample_lands_in_still_reaches_the_next_sample() {
+        // Blocks run about 42 ms and samples 40 ms apart, so a block with no
+        // sample in it is not a corner case — it happens roughly every twentieth
+        // block, and without carrying the mark across, those jumps vanish.
+        let step = interval();
+        let ids = [7];
+        let mut path = FuturePath::new();
+        path.restart(0, 1);
+
+        let first = block(
+            0,
+            500,
+            vec![SceneObjectPcm::new(7, Some(positioned(-1.0)), Vec::new())],
+            vec![],
+        );
+        sample_future_path(&mut path, &first, &ids, step);
+        assert_eq!(path.jumps(0), [false]);
+
+        // Entirely between two samples, and carrying the jump.
+        let between = block(
+            500,
+            500,
+            vec![SceneObjectPcm::new(7, Some(positioned(-1.0)), Vec::new())],
+            vec![moves(7, 200, 0, 1.0)],
+        );
+        sample_future_path(&mut path, &between, &ids, step);
+        assert_eq!(path.jumps(0), [false], "a block with no sample added one");
+
+        let after = block(
+            1_000,
+            2_000,
+            vec![SceneObjectPcm::new(7, Some(positioned(1.0)), Vec::new())],
+            vec![],
+        );
+        sample_future_path(&mut path, &after, &ids, step);
+        assert_eq!(path.jumps(0), [false, true]);
+    }
+
+    #[test]
+    fn a_block_behind_the_previous_sample_contributes_no_jump() {
+        let step = interval();
+        let ids = [7];
+        let mut path = FuturePath::new();
+        // The path starts well past this block, so its updates were heard long
+        // ago; flagging them would put a jump ahead of an object already there.
+        path.restart(step * 5, 1);
+
+        let played = block(
+            0,
+            1_000,
+            vec![SceneObjectPcm::new(7, Some(positioned(-1.0)), Vec::new())],
+            vec![moves(7, 200, 0, 1.0)],
+        );
+        sample_future_path(&mut path, &played, &ids, step);
+
+        let ahead = block(
+            step * 5,
+            2_000,
+            vec![SceneObjectPcm::new(7, Some(positioned(1.0)), Vec::new())],
+            vec![],
+        );
+        sample_future_path(&mut path, &ahead, &ids, step);
+        assert!(
+            !path.jumps(0).is_empty(),
+            "the block ahead produced no samples"
+        );
+        assert!(
+            path.jumps(0).iter().all(|jumped| !jumped),
+            "{:?}",
+            path.jumps(0)
+        );
     }
 
     #[test]

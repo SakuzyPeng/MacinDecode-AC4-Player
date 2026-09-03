@@ -10,7 +10,7 @@ use crate::theme;
 
 use super::camera::Camera;
 use super::figure::{Figure, PartTone};
-use super::mesh::{Layer, MeshBuilder, Rgb, ViewContext};
+use super::mesh::{ArrowSpec, Layer, MeshBuilder, Rgb, ViewContext};
 use super::params;
 
 /// Horizontal room extents. Logic uses a square footprint but a lower ceiling.
@@ -40,6 +40,11 @@ pub struct SceneObject<'a> {
     /// Where this object is going, nearest first: positions already decoded and
     /// waiting in the Scene FIFO, in the same normalized coordinates.
     pub future: &'a [[f32; 3]],
+    /// Aligned with `trail`: which marks the object arrived at instantly rather
+    /// than travelled to.
+    pub trail_jumps: &'a [bool],
+    /// Aligned with `future`, same meaning.
+    pub future_jumps: &'a [bool],
 }
 
 /// Everything one frame of the scene depends on.
@@ -273,7 +278,18 @@ fn add_trail(mesh: &mut MeshBuilder, object: &SceneObject<'_>, view: &ViewContex
             / f32::from(count);
         let faded = colour.lerp(view.stage, params::TRAIL_FADE * (1.0 - freshness));
         let [x, y, z] = object_world_position(*point);
-        mesh.add_box([x, y, z], [edge; 3], faded, view);
+        let arrival = trail_jump_at(object, index);
+        let departure = trail_jump_at(object, index.saturating_add(1));
+        if arrival || departure {
+            // A jump's two ends are hollow, and unfaded. The gap between marks
+            // reads as speed everywhere else in this trail, so left solid these
+            // two would say the object crossed the room very fast rather than
+            // that it was never in between. Unfaded because they are the marks
+            // the eye is meant to find.
+            jump_mark(mesh, [x, y, z], view);
+        } else {
+            mesh.add_box([x, y, z], [edge; 3], faded, view);
+        }
         mesh.add_floor_mark(
             x,
             z,
@@ -282,7 +298,106 @@ fn add_trail(mesh: &mut MeshBuilder, object: &SceneObject<'_>, view: &ViewContex
             faded.lerp(view.stage, 1.0 - params::FLOOR_TRAIL_WEIGHT),
             view,
         );
+        if arrival && let Some(previous) = index.checked_sub(1) {
+            jump_arrow(
+                mesh,
+                object_world_position(object.trail[previous]),
+                [x, y, z],
+                view,
+            );
+        }
     }
+}
+
+/// Edge of a jump's endpoint marker, in world units.
+const JUMP_MARK_EDGE: f32 =
+    params::OBJECT_EDGE * params::TRAIL_MARK_SCALE * params::JUMP_MARK_SCALE;
+
+/// A jump's endpoint: hollow where a breadcrumb is solid, and a little larger.
+fn jump_mark(mesh: &mut MeshBuilder, centre: [f32; 3], view: &ViewContext) {
+    mesh.add_wire_box(
+        centre,
+        [JUMP_MARK_EDGE; 3],
+        Rgb::from_color32(theme::ACCENT),
+        params::HAIRLINE_POINTS,
+        view,
+    );
+}
+
+/// The direction the object went, drawn at the end it left.
+///
+/// This is the half of the annotation that answers "where did it go". The two
+/// hollow marks say a jump happened, but with the connecting line gone — and it
+/// has to be gone, because none of it was travelled — nothing else relates them.
+fn jump_arrow(mesh: &mut MeshBuilder, from: [f32; 3], to: [f32; 3], view: &ViewContext) {
+    let span = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
+    let length = span[0]
+        .mul_add(span[0], span[1].mul_add(span[1], span[2] * span[2]))
+        .sqrt();
+    if length < 1e-6 {
+        return;
+    }
+    // Begin clear of the departure marker. Starting at its centre buries half
+    // the shaft inside the wire box, and the two then read as one cluttered
+    // glyph instead of a marker and a direction.
+    let clearance = JUMP_MARK_EDGE * 0.75 / length;
+    let start = [
+        span[0].mul_add(clearance, from[0]),
+        span[1].mul_add(clearance, from[1]),
+        span[2].mul_add(clearance, from[2]),
+    ];
+    mesh.add_arrow(
+        Layer::Line,
+        start,
+        to,
+        Rgb::from_color32(theme::ACCENT),
+        ArrowSpec {
+            shaft_points: params::JUMP_ARROW_POINTS,
+            head_points: params::JUMP_ARROW_HEAD_POINTS,
+            head_degrees: params::JUMP_ARROW_HEAD_DEGREES,
+            width_points: params::HAIRLINE_POINTS,
+        },
+        view,
+    );
+}
+
+/// Whether the object arrived at trail `index` instantly, from far enough away
+/// to be worth marking.
+fn trail_jump_at(object: &SceneObject<'_>, index: usize) -> bool {
+    let (Some(point), Some(previous)) = (
+        object.trail.get(index),
+        index.checked_sub(1).and_then(|i| object.trail.get(i)),
+    ) else {
+        // The oldest mark has no predecessor in view, so there is no jump to
+        // draw even when the flag says one happened before it.
+        return false;
+    };
+    object.trail_jumps.get(index).copied().unwrap_or(false) && travelled_far(*previous, *point)
+}
+
+/// The same for the path ahead, where sample zero's predecessor is the object.
+fn future_jump_at(object: &SceneObject<'_>, index: usize) -> bool {
+    let Some(point) = object.future.get(index) else {
+        return false;
+    };
+    let previous = match index.checked_sub(1) {
+        Some(earlier) => object.future[earlier],
+        None => object.position,
+    };
+    object.future_jumps.get(index).copied().unwrap_or(false) && travelled_far(previous, *point)
+}
+
+/// Whether a discontinuity moved the object far enough to annotate.
+///
+/// Whether it *was* a discontinuity is settled in `backend::state` by the
+/// bitstream itself. This is the separate, perceptual question: a stream that
+/// sends instant updates for every small correction would otherwise turn the
+/// whole path into a chain of hollow marks, and nobody loses track of an object
+/// that moved two hundredths of a room.
+fn travelled_far(from: [f32; 3], to: [f32; 3]) -> bool {
+    let span = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
+    let squared = span[0].mul_add(span[0], span[1].mul_add(span[1], span[2] * span[2]));
+    squared >= params::JUMP_MIN_DISTANCE * params::JUMP_MIN_DISTANCE
 }
 
 /// The object's path ahead, as a dashed hairline.
@@ -309,6 +424,22 @@ fn add_future_path(mesh: &mut MeshBuilder, object: &SceneObject<'_>, view: &View
 
     for (index, point) in object.future.iter().enumerate() {
         let to = object_world_position(*point);
+        if future_jump_at(object, index) {
+            // The dash length is how far the object continuously travels in one
+            // interval, and across a jump that distance is zero — so the rule
+            // that governs every other segment is what removes this one. Both
+            // ends get a marker instead, and an arrow says which way it went.
+            //
+            // Sample zero's predecessor is the object itself, already drawn as a
+            // cube; marking it again would only thicken it.
+            if index > 0 {
+                jump_mark(mesh, from, view);
+            }
+            jump_mark(mesh, to, view);
+            jump_arrow(mesh, from, to, view);
+            from = to;
+            continue;
+        }
         // Fading forwards mirrors the trail fading backwards, which is what
         // makes the two read as one axis through the object rather than as two
         // unrelated decorations.
@@ -362,6 +493,8 @@ mod tests {
             gain: 1.0,
             trail: &[],
             future: &[],
+            trail_jumps: &[],
+            future_jumps: &[],
         }
     }
 
@@ -653,6 +786,84 @@ mod tests {
         assert!(
             far > near,
             "the farthest dash ({far}) is not the most faded ({near})"
+        );
+    }
+
+    /// A wire box is twelve hairline quads; a solid box, six faces of two
+    /// triangles; a hairline, one quad. The arrow is three hairlines.
+    const WIRE_BOX: usize = 12 * 6;
+    const SOLID_BOX: usize = 6 * 6;
+    const HAIRLINE: usize = 6;
+    const ARROW: usize = 3 * 6;
+
+    #[test]
+    fn a_jump_ahead_replaces_its_dash_with_markers_and_a_direction() {
+        // The dash length is the distance continuously travelled in one
+        // interval. Across an instant update that distance is zero, so the rule
+        // that draws every other segment is what removes this one — and with the
+        // line gone, the arrow is the only thing left saying where it went.
+        let future = [[1.0, 0.0, 0.0]];
+        let object = sounding([0.0, 0.0, 0.0]);
+        let travelled = built(&[SceneObject {
+            future: &future,
+            ..object
+        }]);
+        let jumped = built(&[SceneObject {
+            future: &future,
+            future_jumps: &[true],
+            ..object
+        }]);
+
+        // Sample zero's departure is the object's own cube, so only the arrival
+        // gets a marker.
+        assert_eq!(
+            jumped.line.len() - travelled.line.len(),
+            WIRE_BOX + ARROW - HAIRLINE
+        );
+    }
+
+    #[test]
+    fn a_jump_too_small_to_lose_track_of_is_drawn_as_an_ordinary_segment() {
+        // Whether it was a discontinuity is settled from the bitstream; whether
+        // it is worth annotating is not. A stream that sends instant updates for
+        // every small correction would otherwise become a chain of markers.
+        let future = [[0.05, 0.0, 0.0]];
+        let object = sounding([0.0, 0.0, 0.0]);
+        let travelled = built(&[SceneObject {
+            future: &future,
+            ..object
+        }]);
+        let jumped = built(&[SceneObject {
+            future: &future,
+            future_jumps: &[true],
+            ..object
+        }]);
+
+        assert_eq!(jumped.line.len(), travelled.line.len());
+    }
+
+    #[test]
+    fn both_ends_of_a_jumped_breadcrumb_pair_turn_hollow() {
+        let trail = [[-0.9, 0.0, 0.0], [0.9, 0.0, 0.0]];
+        let object = sounding([0.9, 0.0, 0.0]);
+        let travelled = built(&[SceneObject {
+            trail: &trail,
+            ..object
+        }]);
+        let jumped = built(&[SceneObject {
+            trail: &trail,
+            trail_jumps: &[false, true],
+            ..object
+        }]);
+
+        assert_eq!(
+            travelled.solid.len() - jumped.solid.len(),
+            2 * SOLID_BOX,
+            "the departure and the arrival both stop being ordinary marks"
+        );
+        assert_eq!(
+            jumped.line.len() - travelled.line.len(),
+            2 * WIRE_BOX + ARROW
         );
     }
 

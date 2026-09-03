@@ -129,6 +129,37 @@ pub const FUTURE_DASH_DUTY: f32 = 0.55;
 /// [`TRAIL_FADE`]: history fades backwards, the path ahead fades forwards.
 pub const FUTURE_FADE: f32 = 0.85;
 
+/// How far two consecutive samples have to be apart, in normalized units,
+/// before an instant metadata update is worth annotating as a jump.
+///
+/// Two different questions live here and must not be conflated. Whether the
+/// update was a discontinuity is a **fact**, decided in `backend::state` by
+/// `ramp_frames == 0` — no heuristic. Whether it is worth drawing a marker for
+/// is a **perceptual** judgement, and it belongs here: a stream that sends
+/// instant updates for every small correction would otherwise turn the whole
+/// path into a chain of hollow marks, which is worse than the problem. A jump
+/// of two hundredths of a room is not one anybody loses track of.
+pub const JUMP_MIN_DISTANCE: f32 = 0.30;
+
+/// Jump marker edge, relative to a breadcrumb's. Slightly larger, and hollow
+/// where a breadcrumb is solid: the marker says "appeared here", not "was
+/// sampled here".
+pub const JUMP_MARK_SCALE: f32 = 1.6;
+
+/// The jump arrow, in screen points. It is an annotation rather than an object,
+/// so its size is fixed on screen — growing with zoom would read as broken, and
+/// growing with the jump distance would read as a path.
+///
+/// Large enough to survive being read next to the endpoint marker, which *is*
+/// world-sized: zoom in far enough and the marker grows while the arrow does
+/// not, so a shaft that merely clears the box at one zoom disappears into it at
+/// another.
+pub const JUMP_ARROW_POINTS: f32 = 26.0;
+/// Barb length of the jump arrow's head, in screen points.
+pub const JUMP_ARROW_HEAD_POINTS: f32 = 9.0;
+/// Half-angle between the jump arrow's barbs and its shaft.
+pub const JUMP_ARROW_HEAD_DEGREES: f32 = 32.0;
+
 /// Outer shoulder width of the listener, in world units. This is the scale
 /// anchor: three head-and-shoulder envelopes span the room height. The complete
 /// canonical Minecraft figure is twice this height, so a standing body occupies

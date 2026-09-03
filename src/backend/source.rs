@@ -8,7 +8,9 @@ use macindecode_windows_spatial_audio::{
 use crate::decoder::{
     DecodedSceneBlock, PlaybackKey, SceneLfePcm, SceneObjectPcm, SceneQueueReader, SceneSignature,
 };
-use crate::scene_view::{FuturePath, ObjectView, SceneViewMirror, sample_interval_frames};
+use crate::scene_view::{
+    FuturePath, MAX_VIEW_OBJECTS, ObjectView, SceneViewMirror, sample_interval_frames,
+};
 
 use super::state::{element_state_at, lfe_render_state, sample_future_path, windows_render_state};
 
@@ -71,6 +73,9 @@ impl SceneRenderSource {
         let requested = usize::try_from(frame_count)
             .map_err(|_| "Windows Spatial Audio frame count exceeds usize".to_owned())?;
         let mut objects = BTreeMap::<u64, DynamicObjectRender>::new();
+        // Per slot, not per element: the mirror's slots are the signature's
+        // sorted element IDs, and so is `objects`' BTreeMap order.
+        let mut jumped = [false; MAX_VIEW_OBJECTS];
         let mut lfe = self.has_lfe.then(|| LfeQuantumAccumulator::new(requested));
         let mut written = 0usize;
         let mut underrun = false;
@@ -113,7 +118,15 @@ impl SceneRenderSource {
                 self.current = None;
                 continue;
             }
-            copy_object_pcm(cursor, written, take, requested, &mut objects)?;
+            copy_object_pcm(
+                cursor,
+                written,
+                take,
+                requested,
+                self.scene_signature.object_element_ids(),
+                &mut objects,
+                &mut jumped,
+            )?;
             copy_lfe_pcm(cursor, written, take, lfe.as_mut())?;
             let take_u32 =
                 u32::try_from(take).map_err(|_| "Render quantum exceeds u32".to_owned())?;
@@ -140,12 +153,16 @@ impl SceneRenderSource {
         // two stay consistent for free.
         self.mirror.write(
             self.key,
-            objects.values().map(|render| ObjectView {
-                element_id: render.element_id,
-                active: render.active,
-                position: render.position,
-                gain: render.gain,
-            }),
+            objects
+                .values()
+                .enumerate()
+                .map(|(slot, render)| ObjectView {
+                    element_id: render.element_id,
+                    active: render.active,
+                    position: render.position,
+                    gain: render.gain,
+                    jumped: jumped.get(slot).copied().unwrap_or(false),
+                }),
             self.timeline_frame,
             self.sample_rate,
         );
@@ -330,8 +347,13 @@ fn copy_object_pcm(
     destination_offset: usize,
     take: usize,
     requested: usize,
+    element_ids: &[u64],
     renders: &mut BTreeMap<u64, DynamicObjectRender>,
+    jumped: &mut [bool; MAX_VIEW_OBJECTS],
 ) -> Result<(), String> {
+    let take_frames =
+        u32::try_from(take).map_err(|_| "Scene object slice exceeds the u32 range".to_owned())?;
+    let jump_end = cursor.offset_frames.saturating_add(take_frames);
     let source_start = usize::try_from(cursor.offset_frames)
         .map_err(|_| "Scene object offset exceeds usize".to_owned())?;
     let source_end = source_start
@@ -342,6 +364,20 @@ fn copy_object_pcm(
         .ok_or_else(|| "Spatial Audio object slice overflow".to_owned())?;
 
     for object in cursor.block.objects() {
+        // An instant update anywhere in this quantum belongs to the next
+        // breadcrumb, not to this quantum: the mirror latches it, because a
+        // quantum is roughly a quarter of the trail's sampling interval.
+        if let Ok(slot) = element_ids.binary_search(&object.element_id())
+            && let Some(flag) = jumped.get_mut(slot)
+            && has_instant_update(
+                &cursor.block,
+                object.element_id(),
+                cursor.offset_frames,
+                jump_end,
+            )
+        {
+            *flag = true;
+        }
         let state = element_state_at(
             &cursor.block,
             object.element_id(),
