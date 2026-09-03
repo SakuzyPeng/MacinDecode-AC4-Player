@@ -56,6 +56,26 @@ pub struct Figure {
     pub head_pitch: f32,
 }
 
+/// Half-depth of the hat shell in model units: the head's 8 units inflated by
+/// half a unit a side.
+const HAT_HALF_EXTENT: f32 = 4.5;
+
+/// How far a facing cue's rear face is sunk into that shell. Small, but
+/// deliberately not zero — flush against an opaque plane is the one setting that
+/// cracks open into a visible gap under any rounding.
+const CUE_EMBED: f32 = 0.15;
+
+/// Edge of an eye voxel, in model units.
+const EYE_EDGE: f32 = 1.3;
+/// Edge of the facing wedge. Larger than an eye so it still reads at a distance.
+const WEDGE_EDGE: f32 = 1.8;
+
+/// Where a cue of edge `edge` has to sit so its rear face lands inside the hat
+/// shell and the rest of it protrudes.
+const fn cue_depth(edge: f32) -> f32 {
+    -(HAT_HALF_EXTENT - CUE_EMBED + edge / 2.0)
+}
+
 impl Figure {
     /// Resolve the standing pose into world-space boxes on `floor_y`.
     #[must_use]
@@ -80,13 +100,15 @@ impl Figure {
         // that axis, so rotation leaves them where they are and they stay
         // axis-aligned.
         //
-        // They must clear the hat shell, whose half-depth is 4.5 units. The hat
-        // is opaque here — Minecraft's is a texture with transparency — so a cue
-        // tucked against the head at 4.1 is simply swallowed and the figure ends
-        // up with no readable front at all.
-        let eye_left = self.about_neck([-1.7, 4.9, -5.0], u, neck);
-        let eye_right = self.about_neck([1.7, 4.9, -5.0], u, neck);
-        let wedge = self.about_neck([0.0, 2.4, -5.9], u, neck);
+        // Their depth is derived from the hat's front plane rather than written
+        // down, because both ways of getting it wrong look like a modelling
+        // mistake: the hat is opaque here — Minecraft's is a texture with
+        // transparency — so a cue set behind the plane is swallowed whole and
+        // the figure has no readable front, while one set clear of it floats off
+        // the face with daylight behind it.
+        let eye_left = self.about_neck([-1.7, 4.9, cue_depth(EYE_EDGE)], u, neck);
+        let eye_right = self.about_neck([1.7, 4.9, cue_depth(EYE_EDGE)], u, neck);
+        let wedge = self.about_neck([0.0, 2.4, cue_depth(WEDGE_EDGE)], u, neck);
 
         [
             Part {
@@ -128,12 +150,12 @@ impl Figure {
             },
             Part {
                 centre: eye_left,
-                size: [1.3 * u; 3],
+                size: [EYE_EDGE * u; 3],
                 tone: PartTone::Eye,
             },
             Part {
                 centre: eye_right,
-                size: [1.3 * u; 3],
+                size: [EYE_EDGE * u; 3],
                 tone: PartTone::Eye,
             },
             // An untextured cube has no front, so this wedge is what makes the
@@ -141,7 +163,7 @@ impl Figure {
             // sweeps around the ring.
             Part {
                 centre: wedge,
-                size: [1.8 * u; 3],
+                size: [WEDGE_EDGE * u; 3],
                 tone: PartTone::Facing,
             },
         ]
@@ -357,6 +379,36 @@ mod tests {
         .parts(FLOOR)[PART_COUNT - 1]
             .centre[1];
         assert!(up > level && level > down, "{down} / {level} / {up}");
+    }
+
+    #[test]
+    fn facing_cues_are_welded_to_the_hat_and_still_protrude() {
+        // Both ways of missing look like a modelling mistake, and one of them
+        // shipped: the wedge's rear face sat half a unit clear of the shell, so
+        // the nose floated in front of the face with daylight behind it.
+        let parts = parts();
+        let hat = parts
+            .iter()
+            .find(|part| part.tone == PartTone::Hat)
+            .expect("hat");
+        let hat_front = hat.centre[2] - hat.size[2] / 2.0;
+
+        for cue in parts
+            .iter()
+            .filter(|part| matches!(part.tone, PartTone::Eye | PartTone::Facing))
+        {
+            let rear = cue.centre[2] + cue.size[2] / 2.0;
+            let front = cue.centre[2] - cue.size[2] / 2.0;
+            assert!(
+                rear > hat_front,
+                "cue floats clear of the head by {}: {cue:?}",
+                hat_front - rear
+            );
+            assert!(
+                front < hat_front,
+                "cue is swallowed by the opaque hat shell: {cue:?}"
+            );
+        }
     }
 
     #[test]
