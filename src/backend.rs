@@ -5,6 +5,17 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(target_os = "windows")]
 mod source;
+// Deliberately not gated on Windows. It is arithmetic over cross-platform
+// decoder types, and keeping it out of `source` is what lets its tests run
+// everywhere instead of only where the render callback compiles.
+#[cfg_attr(
+    not(target_os = "windows"),
+    allow(
+        dead_code,
+        reason = "only the Windows render callback resolves element state"
+    )
+)]
+mod state;
 #[cfg(target_os = "windows")]
 mod windows;
 

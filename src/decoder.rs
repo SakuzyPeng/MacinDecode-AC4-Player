@@ -335,7 +335,6 @@ pub struct SpatialPosition {
 }
 
 impl SpatialPosition {
-    #[cfg(target_os = "windows")]
     pub(super) const fn new(x: f32, y: f32, z: f32) -> Self {
         Self { x, y, z }
     }
@@ -362,7 +361,6 @@ pub struct SpatialObjectState {
 }
 
 impl SpatialObjectState {
-    #[cfg(target_os = "windows")]
     pub(super) const fn new(
         metadata_active: bool,
         position: Option<SpatialPosition>,
@@ -402,7 +400,7 @@ pub struct SceneObjectPcm {
 }
 
 impl SceneObjectPcm {
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", test))]
     pub(super) fn new(
         element_id: u64,
         initial_state: Option<SpatialObjectState>,
@@ -472,7 +470,7 @@ pub struct SceneMetadataUpdate {
 }
 
 impl SceneMetadataUpdate {
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", test))]
     pub(super) const fn new(
         element_id: u64,
         offset_frames: u32,
