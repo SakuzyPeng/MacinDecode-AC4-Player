@@ -3,6 +3,15 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "decode")]
+#[cfg_attr(
+    target_os = "windows",
+    allow(
+        dead_code,
+        reason = "the preview clock is built only where no renderer owns the FIFO"
+    )
+)]
+mod preview;
 #[cfg(target_os = "windows")]
 mod source;
 // Deliberately not gated on Windows. It is arithmetic over cross-platform
@@ -128,6 +137,13 @@ pub struct OutputSnapshot {
     position_updates: u64,
     underruns: u64,
     error: Option<String>,
+    /// Whether this is the scene preview rather than a real audio stream.
+    ///
+    /// A flag rather than an `OutputPhase` variant on purpose: the preview
+    /// moves through Ready/Playing/Paused/Ended exactly like playback does, and
+    /// every consumer that gates on phase — the transport, the timeline, the
+    /// repaint cadence — should treat it the same. Only the words differ.
+    preview: bool,
 }
 
 impl OutputSnapshot {
@@ -145,6 +161,20 @@ impl OutputSnapshot {
             position_updates: 0,
             underruns: 0,
             error: None,
+            preview: false,
+        }
+    }
+
+    /// The scene view running without an audio device behind it.
+    #[cfg(feature = "decode")]
+    fn preview(phase: OutputPhase, reserved_dynamic_objects: u32, playhead_frames: u64) -> Self {
+        Self {
+            phase,
+            device_label: "Scene preview · no audio output".to_owned(),
+            reserved_dynamic_objects,
+            playhead_frames,
+            preview: true,
+            ..Self::idle()
         }
     }
 
@@ -174,6 +204,11 @@ impl OutputSnapshot {
             error: Some(error.into()),
             ..Self::idle()
         }
+    }
+
+    /// Whether the scene is being previewed rather than played.
+    pub const fn is_preview(&self) -> bool {
+        self.preview
     }
 
     pub const fn phase(&self) -> OutputPhase {
@@ -294,6 +329,11 @@ pub struct SpatialOutputController {
     /// of which build a fresh render source — keep publishing into the same
     /// mirror instead of leaving the view blank until the next quantum.
     scene_view: Arc<SceneViewMirror>,
+    /// Drives the scene view where no renderer does. Present only when this
+    /// build has no spatial output backend, which is what keeps exactly one
+    /// consumer popping the Scene FIFO.
+    #[cfg(feature = "decode")]
+    preview: Option<preview::ScenePreview>,
     snapshot: OutputSnapshot,
     revision: u64,
     master_gain: f32,
@@ -330,6 +370,8 @@ impl SpatialOutputController {
             device_catalog: windows::DeviceCatalogWorker::spawn(),
             config: None,
             scene_view: Arc::new(SceneViewMirror::new()),
+            #[cfg(feature = "decode")]
+            preview: None,
             snapshot,
             revision: 0,
             master_gain: 1.0,
@@ -391,6 +433,24 @@ impl SpatialOutputController {
         #[cfg(not(target_os = "windows"))]
         {
             self.config = Some(config.clone());
+            #[cfg(feature = "decode")]
+            {
+                // Nothing else will drain this FIFO, so the preview both feeds
+                // the stage and keeps the decoder from stalling at its bound.
+                self.preview = Some(preview::ScenePreview::new(
+                    reader,
+                    Arc::clone(&self.scene_view),
+                    config.scene_signature.object_element_ids().to_vec(),
+                    config.sample_rate,
+                    config.start_frame,
+                ));
+                self.set_snapshot(OutputSnapshot::preview(
+                    OutputPhase::Ready,
+                    config.dynamic_object_count,
+                    config.start_frame,
+                ));
+            }
+            #[cfg(not(feature = "decode"))]
             drop(reader);
         }
     }
@@ -410,6 +470,10 @@ impl SpatialOutputController {
             self.renderer = None;
         }
         self.config = None;
+        #[cfg(feature = "decode")]
+        {
+            self.preview = None;
+        }
         #[cfg(target_os = "windows")]
         self.set_snapshot(OutputSnapshot::idle());
     }
@@ -437,6 +501,45 @@ impl SpatialOutputController {
             if let Some(renderer) = self.renderer.as_ref() {
                 self.set_snapshot(windows::snapshot(renderer.snapshot()));
             }
+        }
+    }
+
+    /// Move the scene preview forward by one UI frame.
+    ///
+    /// A no-op wherever a renderer owns the FIFO: there the render callback is
+    /// the clock, and a second consumer would steal blocks from it.
+    #[cfg_attr(
+        not(feature = "decode"),
+        allow(
+            unused_variables,
+            clippy::unused_self,
+            reason = "the preview has no decoded blocks to walk without the decode feature"
+        )
+    )]
+    pub fn advance_preview(&mut self, playing: bool, delta_seconds: f32) {
+        #[cfg(feature = "decode")]
+        {
+            let reserved = self.snapshot.reserved_dynamic_objects;
+            let was_ready = self.snapshot.phase == OutputPhase::Ready;
+            let Some(preview) = self.preview.as_mut() else {
+                return;
+            };
+            if playing {
+                preview.advance(delta_seconds);
+            }
+            let phase = if preview.has_ended() {
+                OutputPhase::Ended
+            } else if playing {
+                OutputPhase::Playing
+            } else if was_ready {
+                // Nothing has been asked of it yet, so it is still merely ready
+                // rather than paused partway through.
+                OutputPhase::Ready
+            } else {
+                OutputPhase::Paused
+            };
+            let snapshot = OutputSnapshot::preview(phase, reserved, preview.playhead_frames());
+            self.set_snapshot(snapshot);
         }
     }
 
@@ -554,7 +657,7 @@ impl SpatialOutputController {
         self.config.as_ref().map(|config| &config.output_device)
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", feature = "decode"))]
     fn set_snapshot(&mut self, snapshot: OutputSnapshot) {
         if self.snapshot != snapshot {
             self.snapshot = snapshot;

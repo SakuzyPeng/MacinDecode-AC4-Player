@@ -80,8 +80,8 @@ render source，共用同一个镜像才不会让视图空一拍。
 
 **写入点**：`SceneRenderSource::render_quantum` 的尾部，直接抄这一帧**已经算好**的
 `RenderQuantum` 对象表，不重新解析一遍 OAMD。理由是平行推导会在 ramp 上和音频漂开；而且
-`windows_render_state` 产出的坐标（Core/ADM `[x, y, z]` 映射为 `[x, z, -y]`）本来就是 `scene3d`
-绘制所用的听众空间，不需要任何转换。
+`backend::state::listener_render_state` 产出的坐标（Core/ADM `[x, y, z]` 映射为 `[x, z, -y]`）本来
+就是 `scene3d` 绘制所用的听众空间，不需要任何转换。
 
 **实时约束**（每一条都是必需的，不是风格问题）：
 
@@ -163,9 +163,29 @@ FIFO 自己的 key 门是同一套语义，视图不可能显示 stream 已经�
 运行的 `ui` 会再请求一次 16 ms，让较早的 deadline 覆盖隐藏节奏。**`Ended` + 有播放意图**不看可见性：
 曲目交接正是后台最需要保持及时的一条。
 
-非 Windows 平台上没有任何写方，`read` 恒为空，舞台走同一条路径显示空房间——**这一条跟解码无关**：
-镜像的写入点是 WASAPI 渲染回调，所以即使解码在跑，没有回放就没有推动它的时钟。要让无回放平台看到
-对象，需要另找一个时钟（解码 FIFO + UI 侧时间轴），那是独立的一步。
+### 无回放平台上的场景预览
+
+镜像的写入点是 WASAPI 渲染回调，所以没有回放就没有推动它的时钟——即使解码在跑，舞台也只会是一间
+空房间，FIFO 填到两秒上限后解码本身也停住。`backend::preview::ScenePreview` 是补上的那个时钟。
+
+它按 UI 的 `stable_dt` 走同一条 Scene FIFO，用 render source 用的**同一个**
+`backend::state::element_state_at` 解析 OAMD、同一个 `listener_render_state` 换算坐标，然后写同一个
+镜像。共用这两个函数是重点：画面不是一份平行推导，而是"如果这台机器能放音，此刻会提交给渲染器的
+那一组对象"。它唯一不碰的是 PCM——没有地方送。
+
+三条约束：
+
+- **构造条件是 `feature = "decode"` 且没有渲染器**（`backend.rs` 的 `ensure_configured` 里，原先
+  `drop(reader)` 的那个分支）。一条 FIFO 永远只有一个消费者，预览和 render source 不可能同时在 pop。
+- **每次写入盖的仍是 reader 的 `PlaybackKey`**，所以 seek/换源的清场逻辑一字不改地适用。
+- **时间累进带亚帧余数**，并把单次 tick 截到 0.25 秒。48 kHz 下 16 ms 恰好是 768 帧，但帧时间不保证
+  整除，每 tick 丢掉余数会让预览可测量地走慢；截断则是防止窗口被拖住几秒后一次性冲掉整个缓冲。
+
+`OutputSnapshot::is_preview()` 让 UI 说实话：设备标签是 `Scene preview · no audio output`，状态行也
+换成对应措辞。相位仍然走 Ready/Playing/Paused/Ended，因为传输控件、时间轴和重绘节奏本来就该一视同
+仁——**只有用词不同，没有第二套状态机**。
+
+Windows 上不构造预览：那里 render source 拥有 FIFO，多一个消费者就是在和音频抢数据。
 
 ## 后续里程碑
 

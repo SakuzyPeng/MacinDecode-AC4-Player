@@ -800,6 +800,25 @@ impl SceneQueueReader {
     }
 }
 
+/// A fresh queue and a reader already bound to `key`.
+///
+/// The queue's constructor is private to this module because nothing outside it
+/// should be inventing playback queues; tests in the modules that *consume* a
+/// reader still need one, and this keeps that need explicit and test-only.
+///
+/// Gated on `decode` because the only consumer is `backend::preview`, which
+/// exists only where there is a decoder to drive it.
+#[cfg(all(test, feature = "decode"))]
+pub(crate) fn scene_queue_pair(key: PlaybackKey) -> (SharedSceneQueue, SceneQueueReader) {
+    let queue = SharedSceneQueue::new();
+    queue.reset(key);
+    let reader = SceneQueueReader {
+        queue: queue.clone(),
+        key,
+    };
+    (queue, reader)
+}
+
 fn lock_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()

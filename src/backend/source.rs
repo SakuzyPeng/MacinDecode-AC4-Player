@@ -10,7 +10,7 @@ use crate::decoder::{
 };
 use crate::scene_view::{MAX_VIEW_OBJECTS, ObjectView, SceneViewMirror};
 
-use super::state::{element_state_at, has_instant_update, lfe_render_state, windows_render_state};
+use super::state::{element_state_at, has_instant_update, lfe_render_state, listener_render_state};
 
 pub(super) struct SceneRenderSource {
     reader: SceneQueueReader,
@@ -314,7 +314,7 @@ fn copy_object_pcm(
             cursor.offset_frames,
         );
         let render = renders.entry(object.element_id()).or_insert_with(|| {
-            let (active, position, gain) = windows_render_state(state);
+            let (active, position, gain) = listener_render_state(state);
             DynamicObjectRender {
                 element_id: object.element_id(),
                 active,

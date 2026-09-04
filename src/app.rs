@@ -790,6 +790,13 @@ impl PlayerApp {
             OutputSyncAction::Reset => self.output.reset(),
         }
 
+        // The scene view's clock where no renderer provides one. Placed after
+        // configuration so a preview built this frame also advances this frame,
+        // and before the revision check so its snapshot reaches the status line
+        // without a round trip.
+        self.output
+            .advance_preview(self.playback_intent, context.input(|input| input.stable_dt));
+
         if self.output_revision != self.output.revision() {
             self.output_revision = self.output.revision();
             self.status = output_status_line(self.output.snapshot(), self.decoder.snapshot());
@@ -861,6 +868,9 @@ impl PlayerApp {
         let devices = self.output.devices().to_vec();
         let preferred = self.output.preferred_device().clone();
         let preferred_label = match &preferred {
+            OutputDeviceSelection::SystemDefault if output.is_preview() => {
+                output.device_label().to_owned()
+            }
             OutputDeviceSelection::SystemDefault => match output.phase() {
                 OutputPhase::Unavailable => "Spatial output unavailable".to_owned(),
                 OutputPhase::Idle => "System default".to_owned(),
@@ -2176,6 +2186,9 @@ fn decoder_status_line(decoder: &DecoderSnapshot) -> StatusLine {
 }
 
 fn output_status_line(output: &OutputSnapshot, decoder: &DecoderSnapshot) -> StatusLine {
+    if output.is_preview() {
+        return preview_status_line(output, decoder);
+    }
     match output.phase() {
         OutputPhase::Unavailable | OutputPhase::Idle => decoder_status_line(decoder),
         OutputPhase::Initializing => StatusLine::idle(format!(
@@ -2206,6 +2219,33 @@ fn output_status_line(output: &OutputSnapshot, decoder: &DecoderSnapshot) -> Sta
         OutputPhase::Failed => StatusLine::warning(format!(
             "Windows Spatial Audio failed: {}",
             output.error().unwrap_or("unknown native output error")
+        )),
+    }
+}
+
+/// The same states, worded so nobody reads the stage as audible.
+///
+/// The preview walks the decoded scene without an audio device behind it, so
+/// every line here says so rather than borrowing playback's vocabulary.
+fn preview_status_line(output: &OutputSnapshot, decoder: &DecoderSnapshot) -> StatusLine {
+    match output.phase() {
+        OutputPhase::Playing => StatusLine::ready(format!(
+            "Scene preview at frame {} · no audio output{}",
+            output.playhead_frames(),
+            seek_index_suffix(decoder)
+        )),
+        OutputPhase::Paused => StatusLine::idle(format!(
+            "Scene preview paused at {} frames · no audio output",
+            output.playhead_frames()
+        )),
+        OutputPhase::Ended => StatusLine::ready(format!(
+            "Scene preview ended at frame {}",
+            output.playhead_frames()
+        )),
+        _ => StatusLine::ready(format!(
+            "Scene preview ready: {} objects, no audio output on this build{}",
+            output.reserved_dynamic_objects(),
+            seek_index_suffix(decoder)
         )),
     }
 }

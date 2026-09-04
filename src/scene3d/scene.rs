@@ -2,7 +2,7 @@
 //!
 //! Coordinates are the Windows listener space that `backend/source.rs` submits
 //! to: `+X` right, `+Y` up, and **`-Z` is the front of the room**, because
-//! `windows_render_state` maps Core/ADM `[x, y, z]` to `[x, z, -y]`. The LFE
+//! `listener_render_state` maps Core/ADM `[x, y, z]` to `[x, z, -y]`. The LFE
 //! slot lives on the `-Z` wall and the listener faces that way, so the `BACK`
 //! camera preset at `+Z` correctly looks over the listener's shoulder.
 

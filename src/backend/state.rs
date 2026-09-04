@@ -116,10 +116,13 @@ fn lerp(from: f32, to: f32, amount: f32) -> f32 {
     from + (to - from) * amount
 }
 
-/// Flatten a resolved state into what Windows Spatial Audio is handed for a
-/// dynamic object: Core/ADM `[x, y, z]` becomes the listener coordinates
-/// `[x, z, -y]`, clamped to the unit cube.
-pub(super) fn windows_render_state(state: Option<SpatialObjectState>) -> (bool, [f32; 3], f32) {
+/// Flatten a resolved state into listener coordinates: Core/ADM `[x, y, z]`
+/// becomes `[x, z, -y]`, clamped to the unit cube.
+///
+/// This is what Windows Spatial Audio is handed for a dynamic object, and also
+/// what the scene view draws in — one conversion, so a picture of a scene and
+/// the scene itself cannot disagree about where anything is.
+pub(super) fn listener_render_state(state: Option<SpatialObjectState>) -> (bool, [f32; 3], f32) {
     let Some(state) = state else {
         return (false, [0.0; 3], 0.0);
     };
@@ -204,7 +207,7 @@ mod tests {
             Some(0.75),
             true,
         );
-        let (active, position, gain) = windows_render_state(Some(state));
+        let (active, position, gain) = listener_render_state(Some(state));
         assert!(active);
         for (actual, expected) in position.into_iter().zip([0.5, 0.25, -1.0]) {
             assert!((actual - expected).abs() < f32::EPSILON);

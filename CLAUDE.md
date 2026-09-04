@@ -156,8 +156,12 @@ Cross-platform types that only one side consumes carry
 fields or the other build warns (and `-D warnings` turns that into a failure). The Scene FIFO is the
 live example: its push side belongs to `decode`, its pop side to the Windows output path.
 
-`cargo test` runs the same 121 tests in both configurations; with `decode` on it additionally
-compiles three media-gated `decoder::worker` tests (ignored without `MACINDECODE_AC4_TEST_MEDIA`).
+`cargo test` runs 121 tests with `--no-default-features` and 129 with `decode` on; the extra eight
+cover `backend/preview.rs`, which is the scene view's clock on a build with a decoder but no
+renderer — it walks the Scene FIFO at wall-clock rate through the same `backend::state` helpers the
+render callback uses, so the picture cannot drift from what playback would submit. With `decode` on
+it also compiles three media-gated `decoder::worker` tests (ignored without
+`MACINDECODE_AC4_TEST_MEDIA`).
 The decode worker asks for a 16 MiB stack explicitly rather than inheriting the Windows linker's
 `/STACK`. Measured on one 20-object L4 A-JOC stream: release overflows at 512 KiB, debug at 1 MiB,
 and both carry the stream at 2 MiB — so std's default is enough for *that* file, with under 2×

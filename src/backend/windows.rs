@@ -153,6 +153,9 @@ pub(super) fn snapshot(native: RenderSnapshot) -> OutputSnapshot {
         position_updates: native.position_updates,
         underruns: native.underruns,
         error: native.error,
+        // A native renderer is by definition not the preview: this snapshot is
+        // reporting a real audio endpoint that was actually handed samples.
+        preview: false,
     }
 }
 
