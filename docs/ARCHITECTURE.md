@@ -33,9 +33,12 @@ GUI、播放协调器和解码适配器均留在 Rust 进程内，直接依赖
 - `model` 校验用户选择的媒体路径并保存壳层状态；
 - `inspection` 在单独线程调用 `macindecode-ac4-inspect`，缓存 owned report，不阻塞 GUI；
 - `decoder` 在单独线程组合 `macindecode-ac4-mp4`、
-  `macindecode-ac4-bitstream` 与 `macindecode-ac4-scene(audio-decode)`；该线程显式申请 16 MiB 栈，
-  因为 Core 的 A-JOC 重建需要大工作区（Core 自己的测试也为它开 16 MiB）。这条以前靠 Windows 链接器的
-  `/STACK:8000000` 隐式满足，别的平台上 `std` 默认只给 2 MiB，所以要求必须写在代码里；
+  `macindecode-ac4-bitstream` 与 `macindecode-ac4-scene(audio-decode)`；该线程**显式**申请 16 MiB 栈。
+  实测一条 20 对象的 L4 A-JOC 流完整解完：release 在 512 KiB 溢出、1 MiB 通过，debug 在 1 MiB 溢出、
+  2 MiB 通过——也就是说 `std` 给 spawn 线程的 2 MiB 默认值**扛得住这条流**，只是 debug 下余量不到两倍，
+  而 A-JOC 的栈用量随码流里的工具配置变化。Core 自己的测试为同一段重建开 16 MiB，线程栈又只是保留
+  地址空间而非提交内存，所以照着它要是这笔交易里便宜的一边。这条以前靠 Windows 链接器的
+  `/STACK:8000000` 隐式满足，换个平台就没了，所以要求必须写在代码里；
 - `decoder::worker` 把 Core 的借用 Scene view 复制为播放器自有的对象/LFE PCM、稳定元素 ID、
   起点状态与 ramp 更新，Core 类型不会越过该适配边界；
 - 活动压缩文件只读一次并保存在当前 request；初始顺序解码立即开始，独立 worker 并行建立 AU 时间线

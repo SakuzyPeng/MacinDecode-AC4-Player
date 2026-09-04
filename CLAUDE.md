@@ -159,8 +159,11 @@ live example: its push side belongs to `decode`, its pop side to the Windows out
 `cargo test` runs the same 121 tests in both configurations; with `decode` on it additionally
 compiles three media-gated `decoder::worker` tests (ignored without `MACINDECODE_AC4_TEST_MEDIA`).
 The decode worker asks for a 16 MiB stack explicitly rather than inheriting the Windows linker's
-`/STACK` — a spawned thread elsewhere would get std's 2 MiB and overflow in Core's A-JOC
-reconstruction.
+`/STACK`. Measured on one 20-object L4 A-JOC stream: release overflows at 512 KiB, debug at 1 MiB,
+and both carry the stream at 2 MiB — so std's default is enough for *that* file, with under 2×
+headroom in a debug build. Core reserves 16 MiB for the same reconstruction in its own tests, and a
+thread stack is reserved address space rather than committed memory, so the reservation is the cheap
+side of the trade.
 
 ## Conventions
 

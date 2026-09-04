@@ -22,7 +22,17 @@ use super::{
     WorkerEvent, WorkerEventKind, WorkerHandle,
 };
 
-/// Stack for the decode thread, matching what Core reserves for the same work.
+/// Stack for the decode thread.
+///
+/// Measured against one 20-object L4 A-JOC stream decoded end to end: a release
+/// build overflows at 512 KiB and survives 1 MiB; a debug build overflows at
+/// 1 MiB and survives 2 MiB. So std's 2 MiB default for a spawned thread does
+/// carry that stream -- with under 2x headroom in the profile developers run,
+/// on one piece of content, for work whose stack use varies with the tool
+/// configuration in the bitstream. Core reserves 16 MiB for the same
+/// reconstruction in its own tests; matching that is the cheap side of the
+/// trade, since a thread stack is reserved address space rather than committed
+/// memory.
 const DECODE_STACK_BYTES: usize = 16 * 1024 * 1024;
 const MAX_MP4_EDIT_ENTRIES: usize = 8;
 const COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(20);
@@ -32,12 +42,11 @@ pub(super) fn spawn(queue: SharedSceneQueue) -> Result<WorkerHandle, String> {
     let (event_sender, event_receiver) = mpsc::channel();
     let join_handle = thread::Builder::new()
         .name("ac4-core-decode".to_owned())
-        // Core's A-JOC reconstruction wants a large workspace on the stack --
-        // Core's own tests spawn a 16 MiB thread for it. On Windows this thread
-        // used to inherit the 8 MB that `.cargo/config.toml` asks the linker
-        // for, which is both invisible and platform-specific; a spawned thread
-        // elsewhere gets the std default of 2 MiB and would overflow. Ask for
-        // the workspace here so the requirement travels with the code.
+        // Core's A-JOC reconstruction wants a large workspace on the stack.
+        // On Windows this thread used to inherit the 8 MB that
+        // `.cargo/config.toml` asks the linker for -- invisible, and gone the
+        // moment the same code runs anywhere else. Ask for it here so the
+        // requirement travels with the code rather than with the target.
         .stack_size(DECODE_STACK_BYTES)
         .spawn(move || decoder_worker(&command_receiver, &event_sender, &queue))
         .map_err(|error| format!("Failed to start MacinDecode Core worker: {error}"))?;
