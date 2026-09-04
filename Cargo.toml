@@ -24,6 +24,14 @@ eframe = { version = "=0.36.1", default-features = false, features = [
 # extra compilation. Used only for the scene vertex cast in `scene3d::gpu`.
 bytemuck = { version = "1", features = ["derive"] }
 macindecode-ac4-inspect = { git = "https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git", rev = "eb7c6132072daad3b4312bd23c2d9e8a63fa1265" }
+# Core decode. Not platform-gated: these crates carry no `target_os` of their
+# own and Core's release CI builds `audio-decode` for Linux, macOS and Windows
+# alike. What is Windows-only is *playback*, which lives in the native crate
+# below. The feature exists because the build needs the locally generated ETSI
+# spec tables (see README), not because a platform cannot decode.
+macindecode-ac4-bitstream = { git = "https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git", rev = "eb7c6132072daad3b4312bd23c2d9e8a63fa1265", optional = true }
+macindecode-ac4-mp4 = { git = "https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git", rev = "eb7c6132072daad3b4312bd23c2d9e8a63fa1265", optional = true }
+macindecode-ac4-scene = { git = "https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git", rev = "eb7c6132072daad3b4312bd23c2d9e8a63fa1265", features = ["audio-decode"], optional = true }
 rfd = { version = "=0.17.2", default-features = false, features = [
     "common-controls-v6",
     "wayland",
@@ -35,10 +43,19 @@ serde = { version = "1", features = ["derive"] }
 [build-dependencies]
 sha2 = "0.10"
 
+[features]
+default = ["decode"]
+# Decoding is the point of the app, so it is on by default and a build without
+# it is the explicit opt-out rather than a silent downgrade. `--no-default-features`
+# gives the inspection-only shell, which is also the only configuration that
+# builds without the spec tables.
+decode = [
+    "dep:macindecode-ac4-bitstream",
+    "dep:macindecode-ac4-mp4",
+    "dep:macindecode-ac4-scene",
+]
+
 [target.'cfg(target_os = "windows")'.dependencies]
-macindecode-ac4-bitstream = { git = "https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git", rev = "eb7c6132072daad3b4312bd23c2d9e8a63fa1265" }
-macindecode-ac4-mp4 = { git = "https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git", rev = "eb7c6132072daad3b4312bd23c2d9e8a63fa1265" }
-macindecode-ac4-scene = { git = "https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git", rev = "eb7c6132072daad3b4312bd23c2d9e8a63fa1265", features = ["audio-decode"] }
 macindecode-windows-spatial-audio = { path = "crates/windows-spatial-audio" }
 
 [lints.rust]

@@ -5,8 +5,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project
 
 Native desktop player for AC-4 spatial audio (`.m4a`, `.mp4`, `.ac4`), built on egui/eframe.
-Windows gets full decode plus Windows Spatial Audio playback; every other platform builds an
-inspection-only shell. All decoding comes from `MacinDecode-AC4-Core` — the app never calls a
+Decode runs on every platform — Core's crates carry no `target_os` of their own. What Windows adds
+is *playback*, through Windows Spatial Audio. `--no-default-features` drops the `decode` feature for
+an inspection-only shell, which is also the only configuration that builds without the spec tables. All decoding comes from `MacinDecode-AC4-Core` — the app never calls a
 system media decoder.
 
 Deeper design docs (in Chinese): `docs/ARCHITECTURE.md`, `docs/WINDOWS_DECODE.md`,
@@ -33,13 +34,12 @@ cargo test decoder::tests::scene_queue_is_bounded_to_two_seconds_and_pop_release
 cargo test -p macindecode-windows-spatial-audio
 ```
 
-### Windows-only builds need the ETSI spec tables
+### The `decode` feature needs the ETSI spec tables
 
 `macindecode-ac4-scene`'s `audio-decode` feature pulls in a Core build script that reads three
-locally generated tables. Without them, *any* build targeting Windows fails in
-`macindecode-ac4-decode`'s `build.rs` — including a cross `cargo check --target
-x86_64-pc-windows-msvc` from Linux/macOS. Generate them in a `MacinDecode-AC4-Core` checkout at the
-`rev` pinned in `Cargo.toml`, then point at it:
+locally generated tables. The requirement is keyed to the feature, not to a platform: with `decode`
+on (the default) *every* build needs them, and with `--no-default-features` none does. Generate them
+in a `MacinDecode-AC4-Core` checkout at the `rev` pinned in `Cargo.toml`, then point at it:
 
 ```bat
 set "MACINDECODE_AC4_SPEC_DIR=<MacinDecode-AC4-Core>\spec"
@@ -54,8 +54,8 @@ Ignored tests need `MACINDECODE_AC4_TEST_MEDIA` and, for the output ones, a Spat
 endpoint. Real media goes only in the gitignored `.local-test-media/`, never in Git.
 
 ```bat
-cargo test decoder::windows::tests::decodes_local_media_into_a_bounded_scene_buffer -- --ignored
-cargo test decoder::windows::tests::seeks_real_media_across_epochs_without_rereading_the_file -- --ignored
+cargo test decoder::worker::tests::decodes_local_media_into_a_bounded_scene_buffer -- --ignored
+cargo test decoder::worker::tests::seeks_real_media_across_epochs_without_rereading_the_file -- --ignored
 cargo test backend::windows::tests::submits_decoded_scene_to_windows_spatial_audio -- --ignored
 cargo test -p macindecode-windows-spatial-audio ended_renderer_releases_objects_without_entering_failed_state -- --ignored
 ```
@@ -77,7 +77,7 @@ the status line isn't recomputed each frame.
 - `inspection::InspectionController` — thread per request into `macindecode-ac4-inspect`;
   cross-platform, read-only. `bitstream_ui.rs` renders its report.
 - `decoder::DecoderController` — command/event channels to one long-lived worker
-  (`decoder/windows.rs`) plus the shared Scene FIFO.
+  (`decoder/worker.rs`) plus the shared Scene FIFO.
 - `backend::SpatialOutputController` — owns the native `Renderer` and a device-catalog worker
   (`backend/windows.rs`) that re-enumerates endpoints roughly every 2 s.
 
@@ -99,7 +99,7 @@ external edits to the active file are invisible until it is reselected.
 ### Core type isolation
 
 `Ac4DecoderSession::decode_access_unit` returns borrowed views valid only until the Session's next
-mutable call. `decoder/windows.rs::own_scene_frame` copies the minimal semantics — stable element
+mutable call. `decoder/worker.rs::own_scene_frame` copies the minimal semantics — stable element
 IDs, per-object mono planar normalized `f32`, one optional native LFE, integer sample times, OAMD
 active/position/gain/ramp — into player-owned types *before* the worker lets the Session advance.
 Core types must never cross into `backend`; the native crate must never see a bitstream or a Core
@@ -141,13 +141,26 @@ previous Full candidate within the same epoch, but only before target PCM has be
 
 ### Platform gating
 
-`decoder/windows.rs`, `backend/windows.rs`, `backend/source.rs`, and the whole native crate are
-`#[cfg(target_os = "windows")]`. Elsewhere the controllers construct in an "unavailable" state.
-Cross-platform types that only Windows consumes carry
-`#[cfg_attr(not(target_os = "windows"), allow(dead_code))]` — keep that idiom on new fields or the
-Linux/macOS build warns (and `-D warnings` turns that into a failure). Note that `cargo test` off
-Windows exercises only the shell (37 tests); the Windows-only modules add more and cannot be
-compiled here at all without the spec tables.
+Two gates, and conflating them is the mistake this section exists to prevent.
+
+**`#[cfg(feature = "decode")]`** covers `decoder/worker.rs` and the parts of `decoder.rs` that drive
+it. Nothing here is platform-specific — `decoder/worker.rs` imports only `std` and the Core crates,
+and calls no OS API at all.
+
+**`#[cfg(target_os = "windows")]`** covers `backend/windows.rs`, `backend/source.rs` and the whole
+native crate: COM, WASAPI, and the render callback. Off Windows the output controller constructs in
+an "unavailable" state.
+
+Cross-platform types that only one side consumes carry
+`#[cfg_attr(not(target_os = "windows"), allow(dead_code, reason = "..."))]` — keep that idiom on new
+fields or the other build warns (and `-D warnings` turns that into a failure). The Scene FIFO is the
+live example: its push side belongs to `decode`, its pop side to the Windows output path.
+
+`cargo test` runs the same 121 tests in both configurations; with `decode` on it additionally
+compiles three media-gated `decoder::worker` tests (ignored without `MACINDECODE_AC4_TEST_MEDIA`).
+The decode worker asks for a 16 MiB stack explicitly rather than inheriting the Windows linker's
+`/STACK` — a spawned thread elsewhere would get std's 2 MiB and overflow in Core's A-JOC
+reconstruction.
 
 ## Conventions
 

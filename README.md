@@ -1,7 +1,7 @@
 # MacinDecode AC-4 Player
 
-一个用于打开、检查和播放 AC-4 空间音频文件的原生桌面应用。Windows 版本支持实际播放，
-macOS 版本目前用于查看文件信息。
+一个用于打开、检查和播放 AC-4 空间音频文件的原生桌面应用。解码在 Windows、macOS 和 Linux 上
+都可用；**播放**目前只有 Windows 有，因为它走的是 Windows Spatial Audio。
 
 ## 使用
 
@@ -37,7 +37,8 @@ macOS 版本目前用于查看文件信息。
 ## 平台与限制
 
 - Windows：支持文件检查、解码和空间音频播放。
-- macOS：目前仅支持界面和文件检查，不支持音频解码与播放。
+- macOS / Linux：支持文件检查和解码，暂不支持播放——缺的是空间音频输出后端，不是解码能力。
+  用 `--no-default-features` 构建可以关掉解码，得到一个只做检查的外壳（也是唯一不需要规范表的配置）。
 - 当前聚焦 Full A-JOC 内容，其他 AC-4 编码形式可能无法播放。
 - 进度条会在后台 seek 索引完成后启用。拖动只预览，松开时执行一次跳转，并保持原来的播放/暂停状态。
 - MP4 seek 同时要求容器同步样本和 AC-4 Full random access；裸流要求 Core 报告 Full random access。
@@ -64,8 +65,9 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 ```
 
-Windows 的完整解码功能需要从官方 ETSI 规范在本地生成三份锁定表。本仓库不会提交或分发这些文件。
-在与 `Cargo.lock` 锁定版本一致的 `MacinDecode-AC4-Core` 检出中运行：
+完整解码功能需要从官方 ETSI 规范在本地生成三份锁定表——**所有平台都一样**，这是构建输入而不是
+平台限制。本仓库不会提交或分发这些文件。在与 `Cargo.lock` 锁定版本一致的 `MacinDecode-AC4-Core`
+检出中运行：
 
 ```text
 python -m pip install -r scripts/requirements-spec.txt
@@ -83,6 +85,13 @@ cargo clippy --all-targets -- -D warnings
 cargo run
 ```
 
+```bash
+export MACINDECODE_AC4_SPEC_DIR=<MacinDecode-AC4-Core>/spec
+cargo test
+cargo clippy --all-targets -- -D warnings
+cargo run
+```
+
 `MACINDECODE_AC4_SPEC_DIR` 中必须存在：
 
 - `generated/ts103190_pdf_tables.rs`
@@ -92,7 +101,7 @@ cargo run
 本地端到端回归可额外设置 `MACINDECODE_AC4_TEST_MEDIA`，再运行：
 
 ```bat
-cargo test decoder::windows::tests::decodes_local_media_into_a_bounded_scene_buffer -- --ignored
+cargo test decoder::worker::tests::decodes_local_media_into_a_bounded_scene_buffer -- --ignored
 cargo test backend::windows::tests::submits_decoded_scene_to_windows_spatial_audio -- --ignored
 cargo test -p macindecode-windows-spatial-audio ended_renderer_releases_objects_without_entering_failed_state -- --ignored
 cargo test -p macindecode-windows-spatial-audio opens_enumerated_endpoints_by_stable_id -- --ignored

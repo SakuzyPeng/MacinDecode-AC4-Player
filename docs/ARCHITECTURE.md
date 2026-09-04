@@ -23,13 +23,20 @@ GUI、播放协调器和解码适配器均留在 Rust 进程内，直接依赖
 
 ## 当前边界
 
-本仓库目前实现 GUI、只读 inspection、Windows Core 解码和 Windows Spatial Audio 输出：
+本仓库目前实现 GUI、只读 inspection、跨平台 Core 解码和 Windows Spatial Audio 输出。
+
+**解码与回放是两道门，不要混为一谈。** Core 的解码 crate 自身不带任何 `target_os`，其 release CI
+在 Linux / macOS / Windows 六个 target 上都构建 `audio-decode`，所以解码走 Cargo feature
+`decode`（默认开），跟平台无关；真正只有 Windows 的是**输出**——COM、WASAPI 和渲染回调。这两道门
+在代码里分别是 `#[cfg(feature = "decode")]` 和 `#[cfg(target_os = "windows")]`。
 
 - `model` 校验用户选择的媒体路径并保存壳层状态；
 - `inspection` 在单独线程调用 `macindecode-ac4-inspect`，缓存 owned report，不阻塞 GUI；
-- `decoder` 在 Windows 单独线程组合 `macindecode-ac4-mp4`、
-  `macindecode-ac4-bitstream` 与 `macindecode-ac4-scene(audio-decode)`；
-- `decoder::windows` 把 Core 的借用 Scene view 复制为播放器自有的对象/LFE PCM、稳定元素 ID、
+- `decoder` 在单独线程组合 `macindecode-ac4-mp4`、
+  `macindecode-ac4-bitstream` 与 `macindecode-ac4-scene(audio-decode)`；该线程显式申请 16 MiB 栈，
+  因为 Core 的 A-JOC 重建需要大工作区（Core 自己的测试也为它开 16 MiB）。这条以前靠 Windows 链接器的
+  `/STACK:8000000` 隐式满足，别的平台上 `std` 默认只给 2 MiB，所以要求必须写在代码里；
+- `decoder::worker` 把 Core 的借用 Scene view 复制为播放器自有的对象/LFE PCM、稳定元素 ID、
   起点状态与 ramp 更新，Core 类型不会越过该适配边界；
 - 活动压缩文件只读一次并保存在当前 request；初始顺序解码立即开始，独立 worker 并行建立 AU 时间线
   与 Full random-access 索引；
@@ -153,7 +160,9 @@ FIFO 自己的 key 门是同一套语义，视图不可能显示 stream 已经�
 运行的 `ui` 会再请求一次 16 ms，让较早的 deadline 覆盖隐藏节奏。**`Ended` + 有播放意图**不看可见性：
 曲目交接正是后台最需要保持及时的一条。
 
-非 Windows 平台上没有任何写方，`read` 恒为空，舞台走同一条路径显示空房间。
+非 Windows 平台上没有任何写方，`read` 恒为空，舞台走同一条路径显示空房间——**这一条跟解码无关**：
+镜像的写入点是 WASAPI 渲染回调，所以即使解码在跑，没有回放就没有推动它的时钟。要让无回放平台看到
+对象，需要另找一个时钟（解码 FIFO + UI 侧时间轴），那是独立的一步。
 
 ## 后续里程碑
 

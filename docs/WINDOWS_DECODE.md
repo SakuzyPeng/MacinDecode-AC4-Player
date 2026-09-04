@@ -59,7 +59,8 @@ AU 之间以及 FIFO 满载等待时检查控制命令，因此快速连续 seek
 
 ## 当前限制
 
-- 仅 Windows 编译 `audio-decode`；其他平台保持 inspection。
+- `audio-decode` 由 Cargo feature `decode`（默认开）控制，与平台无关；
+  `--no-default-features` 关掉它得到只做 inspection 的外壳。**没有回放后端的平台仍然能解码。**
 - presentation 使用 `AutoUnique`；多 presentation 文件会得到 Core 的结构化选择错误，尚无 UI 选择器。
 - 仅连接 Full A-JOC；Core 已明确拒绝的 channel-based、direct-object 或未实现工具不会静默回退。
 - Core 当前 MP4 API 接收完整文件切片，所以压缩源会读入内存；PCM 始终受 2 秒 FIFO 限制。

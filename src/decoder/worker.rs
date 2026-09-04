@@ -22,6 +22,8 @@ use super::{
     WorkerEvent, WorkerEventKind, WorkerHandle,
 };
 
+/// Stack for the decode thread, matching what Core reserves for the same work.
+const DECODE_STACK_BYTES: usize = 16 * 1024 * 1024;
 const MAX_MP4_EDIT_ENTRIES: usize = 8;
 const COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
@@ -30,6 +32,13 @@ pub(super) fn spawn(queue: SharedSceneQueue) -> Result<WorkerHandle, String> {
     let (event_sender, event_receiver) = mpsc::channel();
     let join_handle = thread::Builder::new()
         .name("ac4-core-decode".to_owned())
+        // Core's A-JOC reconstruction wants a large workspace on the stack --
+        // Core's own tests spawn a 16 MiB thread for it. On Windows this thread
+        // used to inherit the 8 MB that `.cargo/config.toml` asks the linker
+        // for, which is both invisible and platform-specific; a spawned thread
+        // elsewhere gets the std default of 2 MiB and would overflow. Ask for
+        // the workspace here so the requirement travels with the code.
+        .stack_size(DECODE_STACK_BYTES)
         .spawn(move || decoder_worker(&command_receiver, &event_sender, &queue))
         .map_err(|error| format!("Failed to start MacinDecode Core worker: {error}"))?;
     Ok(WorkerHandle {

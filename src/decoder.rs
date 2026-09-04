@@ -8,11 +8,11 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
-#[cfg(target_os = "windows")]
+#[cfg(feature = "decode")]
 use std::time::Duration;
 
-#[cfg(target_os = "windows")]
-mod windows;
+#[cfg(feature = "decode")]
+mod worker;
 
 pub const PREBUFFER_MILLISECONDS: u64 = 300;
 pub const MAX_BUFFER_SECONDS: u64 = 2;
@@ -71,7 +71,7 @@ impl SceneSignature {
         }
     }
 
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    #[cfg_attr(not(feature = "decode"), allow(dead_code))]
     pub(crate) fn from_block(block: &DecodedSceneBlock) -> Self {
         let object_element_ids = block
             .objects()
@@ -287,7 +287,7 @@ impl DecoderSnapshot {
         }
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(feature = "decode")]
     pub(super) fn progress(phase: DecodePhase, path: PathBuf, metrics: DecodeMetrics) -> Self {
         debug_assert!(matches!(
             phase,
@@ -400,7 +400,7 @@ pub struct SceneObjectPcm {
 }
 
 impl SceneObjectPcm {
-    #[cfg(any(target_os = "windows", test))]
+    #[cfg(any(feature = "decode", test))]
     pub(super) fn new(
         element_id: u64,
         initial_state: Option<SpatialObjectState>,
@@ -434,7 +434,7 @@ pub struct SceneLfePcm {
 }
 
 impl SceneLfePcm {
-    #[cfg(target_os = "windows")]
+    #[cfg(feature = "decode")]
     pub(super) fn new(
         element_id: u64,
         initial_state: Option<SpatialObjectState>,
@@ -470,7 +470,7 @@ pub struct SceneMetadataUpdate {
 }
 
 impl SceneMetadataUpdate {
-    #[cfg(any(target_os = "windows", test))]
+    #[cfg(any(feature = "decode", test))]
     pub(super) const fn new(
         element_id: u64,
         offset_frames: u32,
@@ -533,7 +533,7 @@ impl PlaybackKey {
         Self { request_id, epoch }
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(feature = "decode")]
     pub(super) const fn request_id(self) -> u64 {
         self.request_id
     }
@@ -541,7 +541,7 @@ impl PlaybackKey {
 
 impl DecodedSceneBlock {
     #[allow(clippy::too_many_arguments)]
-    #[cfg(any(target_os = "windows", test))]
+    #[cfg(any(feature = "decode", test))]
     pub(super) fn new(
         sample_rate: u32,
         start_frame: i64,
@@ -610,7 +610,7 @@ impl DecodedSceneBlock {
 }
 
 #[derive(Debug, Clone, Copy)]
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[cfg_attr(not(feature = "decode"), allow(dead_code))]
 pub(super) struct QueueSnapshot {
     pub(super) buffered_frames: u64,
     pub(super) capacity_frames: u64,
@@ -632,7 +632,7 @@ pub(super) struct SharedSceneQueue {
 }
 
 #[derive(Debug)]
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[cfg_attr(not(feature = "decode"), allow(dead_code))]
 pub(super) enum QueuePushError {
     Full(Box<DecodedSceneBlock>),
     Stale,
@@ -668,7 +668,7 @@ impl SharedSceneQueue {
         changed.notify_all();
     }
 
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    #[cfg_attr(not(feature = "decode"), allow(dead_code))]
     pub(super) fn try_push(
         &self,
         key: PlaybackKey,
@@ -715,7 +715,7 @@ impl SharedSceneQueue {
         Some(block)
     }
 
-    #[cfg(any(target_os = "windows", test))]
+    #[cfg(any(feature = "decode", test))]
     pub(super) fn mark_end_of_stream(&self, key: PlaybackKey) {
         let (mutex, changed) = &*self.state;
         let mut queue = lock_recover(mutex);
@@ -725,13 +725,22 @@ impl SharedSceneQueue {
         }
     }
 
-    #[cfg(any(target_os = "windows", test))]
+    #[cfg(any(feature = "decode", test))]
+    #[cfg_attr(
+        all(not(target_os = "windows"), not(test)),
+        allow(
+            dead_code,
+            reason = "the queue's read side belongs to the output path, which is \
+                  Windows-only; decoding now runs everywhere, so the pop side \
+                  simply has no consumer yet off Windows"
+        )
+    )]
     fn is_end_of_stream(&self, key: PlaybackKey) -> bool {
         let queue = lock_recover(&self.state.0);
         queue.key != key || (queue.end_of_stream && queue.blocks.is_empty())
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(feature = "decode")]
     pub(super) fn wait_for_change(&self, timeout: Duration) {
         let (mutex, changed) = &*self.state;
         let queue = lock_recover(mutex);
@@ -750,7 +759,9 @@ impl SharedSceneQueue {
     not(target_os = "windows"),
     allow(
         dead_code,
-        reason = "the Scene reader is consumed only by the Windows output adapter"
+        reason = "the queue's read side belongs to the output path, which is \
+                  Windows-only; decoding now runs everywhere, so the pop side \
+                  simply has no consumer yet off Windows"
     )
 )]
 pub(crate) struct SceneQueueReader {
@@ -758,13 +769,22 @@ pub(crate) struct SceneQueueReader {
     key: PlaybackKey,
 }
 
+#[cfg_attr(
+    not(target_os = "windows"),
+    allow(
+        dead_code,
+        reason = "the queue's read side belongs to the output path, which is \
+                  Windows-only; decoding now runs everywhere, so the pop side \
+                  simply has no consumer yet off Windows"
+    )
+)]
 impl SceneQueueReader {
-    #[cfg(target_os = "windows")]
+    #[cfg(feature = "decode")]
     pub(crate) fn try_pop(&self) -> Option<DecodedSceneBlock> {
         self.queue.try_pop(self.key)
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(feature = "decode")]
     pub(crate) fn is_end_of_stream(&self) -> bool {
         self.queue.is_end_of_stream(self.key)
     }
@@ -774,7 +794,7 @@ impl SceneQueueReader {
     /// The render source stamps everything it mirrors to the UI with this, so
     /// the view is gated by exactly the key the FIFO already enforces rather
     /// than by a second, parallel notion of freshness.
-    #[cfg(target_os = "windows")]
+    #[cfg(feature = "decode")]
     pub(crate) const fn playback_key(&self) -> PlaybackKey {
         self.key
     }
@@ -787,7 +807,7 @@ fn lock_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 #[derive(Debug)]
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[cfg_attr(not(feature = "decode"), allow(dead_code))]
 pub(super) enum WorkerCommand {
     Open { key: PlaybackKey, path: PathBuf },
     Seek { key: PlaybackKey, target_frame: u64 },
@@ -801,7 +821,7 @@ pub(super) struct WorkerEvent {
 }
 
 #[derive(Debug)]
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[cfg_attr(not(feature = "decode"), allow(dead_code))]
 pub(super) enum WorkerEventKind {
     Snapshot {
         key: PlaybackKey,
@@ -848,13 +868,11 @@ pub struct DecoderController {
 impl DecoderController {
     pub fn new() -> Self {
         let queue = SharedSceneQueue::new();
-        #[cfg(target_os = "windows")]
-        let worker = windows::spawn(queue.clone());
-        #[cfg(not(target_os = "windows"))]
-        let worker: Result<WorkerHandle, String> = Err(
-            "Audio decoding is enabled on Windows first; this platform keeps inspection only"
-                .to_owned(),
-        );
+        #[cfg(feature = "decode")]
+        let worker = worker::spawn(queue.clone());
+        #[cfg(not(feature = "decode"))]
+        let worker: Result<WorkerHandle, String> =
+            Err("This build has the decode feature off; bitstream inspection only".to_owned());
 
         match worker {
             Ok(worker) => Self {
