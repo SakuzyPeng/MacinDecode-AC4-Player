@@ -727,12 +727,11 @@ impl SharedSceneQueue {
 
     #[cfg(any(feature = "decode", test))]
     #[cfg_attr(
-        all(not(target_os = "windows"), not(test)),
+        all(not(feature = "decode"), not(test)),
         allow(
             dead_code,
-            reason = "the queue's read side belongs to the output path, which is \
-                  Windows-only; decoding now runs everywhere, so the pop side \
-                  simply has no consumer yet off Windows"
+            reason = "the queue's read side is popped by the render callback and \
+                  by the scene preview, and neither exists without a decoder"
         )
     )]
     fn is_end_of_stream(&self, key: PlaybackKey) -> bool {
@@ -756,12 +755,11 @@ impl SharedSceneQueue {
 
 #[derive(Debug, Clone)]
 #[cfg_attr(
-    not(target_os = "windows"),
+    not(feature = "decode"),
     allow(
         dead_code,
-        reason = "the queue's read side belongs to the output path, which is \
-                  Windows-only; decoding now runs everywhere, so the pop side \
-                  simply has no consumer yet off Windows"
+        reason = "the queue's read side is popped by the render callback and \
+                  by the scene preview, and neither exists without a decoder"
     )
 )]
 pub(crate) struct SceneQueueReader {
@@ -770,12 +768,11 @@ pub(crate) struct SceneQueueReader {
 }
 
 #[cfg_attr(
-    not(target_os = "windows"),
+    not(feature = "decode"),
     allow(
         dead_code,
-        reason = "the queue's read side belongs to the output path, which is \
-                  Windows-only; decoding now runs everywhere, so the pop side \
-                  simply has no consumer yet off Windows"
+        reason = "the queue's read side is popped by the render callback and \
+                  by the scene preview, and neither exists without a decoder"
     )
 )]
 impl SceneQueueReader {

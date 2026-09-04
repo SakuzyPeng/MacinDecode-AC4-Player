@@ -141,22 +141,31 @@ previous Full candidate within the same epoch, but only before target PCM has be
 
 ### Platform gating
 
-Two gates, and conflating them is the mistake this section exists to prevent.
+Two inputs and one derived gate. Conflating the inputs is the mistake this section exists to
+prevent; writing the conjunction by hand is the other one.
 
-**`#[cfg(feature = "decode")]`** covers `decoder/worker.rs` and the parts of `decoder.rs` that drive
-it. Nothing here is platform-specific — `decoder/worker.rs` imports only `std` and the Core crates,
-and calls no OS API at all.
+**`#[cfg(feature = "decode")]`** — there is a decoder. Covers `decoder/worker.rs`, the parts of
+`decoder.rs` that drive it, and `backend/preview.rs`. Nothing here is platform-specific:
+`decoder/worker.rs` imports only `std` and the Core crates and calls no OS API at all.
 
-**`#[cfg(target_os = "windows")]`** covers `backend/windows.rs`, `backend/source.rs` and the whole
-native crate: COM, WASAPI, and the render callback. Off Windows the output controller constructs in
-an "unavailable" state.
+**`#[cfg(target_os = "windows")]`** — there is COM and WASAPI. On its own it now appears in only two
+places: the native crate's own gating, and the two arms that word the "no output" message.
 
-Cross-platform types that only one side consumes carry
-`#[cfg_attr(not(target_os = "windows"), allow(dead_code, reason = "..."))]` — keep that idiom on new
-fields or the other build warns (and `-D warnings` turns that into a failure). The Scene FIFO is the
-live example: its push side belongs to `decode`, its pop side to the Windows output path.
+**`#[cfg(spatial_output)]`** — playback exists, i.e. *both* of the above. `build.rs` emits it (with
+a matching `rustc-check-cfg`, so `unexpected_cfgs` stays quiet); nothing in `src/` writes
+`all(target_os = "windows", feature = "decode")` by hand. It covers `backend/windows.rs`,
+`backend/source.rs`, and every renderer-touching branch of `backend.rs`. Where it is off — any
+non-Windows build, and a Windows build with `--no-default-features` — the output controller
+constructs "unavailable". A site that got only half the conjunction is exactly what broke
+`cargo build --no-default-features` on Windows once already.
 
-`cargo test` runs 121 tests with `--no-default-features` and 129 with `decode` on; the extra eight
+Cross-platform types that only one side consumes carry `#[cfg_attr(not(<gate>), allow(dead_code,
+reason = "..."))]` — keep that idiom on new fields or the other build warns (and `-D warnings` turns
+that into a failure). Pick the gate by counting consumers: the Scene FIFO's read side and
+`SceneViewMirror::write` have two (the render callback and the preview), so they key on `decode`;
+`backend::state::lfe_render_state` has one, so it keys on `spatial_output`.
+
+`cargo test` runs 122 tests with `--no-default-features` and 130 with `decode` on; the extra eight
 cover `backend/preview.rs`, which is the scene view's clock on a build with a decoder but no
 renderer — it walks the Scene FIFO at wall-clock rate through the same `backend::state` helpers the
 render callback uses, so the picture cannot drift from what playback would submit. With `decode` on

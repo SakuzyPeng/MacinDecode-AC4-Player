@@ -143,6 +143,15 @@ pub(super) fn listener_render_state(state: Option<SpatialObjectState>) -> (bool,
 }
 
 /// The same for the LFE bed, which carries activation and gain but no position.
+///
+/// Unlike its neighbours this one has a single consumer. The scene view draws
+/// the LFE slot from the decoder's `has_lfe`, not from the mirror — the mirror
+/// carries no LFE state at all — so only the render callback, submitting bed
+/// gain to Windows Spatial Audio, ever asks for it.
+#[cfg_attr(
+    not(spatial_output),
+    allow(dead_code, reason = "only the render callback submits LFE bed gain")
+)]
 pub(super) fn lfe_render_state(state: Option<SpatialObjectState>) -> (bool, f32) {
     let Some(state) = state else {
         return (false, 0.0);

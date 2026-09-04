@@ -30,6 +30,12 @@ GUI、播放协调器和解码适配器均留在 Rust 进程内，直接依赖
 `decode`（默认开），跟平台无关；真正只有 Windows 的是**输出**——COM、WASAPI 和渲染回调。这两道门
 在代码里分别是 `#[cfg(feature = "decode")]` 和 `#[cfg(target_os = "windows")]`。
 
+**渲染回调同时需要两者**，所以它有第三道门 `#[cfg(spatial_output)]`——由 `build.rs` 按两者的合取
+发出（配 `rustc-check-cfg`），`src/` 里任何地方都不手写这个合取。理由不是洁癖：只写对一半正是
+`--no-default-features` 在 Windows 上编不过的那次事故。给跨平台类型挂 `allow(dead_code)` 时按
+**消费者个数**选门——FIFO 的读侧和 `SceneViewMirror::write` 有两个（渲染回调与场景预览），挂
+`decode`；`lfe_render_state` 只有一个，挂 `spatial_output`。
+
 - `model` 校验用户选择的媒体路径并保存壳层状态；
 - `inspection` 在单独线程调用 `macindecode-ac4-inspect`，缓存 owned report，不阻塞 GUI；
 - `decoder` 在单独线程组合 `macindecode-ac4-mp4`、

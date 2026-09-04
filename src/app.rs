@@ -823,7 +823,7 @@ impl PlayerApp {
         ) {
             context.request_repaint_after(delay);
         }
-        #[cfg(target_os = "windows")]
+        #[cfg(spatial_output)]
         context.request_repaint_after(Duration::from_secs(2));
     }
 

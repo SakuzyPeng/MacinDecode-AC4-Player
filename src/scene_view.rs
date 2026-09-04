@@ -188,10 +188,11 @@ impl SceneViewMirror {
     /// because a held frame keeps the key it was written under and `read`
     /// rejects it.
     #[cfg_attr(
-        not(target_os = "windows"),
+        not(feature = "decode"),
         allow(
             dead_code,
-            reason = "only the Windows render callback produces object positions"
+            reason = "object positions come from the render callback or the \
+                      scene preview, and neither exists without a decoder"
         )
     )]
     pub fn write<I>(&self, key: PlaybackKey, objects: I, timeline_frame: i64, sample_rate: u32)

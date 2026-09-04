@@ -15,8 +15,31 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed={FONT_OVERRIDE_ENV}");
 
+    declare_spatial_output();
+
     if let Err(error) = prepare_ui_font() {
         panic!("failed to prepare the UI font: {error}");
+    }
+}
+
+/// Emit `spatial_output` when this build can actually play something.
+///
+/// Playback needs two independent things, and the codebase keeps them apart on
+/// purpose: `feature = "decode"` says there is a decoder (it needs the ETSI
+/// spec tables, and is otherwise platform-agnostic), while
+/// `target_os = "windows"` says there is COM and WASAPI. The render callback
+/// needs *both* — it reads decoded Scene blocks and hands them to Windows
+/// Spatial Audio — so its gate is their conjunction.
+///
+/// Deriving it here rather than writing `all(target_os = "windows", feature =
+/// "decode")` at each of its ~30 sites means the conjunction cannot drift: a
+/// site that gets only half of it is what broke `--no-default-features` on
+/// Windows in the first place.
+fn declare_spatial_output() {
+    println!("cargo::rustc-check-cfg=cfg(spatial_output)");
+    let windows = env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows");
+    if windows && env::var_os("CARGO_FEATURE_DECODE").is_some() {
+        println!("cargo::rustc-cfg=spatial_output");
     }
 }
 

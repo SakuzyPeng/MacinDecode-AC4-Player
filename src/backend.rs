@@ -5,27 +5,28 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "decode")]
 #[cfg_attr(
-    target_os = "windows",
+    spatial_output,
     allow(
         dead_code,
         reason = "the preview clock is built only where no renderer owns the FIFO"
     )
 )]
 mod preview;
-#[cfg(target_os = "windows")]
+#[cfg(spatial_output)]
 mod source;
 // Deliberately not gated on Windows. It is arithmetic over cross-platform
 // decoder types, and keeping it out of `source` is what lets its tests run
 // everywhere instead of only where the render callback compiles.
 #[cfg_attr(
-    not(target_os = "windows"),
+    not(feature = "decode"),
     allow(
         dead_code,
-        reason = "only the Windows render callback resolves element state"
+        reason = "element state is resolved by the render callback and by the \
+                  scene preview, and neither exists without a decoder"
     )
 )]
 mod state;
-#[cfg(target_os = "windows")]
+#[cfg(spatial_output)]
 mod windows;
 
 use crate::decoder::{SceneQueueReader, SceneSignature};
@@ -178,7 +179,7 @@ impl OutputSnapshot {
         }
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(spatial_output)]
     fn initializing(reserved_dynamic_objects: u32, playhead_frames: u64) -> Self {
         Self {
             phase: OutputPhase::Initializing,
@@ -188,7 +189,7 @@ impl OutputSnapshot {
         }
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(not(spatial_output))]
     fn unavailable(reason: impl Into<String>) -> Self {
         Self {
             phase: OutputPhase::Unavailable,
@@ -197,7 +198,7 @@ impl OutputSnapshot {
         }
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(spatial_output)]
     fn failed(error: impl Into<String>) -> Self {
         Self {
             phase: OutputPhase::Failed,
@@ -307,7 +308,7 @@ impl OutputStreamConfig {
         })
     }
 
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    #[cfg_attr(not(spatial_output), allow(dead_code))]
     fn stream_compatible(&self, other: &Self) -> bool {
         self.request_id == other.request_id
             && self.sample_rate == other.sample_rate
@@ -319,9 +320,9 @@ impl OutputStreamConfig {
 }
 
 pub struct SpatialOutputController {
-    #[cfg(target_os = "windows")]
+    #[cfg(spatial_output)]
     renderer: Option<macindecode_windows_spatial_audio::Renderer>,
-    #[cfg(target_os = "windows")]
+    #[cfg(spatial_output)]
     device_catalog: windows::DeviceCatalogWorker,
     config: Option<OutputStreamConfig>,
     /// The render callback's object positions, for the scene view. Held here
@@ -343,7 +344,7 @@ pub struct SpatialOutputController {
     device_catalog_error: Option<String>,
 }
 
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(spatial_output, test))]
 const fn output_phase_allows_source_replacement(phase: OutputPhase) -> bool {
     matches!(
         phase,
@@ -357,16 +358,22 @@ const fn output_phase_allows_source_replacement(phase: OutputPhase) -> bool {
 
 impl SpatialOutputController {
     pub fn new() -> Self {
-        #[cfg(target_os = "windows")]
+        #[cfg(spatial_output)]
         let snapshot = OutputSnapshot::idle();
+        // Two ways to have no output, and saying which one it is saves the
+        // Windows user staring at a message about the wrong platform.
         #[cfg(not(target_os = "windows"))]
         let snapshot = OutputSnapshot::unavailable(
             "Windows Spatial Audio is only available in the Windows build",
         );
+        #[cfg(all(target_os = "windows", not(feature = "decode")))]
+        let snapshot = OutputSnapshot::unavailable(
+            "This build has the decode feature off, so there is nothing to play",
+        );
         Self {
-            #[cfg(target_os = "windows")]
+            #[cfg(spatial_output)]
             renderer: None,
-            #[cfg(target_os = "windows")]
+            #[cfg(spatial_output)]
             device_catalog: windows::DeviceCatalogWorker::spawn(),
             config: None,
             scene_view: Arc::new(SceneViewMirror::new()),
@@ -383,18 +390,18 @@ impl SpatialOutputController {
     }
 
     pub fn ensure_configured(&mut self, config: &OutputStreamConfig, reader: SceneQueueReader) {
-        #[cfg(target_os = "windows")]
+        #[cfg(spatial_output)]
         if self.config.as_ref() == Some(config)
             && self.renderer.is_some()
             && output_phase_allows_source_replacement(self.snapshot.phase)
         {
             return;
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(not(spatial_output))]
         if self.config.as_ref() == Some(config) {
             return;
         }
-        #[cfg(target_os = "windows")]
+        #[cfg(spatial_output)]
         if output_phase_allows_source_replacement(self.snapshot.phase)
             && let (Some(current), Some(renderer)) = (self.config.as_ref(), self.renderer.as_ref())
             && current.stream_compatible(config)
@@ -409,10 +416,10 @@ impl SpatialOutputController {
             self.config = Some(config.clone());
             return;
         }
-        #[cfg(target_os = "windows")]
+        #[cfg(spatial_output)]
         let restore_phase = self.snapshot.phase;
         self.reset();
-        #[cfg(target_os = "windows")]
+        #[cfg(spatial_output)]
         match windows::spawn(config, reader, Arc::clone(&self.scene_view)) {
             Ok(renderer) => {
                 self.config = Some(config.clone());
@@ -430,7 +437,7 @@ impl SpatialOutputController {
             }
             Err(error) => self.set_snapshot(OutputSnapshot::failed(error)),
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(not(spatial_output))]
         {
             self.config = Some(config.clone());
             #[cfg(feature = "decode")]
@@ -465,7 +472,7 @@ impl SpatialOutputController {
     }
 
     pub fn reset(&mut self) {
-        #[cfg(target_os = "windows")]
+        #[cfg(spatial_output)]
         {
             self.renderer = None;
         }
@@ -474,19 +481,19 @@ impl SpatialOutputController {
         {
             self.preview = None;
         }
-        #[cfg(target_os = "windows")]
+        #[cfg(spatial_output)]
         self.set_snapshot(OutputSnapshot::idle());
     }
 
     #[cfg_attr(
-        not(target_os = "windows"),
+        not(spatial_output),
         allow(
             clippy::unused_self,
-            reason = "the native renderer exists only on Windows"
+            reason = "the native renderer needs both Windows and a decoder"
         )
     )]
     pub fn poll(&mut self) {
-        #[cfg(target_os = "windows")]
+        #[cfg(spatial_output)]
         {
             if let Some(update) = self.device_catalog.poll() {
                 match update {
@@ -544,28 +551,28 @@ impl SpatialOutputController {
     }
 
     #[cfg_attr(
-        not(target_os = "windows"),
+        not(spatial_output),
         allow(
             clippy::unused_self,
-            reason = "the native renderer exists only on Windows"
+            reason = "the native renderer needs both Windows and a decoder"
         )
     )]
     pub fn play(&self) {
-        #[cfg(target_os = "windows")]
+        #[cfg(spatial_output)]
         if let Some(renderer) = self.renderer.as_ref() {
             renderer.play();
         }
     }
 
     #[cfg_attr(
-        not(target_os = "windows"),
+        not(spatial_output),
         allow(
             clippy::unused_self,
-            reason = "the native renderer exists only on Windows"
+            reason = "the native renderer needs both Windows and a decoder"
         )
     )]
     pub fn pause(&self) {
-        #[cfg(target_os = "windows")]
+        #[cfg(spatial_output)]
         if let Some(renderer) = self.renderer.as_ref() {
             renderer.pause();
         }
@@ -581,7 +588,7 @@ impl SpatialOutputController {
             return;
         }
         self.master_gain = gain;
-        #[cfg(target_os = "windows")]
+        #[cfg(spatial_output)]
         if let Some(renderer) = self.renderer.as_ref() {
             renderer.set_master_gain(self.master_gain);
         }
@@ -657,7 +664,7 @@ impl SpatialOutputController {
         self.config.as_ref().map(|config| &config.output_device)
     }
 
-    #[cfg(any(target_os = "windows", feature = "decode"))]
+    #[cfg(feature = "decode")]
     fn set_snapshot(&mut self, snapshot: OutputSnapshot) {
         if self.snapshot != snapshot {
             self.snapshot = snapshot;
@@ -675,6 +682,20 @@ impl Default for SpatialOutputController {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `spatial_output` is emitted by `build.rs`, so nothing in the compiler
+    /// checks that it still means what it is documented to mean. A typo in the
+    /// env var it reads would not fail any build: every `#[cfg(spatial_output)]`
+    /// item would simply vanish, and the Windows build would compile cleanly
+    /// with no audio path at all. This test is the only thing standing between
+    /// that mistake and a silent release.
+    #[test]
+    fn the_derived_gate_is_exactly_windows_and_a_decoder() {
+        assert_eq!(
+            cfg!(spatial_output),
+            cfg!(target_os = "windows") && cfg!(feature = "decode"),
+        );
+    }
 
     fn signature(generation: u32, ids: &[u64]) -> SceneSignature {
         SceneSignature::new(generation, 0, Some(7), ids.to_vec(), None)
