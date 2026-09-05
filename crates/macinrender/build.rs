@@ -119,8 +119,15 @@ fn stage_openblas_runtime(destination: &std::path::Path) {
             .extension()
             .is_some_and(|extension| extension.eq_ignore_ascii_case("dll"))
         {
-            fs::copy(&path, destination.join(path.file_name().unwrap()))
-                .expect("cannot stage OpenBLAS runtime");
+            let target = destination.join(path.file_name().unwrap());
+            // Windows refuses to replace a loaded DLL. Cargo check/Clippy can
+            // share this dependency cache with a running player or test, so do
+            // not rewrite a runtime that already has the required contents.
+            let source = fs::read(&path).expect("cannot read OpenBLAS runtime");
+            if fs::read(&target).is_ok_and(|existing| existing == source) {
+                continue;
+            }
+            fs::copy(&path, target).expect("cannot stage OpenBLAS runtime");
         }
     }
 }
