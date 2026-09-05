@@ -168,6 +168,7 @@ enum OutputClock {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutputSnapshot {
     queued_output_frames: Option<u64>,
+    buffering: bool,
     clock: OutputClock,
     phase: OutputPhase,
     device_label: String,
@@ -194,6 +195,7 @@ impl OutputSnapshot {
     fn idle() -> Self {
         Self {
             queued_output_frames: None,
+            buffering: false,
             clock: OutputClock::Unknown,
             phase: OutputPhase::Idle,
             device_label: "Default Windows audio endpoint".to_owned(),
@@ -304,6 +306,9 @@ impl OutputSnapshot {
 
     pub const fn queued_output_frames(&self) -> Option<u64> {
         self.queued_output_frames
+    }
+    pub const fn is_buffering(&self) -> bool {
+        self.buffering
     }
     pub const fn clock_label(&self) -> &'static str {
         match self.clock {

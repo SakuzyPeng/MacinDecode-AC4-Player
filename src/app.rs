@@ -2624,6 +2624,11 @@ fn output_status_line(output: &OutputSnapshot, decoder: &DecoderSnapshot) -> Sta
             output.max_dynamic_objects(),
             seek_index_suffix(decoder)
         )),
+        OutputPhase::Playing if output.is_buffering() => StatusLine::idle(format!(
+            "Buffering audio output at frame {}{}",
+            output.playhead_frames(),
+            seek_index_suffix(decoder)
+        )),
         OutputPhase::Playing if output.queued_output_frames().is_some() => {
             StatusLine::ready(format!(
                 "Spatial playback at frame {}: {} queued output frames, {} underruns{}",

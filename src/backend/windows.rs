@@ -143,6 +143,7 @@ impl Drop for DeviceCatalogWorker {
 pub(super) fn snapshot(native: RenderSnapshot) -> OutputSnapshot {
     OutputSnapshot {
         queued_output_frames: None,
+        buffering: false,
         clock: super::OutputClock::Callback,
         phase: match native.phase {
             RenderPhase::Initializing => OutputPhase::Initializing,

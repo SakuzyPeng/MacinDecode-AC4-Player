@@ -561,6 +561,7 @@ fn run(
                 }
             };
             snapshot.playhead_frames = playhead;
+            snapshot.buffering = playing && status.phase == native::Phase::Buffering;
             snapshot.queued_output_frames = Some(status.queued);
             snapshot.clock = if status.media_clock {
                 super::OutputClock::SystemMedia

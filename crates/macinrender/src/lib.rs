@@ -654,6 +654,90 @@ mod tests {
     }
 
     #[test]
+    fn repeated_epochs_start_with_continuous_head_tracking() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::{Duration, Instant};
+        let mut session = Session::new(&Config {
+            renderer: RendererSettings {
+                binaural: true,
+                layout: "4+7+0".into(),
+                sofa: String::new(),
+                split_lfe: true,
+            },
+            output: OutputKind::Null,
+            device_id: String::new(),
+            input_rate: 48_000,
+        })
+        .unwrap();
+        let control = session.control();
+        let pose_control = control.clone();
+        let stop = Arc::new(AtomicBool::new(false));
+        let finish = Arc::clone(&stop);
+        let poses = std::thread::spawn(move || {
+            let mut yaw = 0.0;
+            while !finish.load(Ordering::Relaxed) {
+                pose_control.orientation([yaw, 0.0, 0.0]).unwrap();
+                yaw = (yaw + 0.1) % 30.0;
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        });
+        let samples = [0.01; 2048];
+        let initial = [(
+            7,
+            ObjectState {
+                active: true,
+                gain: 1.0,
+                position: Some([0.0, 1.0, 0.0]),
+            },
+        )];
+        let planes = [Plane {
+            element: 7,
+            samples: &samples,
+        }];
+        let mut longest_start = Duration::ZERO;
+        for epoch in 1..=32 {
+            session.reset(epoch, 0).unwrap();
+            session.configure(epoch, 1, &[7], None).unwrap();
+            control.play(true).unwrap();
+            let started = Instant::now();
+            assert!(
+                session
+                    .submit(&Frame {
+                        epoch,
+                        generation: 1,
+                        start: 0,
+                        duration: 2048,
+                        complete: true,
+                        planes: &planes,
+                        initial: &initial,
+                        updates: &[],
+                    })
+                    .unwrap()
+            );
+            while control.status().unwrap().presented == 0 {
+                assert!(
+                    started.elapsed() < Duration::from_millis(500),
+                    "replay {epoch} remained at frame zero"
+                );
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            longest_start = longest_start.max(started.elapsed());
+            session.end(epoch, 2048).unwrap();
+            while control.status().unwrap().phase != Phase::Ended {
+                assert!(
+                    started.elapsed() < Duration::from_secs(1),
+                    "replay {epoch} did not drain"
+                );
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            assert_eq!(control.status().unwrap().presented, 2048);
+        }
+        stop.store(true, Ordering::Relaxed);
+        poses.join().unwrap();
+        eprintln!("32 tracked replays; longest start {longest_start:?}");
+    }
+
+    #[test]
     #[ignore = "requires MACINDECODE_AC4_TEST_SOFA; validates concurrent HRTF preparation"]
     fn hrtf_preparation_keeps_the_producer_and_output_controls_live() {
         use std::sync::atomic::{AtomicBool, Ordering};
