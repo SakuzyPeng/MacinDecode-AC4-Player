@@ -1,6 +1,8 @@
 //! Listener pose in canonical X-right/Y-front/Z-up coordinates. The control clock
 //! is independent of egui repainting, including when the window is hidden.
 use serde::{Deserialize, Serialize};
+#[cfg(macinrender_output)]
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -204,6 +206,8 @@ pub struct HeadTracker {
     join: Option<JoinHandle<()>>,
     #[cfg(macinrender_output)]
     target: Arc<Mutex<Option<NativeTarget>>>,
+    #[cfg(macinrender_output)]
+    target_revision: Arc<AtomicU64>,
 }
 impl HeadTracker {
     #[allow(
@@ -216,11 +220,15 @@ impl HeadTracker {
         let stop = Arc::new(AtomicBool::new(false));
         #[cfg(macinrender_output)]
         let target = Arc::new(Mutex::new(None::<NativeTarget>));
+        #[cfg(macinrender_output)]
+        let target_revision = Arc::new(AtomicU64::new(0));
         let d = Arc::clone(&desired);
         let m = Arc::clone(&mirror);
         let s = Arc::clone(&stop);
         #[cfg(macinrender_output)]
         let t = Arc::clone(&target);
+        #[cfg(macinrender_output)]
+        let target_version = Arc::clone(&target_revision);
         let join = thread::Builder::new()
             .name("listener-orientation".into())
             .spawn(move || {
@@ -236,7 +244,7 @@ impl HeadTracker {
                 #[cfg(macinrender_output)]
                 let mut was_sensor = false;
                 #[cfg(macinrender_output)]
-                let mut last_sent = None::<(usize, [f32; 3])>;
+                let mut last_sent = None::<(u64, [f32; 3])>;
                 while !s.load(Ordering::Relaxed) {
                     let desired = d
                         .lock()
@@ -318,10 +326,14 @@ impl HeadTracker {
                         status,
                     };
                     #[cfg(macinrender_output)]
-                    if let Some(slot) = t
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .clone()
+                    let active_target = {
+                        let current = t.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                        current
+                            .as_ref()
+                            .map(|slot| (target_version.load(Ordering::Relaxed), Arc::clone(slot)))
+                    };
+                    #[cfg(macinrender_output)]
+                    if let Some((target_id, slot)) = active_target
                         && let Some(control) = slot
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -332,7 +344,6 @@ impl HeadTracker {
                         } else {
                             [0.0; 3]
                         };
-                        let target_id = Arc::as_ptr(&slot) as usize;
                         if last_sent.is_none_or(|(previous_id, previous)| {
                             previous_id != target_id
                                 || previous
@@ -355,6 +366,8 @@ impl HeadTracker {
             join,
             #[cfg(macinrender_output)]
             target,
+            #[cfg(macinrender_output)]
+            target_revision,
         }
     }
     pub fn mirror(&self) -> Arc<PoseMirror> {
@@ -389,10 +402,14 @@ impl HeadTracker {
     }
     #[cfg(macinrender_output)]
     pub fn set_target(&self, target: Option<NativeTarget>) {
-        *self
+        let mut current = self
             .target
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = target;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *current = target;
+        // Allocators can reuse the old slot address during a fast handoff.
+        // A new output must receive the pose even when the head has not moved.
+        self.target_revision.fetch_add(1, Ordering::Relaxed);
     }
 }
 impl Drop for HeadTracker {

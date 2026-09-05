@@ -52,7 +52,7 @@ pub enum OutputKind {
     Stereo,
     Null,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub renderer: RendererSettings,
     pub output: OutputKind,
@@ -581,21 +581,33 @@ mod tests {
         }
     }
 
-    fn feed_test_tone(mut session: Session, stop: &std::sync::atomic::AtomicBool) {
+    fn feed_test_tone(
+        mut session: Session,
+        stop: &std::sync::atomic::AtomicBool,
+        elements: &[u64],
+    ) {
         use std::sync::atomic::Ordering;
         let samples = [0.01; 480];
-        let initial = [(
-            7,
-            ObjectState {
-                active: true,
-                gain: 1.0,
-                position: Some([0.0, 1.0, 0.0]),
-            },
-        )];
-        let planes = [Plane {
-            element: 7,
-            samples: &samples,
-        }];
+        let initial: Vec<_> = elements
+            .iter()
+            .map(|&id| {
+                (
+                    id,
+                    ObjectState {
+                        active: true,
+                        gain: 1.0,
+                        position: Some([0.0, 1.0, 0.0]),
+                    },
+                )
+            })
+            .collect();
+        let planes: Vec<_> = elements
+            .iter()
+            .map(|&id| Plane {
+                element: id,
+                samples: &samples,
+            })
+            .collect();
         let mut start = 0;
         while !stop.load(Ordering::Relaxed) {
             if session
@@ -638,12 +650,13 @@ mod tests {
         })
         .unwrap();
         session.reset(1, 0).unwrap();
-        session.configure(1, 1, &[7], None).unwrap();
+        let elements: Vec<u64> = (7..27).collect();
+        session.configure(1, 1, &elements, None).unwrap();
         let control = session.control();
         control.play(true).unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
-        let producer = std::thread::spawn(move || feed_test_tone(session, &worker_stop));
+        let producer = std::thread::spawn(move || feed_test_tone(session, &worker_stop, &elements));
         let deadline = Instant::now() + Duration::from_secs(40);
         while control.status().unwrap().presented < 4800 {
             assert!(Instant::now() < deadline, "startup timed out");
@@ -655,6 +668,8 @@ mod tests {
         };
         assert!(control.switch_renderer(&invalid).is_err());
         let before = control.status().unwrap().presented;
+        let underruns = control.status().unwrap().underruns;
+        let cached_settings = settings.clone();
         let loader_control = control.clone();
         // Large user datasets take substantially longer with OpenBLAS/MSVC
         // than Accelerate. Bound preparation separately from realtime calls.
@@ -667,6 +682,9 @@ mod tests {
             })
         });
         let mut advanced = false;
+        let mut last_frame = before;
+        let mut last_progress = Instant::now();
+        let mut longest_gap = Duration::ZERO;
         while !loader.is_finished() {
             let call_start = Instant::now();
             let status = control.status().unwrap();
@@ -675,6 +693,19 @@ mod tests {
                 "status blocked behind HRTF preparation"
             );
             assert_ne!(status.phase, Phase::Failed);
+            assert_eq!(
+                status.underruns, underruns,
+                "HRTF preparation interrupted audio"
+            );
+            if status.presented > last_frame {
+                longest_gap = longest_gap.max(last_progress.elapsed());
+                last_progress = Instant::now();
+                last_frame = status.presented;
+            }
+            assert!(
+                last_progress.elapsed() < Duration::from_millis(250),
+                "media stalled while preparing HRTFs"
+            );
             advanced |= status.presented > before;
             assert!(
                 Instant::now() < preparation_deadline,
@@ -690,6 +721,15 @@ mod tests {
             advanced,
             "media did not advance while preparing the SOFA dataset"
         );
-        eprintln!("SOFA prepared in {:?}", preparation_start.elapsed());
+        eprintln!(
+            "SOFA prepared in {:?}; longest presentation gap {longest_gap:?}",
+            preparation_start.elapsed()
+        );
+        let cached = Instant::now();
+        control.switch_renderer(&cached_settings).unwrap();
+        assert!(
+            cached.elapsed() < Duration::from_millis(500),
+            "KEMAR interpolation tables were rebuilt"
+        );
     }
 }

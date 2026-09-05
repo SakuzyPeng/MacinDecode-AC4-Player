@@ -1,4 +1,8 @@
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll, Wake, Waker};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use eframe::egui::{self, Align, Align2, Color32, Layout, RichText, Stroke};
@@ -46,6 +50,7 @@ pub struct PlayerApp {
     output_settings_open: bool,
     pending_output_change: Option<OutputSettings>,
     audio_settings_error: Option<String>,
+    sofa_picker: Option<Pin<Box<dyn Future<Output = Option<rfd::FileHandle>>>>>,
     camera: scene3d::camera::Camera,
     /// Whether zero-based LFE / one-based dynamic-object numbers are printed
     /// on every element face.
@@ -68,6 +73,13 @@ pub struct PlayerApp {
 const OUTPUT_DEVICE_STORAGE_KEY: &str = "preferred-output-device-v1";
 const OUTPUT_SETTINGS_STORAGE_KEY: &str = "spatial-output-settings-v1";
 const SCENE_CAMERA_STORAGE_KEY: &str = "scene-camera-v1";
+
+struct DialogWake(egui::Context);
+impl Wake for DialogWake {
+    fn wake(self: Arc<Self>) {
+        self.0.request_repaint();
+    }
+}
 
 /// Visible dynamic-object numbers describe the fixed scene slots, not Core's
 /// lifetime-stable element IDs. LFE owns zero separately, so the dynamic range
@@ -358,6 +370,7 @@ impl PlayerApp {
             output_settings_open: false,
             pending_output_change: None,
             audio_settings_error: None,
+            sofa_picker: None,
             camera,
             object_numbers_visible: true,
             figure: scene3d::figure::Figure::default(),
@@ -615,11 +628,16 @@ impl PlayerApp {
         reason = "output synchronization keeps decode, device, renderer, and UI revisions atomic"
     )]
     fn sync_output(&mut self, context: &egui::Context, showing: bool) {
+        self.poll_sofa_picker(context);
         let request_id = self.decoder.request_id();
         let playback_epoch = self.decoder.playback_epoch();
         let master_gain = if self.muted { 0.0 } else { self.volume };
         self.output.set_master_gain(master_gain);
         self.output.poll();
+        #[cfg(macinrender_output)]
+        if self.finish_output_preparation(context) {
+            return;
+        }
         self.backend = self.output.settings().mode;
         let [yaw, pitch, roll] = self.output.head_snapshot().pose.euler();
         self.figure.head_yaw = yaw;
@@ -1134,6 +1152,38 @@ impl PlayerApp {
                     .and_then(DecodeMetrics::duration_frames)
                     .unwrap_or(u64::MAX),
             );
+            #[cfg(macinrender_output)]
+            if matches!(
+                settings.mode.resolved(),
+                SpatialBackendKind::SafBinaural | SpatialBackendKind::SystemSpatial
+            ) {
+                let result = self.decoder.validate_seek(target).and_then(|()| {
+                    let rate = self
+                        .decoder
+                        .snapshot()
+                        .metrics()
+                        .expect("validated seek metrics")
+                        .sample_rate();
+                    self.output.prepare_settings(
+                        settings,
+                        rate,
+                        self.decoder.request_id(),
+                        self.decoder.playback_epoch(),
+                    )
+                });
+                match result {
+                    Ok(()) => {
+                        self.status = StatusLine::idle("Preparing audio settings");
+                    }
+                    Err(error) => {
+                        self.audio_settings_error = Some(error.clone());
+                        self.status =
+                            StatusLine::warning(format!("Audio settings unchanged: {error}"));
+                    }
+                }
+                context.request_repaint_after(Duration::from_millis(20));
+                return;
+            }
             match self.decoder.seek(target) {
                 Ok(()) => {
                     self.pending_output_change = Some(previous);
@@ -1153,6 +1203,61 @@ impl PlayerApp {
             self.output.hot_settings(settings);
         }
         context.request_repaint_after(Duration::from_millis(20));
+    }
+
+    fn poll_sofa_picker(&mut self, context: &egui::Context) {
+        let Some(picker) = self.sofa_picker.as_mut() else {
+            return;
+        };
+        let waker = Waker::from(Arc::new(DialogWake(context.clone())));
+        let Poll::Ready(path) = picker.as_mut().poll(&mut Context::from_waker(&waker)) else {
+            return;
+        };
+        self.sofa_picker = None;
+        if let Some(path) = path {
+            let mut settings = self.output.settings().clone();
+            settings.sofa = path.path().to_string_lossy().into_owned();
+            self.change_output_settings(settings, context);
+        }
+    }
+
+    #[cfg(macinrender_output)]
+    fn finish_output_preparation(&mut self, context: &egui::Context) -> bool {
+        let Some(prepared) = self
+            .output
+            .take_prepared_settings(self.decoder.request_id(), self.decoder.playback_epoch())
+        else {
+            return false;
+        };
+        let result = prepared.and_then(|prepared| {
+            // Preparation may take seconds. Hand off at the current presented
+            // position, never the position at which the user clicked.
+            let target = self.output.snapshot().playhead_frames().min(
+                self.decoder
+                    .snapshot()
+                    .metrics()
+                    .and_then(DecodeMetrics::duration_frames)
+                    .unwrap_or(u64::MAX),
+            );
+            self.decoder.seek(target)?;
+            self.pending_output_change = Some(self.output.settings().clone());
+            self.output.pause();
+            self.output.install_prepared_settings(prepared);
+            self.playback_restore_pending = true;
+            Ok(())
+        });
+        match result {
+            Ok(()) => {
+                self.status = StatusLine::idle("Applying prepared audio settings");
+                context.request_repaint_after(Duration::from_millis(20));
+                true
+            }
+            Err(error) => {
+                self.audio_settings_error = Some(error.clone());
+                self.status = StatusLine::warning(format!("Audio settings unchanged: {error}"));
+                false
+            }
+        }
     }
 
     #[allow(
@@ -1177,10 +1282,12 @@ impl PlayerApp {
                     ui.colored_label(theme::WARNING, error);
                 }
                 if self.output.settings_pending() {
-                    ui.label("Preparing HRTF… playback continues");
+                    ui.label("Preparing audio settings…");
                 }
                 ui.add_enabled_ui(
-                    !self.output.settings_pending() && self.pending_output_change.is_none(),
+                    !self.output.settings_pending()
+                        && self.pending_output_change.is_none()
+                        && self.sofa_picker.is_none(),
                     |ui| {
                         ui.horizontal(|ui| {
                             ui.label("Playback mode");
@@ -1241,12 +1348,13 @@ impl PlayerApp {
                                 )
                             });
                             ui.horizontal(|ui| {
-                                if ui.button("Choose SOFA…").clicked()
-                                    && let Some(path) = rfd::FileDialog::new()
-                                        .add_filter("SOFA HRIR", &["sofa"])
-                                        .pick_file()
-                                {
-                                    settings.sofa = path.to_string_lossy().into_owned();
+                                if ui.button("Choose SOFA…").clicked() {
+                                    self.sofa_picker = Some(Box::pin(
+                                        rfd::AsyncFileDialog::new()
+                                            .add_filter("SOFA HRIR", &["sofa"])
+                                            .pick_file(),
+                                    ));
+                                    context.request_repaint();
                                 }
                                 if ui.button("Use KEMAR").clicked() {
                                     settings.sofa.clear();

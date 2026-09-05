@@ -1099,14 +1099,41 @@ impl DecoderController {
     /// Returns an error when no source/index is available, the target exceeds the duration, or
     /// no complete random-access point exists at or before the requested frame.
     pub fn seek(&mut self, target_frame: u64) -> Result<(), String> {
+        self.validate_seek(target_frame)?;
         let path = self
             .active_path
             .clone()
-            .ok_or_else(|| "No active media is loaded".to_owned())?;
+            .ok_or("No active media is loaded")?;
         let metrics = self
             .snapshot
             .metrics()
             .cloned()
+            .ok_or("Media indexing has not completed yet")?;
+        let sender = self
+            .command_sender
+            .as_ref()
+            .ok_or("The decoder is unavailable")?;
+        self.playback_epoch = self.playback_epoch.checked_add(1).unwrap_or(1);
+        let key = self.playback_key();
+        self.queue.reset(key);
+        self.snapshot = DecoderSnapshot::seeking(path, metrics, target_frame);
+        self.revision = self.revision.saturating_add(1);
+        sender
+            .send(WorkerCommand::Seek { key, target_frame })
+            .map_err(|_| "MacinDecode Core worker stopped unexpectedly".to_owned())
+    }
+
+    /// Check a future seek without changing the FIFO, epoch, or playback state.
+    ///
+    /// # Errors
+    /// Returns the same source/index/range errors as `seek`.
+    pub fn validate_seek(&self, target_frame: u64) -> Result<(), String> {
+        if self.active_path.is_none() {
+            return Err("No active media is loaded".into());
+        }
+        let metrics = self
+            .snapshot
+            .metrics()
             .ok_or_else(|| "Media indexing has not completed yet".to_owned())?;
         if metrics.is_indexing() {
             return Err("Media indexing has not completed yet".to_owned());
@@ -1124,18 +1151,10 @@ impl DecoderController {
                 }
             });
         }
-        let sender = self
-            .command_sender
-            .as_ref()
-            .ok_or_else(|| "The Windows decoder is unavailable".to_owned())?;
-        self.playback_epoch = self.playback_epoch.checked_add(1).unwrap_or(1);
-        let key = self.playback_key();
-        self.queue.reset(key);
-        self.snapshot = DecoderSnapshot::seeking(path, metrics, target_frame);
-        self.revision = self.revision.saturating_add(1);
-        sender
-            .send(WorkerCommand::Seek { key, target_frame })
-            .map_err(|_| "MacinDecode Core worker stopped unexpectedly".to_owned())
+        if self.command_sender.is_none() {
+            return Err("The decoder is unavailable".into());
+        }
+        Ok(())
     }
 
     pub fn reopen(&mut self) {
@@ -1285,6 +1304,28 @@ mod tests {
         assert_eq!(block.metadata_updates().len(), 1);
         assert_eq!(block.metadata_updates()[0].ramp_frames(), 20);
         assert!(!block.truncate_at(100));
+    }
+
+    #[cfg(feature = "decode")]
+    #[test]
+    fn seek_preflight_preserves_the_current_epoch_and_queued_audio() {
+        let mut controller = DecoderController::new();
+        let path = PathBuf::from("fixture.ac4");
+        controller.active_path = Some(path.clone());
+        controller.snapshot =
+            DecoderSnapshot::progress(DecodePhase::Ready, path, indexed_metrics());
+        let key = controller.playback_key();
+        let revision = controller.revision();
+        controller.queue.try_push(key, block(48_000, 4800)).unwrap();
+        assert!(controller.validate_seek(96_000).is_ok());
+        assert!(controller.validate_seek(0).is_err());
+        assert_eq!(controller.playback_key(), key);
+        assert_eq!(controller.revision(), revision);
+        assert_eq!(controller.snapshot().phase(), DecodePhase::Ready);
+        assert_eq!(
+            controller.try_pop_scene_block().unwrap().duration_frames(),
+            4800
+        );
     }
 
     #[cfg(feature = "decode")]

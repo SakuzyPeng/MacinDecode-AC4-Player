@@ -25,6 +25,10 @@ Core 的元数据 bitmask 逐字段转换（例如 Core POSITION=bit 3，而 ren
 软件路径允许 generation 在帧边界改变拓扑；同 generation 内改变元素集合会报错。
 
 SOFA 热切换在独立加载线程进行，使用拥有独立错误结果的 C ABI，避免阻塞送音或播放进度。
+需要更换输出格式时，先在后台准备暂停状态的新输出，旧输出继续播放；准备成功后才从当时的呈现位置
+进行安全 seek 和交接。准备失败或原播放 epoch 已改变时丢弃候选输出。SOFA 文件选择使用异步对话框。
+实时双耳渲染器复用有界的只读 HRTF 缓存（最多四组、64 MiB），SOFA 路径、文件时间和大小变化会使缓存失效；
+FFT 工作区、卷积尾部及对象状态仍由每个渲染器独立持有。
 原生采集在自己的 NSOperationQueue 接收传感器回调，Rust 只轮询快照；停止时先排空回调。
 
 独立头部控制线程使用 canonical X-right/Y-front/Z-up 四元数，yaw 绕 Z、pitch 绕 X、roll 绕 Y，

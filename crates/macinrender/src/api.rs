@@ -1,5 +1,6 @@
 use std::ffi::{c_char, c_void};
 use std::path::PathBuf;
+use std::sync::{Arc, OnceLock};
 
 use libloading::Library;
 
@@ -52,13 +53,20 @@ pub fn load_library(stem: &str) -> Result<Library, String> {
 
 macro_rules! api {
     ($($name:ident ($($arg:ty),*) -> $result:ty;)*) => {
+        #[derive(Clone)]
         pub struct Api {
-            _library: Library,
+            _library: Arc<Library>,
             $(pub $name: unsafe extern "C" fn($($arg),*) -> $result,)*
         }
         impl Api {
             pub fn load() -> Result<Self, String> {
-                let library = load_library("mradm_capi")?;
+                // Keep the native HRTF cache alive across output-mode changes.
+                // Failures are not cached, so a missing library can be retried.
+                static CACHED: OnceLock<Api> = OnceLock::new();
+                if let Some(api) = CACHED.get() {
+                    return Ok(api.clone());
+                }
+                let library = Arc::new(load_library("mradm_capi")?);
                 // SAFETY: signatures match the pinned C header; ABI tests check POD layouts.
                 $(let $name = *unsafe { library.get::<unsafe extern "C" fn($($arg),*) -> $result>(
                     concat!(stringify!($name), "\0").as_bytes()) }.map_err(|e| e.to_string())?;)*
@@ -67,6 +75,7 @@ macro_rules! api {
                 if unsafe { (api.adm_api_version_major)() } != 1 || unsafe { (api.adm_api_version_minor)() } < 36 {
                     return Err("MacinRender C ABI v1.36 or later is required".into());
                 }
+                let _ = CACHED.set(api.clone());
                 Ok(api)
             }
         }

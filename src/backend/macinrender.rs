@@ -19,6 +19,74 @@ use macindecode_macinrender as native;
 const NATIVE_EPOCH: u64 = 1;
 const HISTORY_BYTES: usize = 16 * 1024 * 1024;
 
+pub(super) struct PreparedSession {
+    config: native::Config,
+    session: Option<native::Session>,
+}
+impl PreparedSession {
+    pub fn new(
+        settings: &OutputSettings,
+        sample_rate: u32,
+        device: &OutputDeviceSelection,
+    ) -> Result<Self, String> {
+        let config = native_config(settings, sample_rate, device);
+        let session = native::Session::new(&config)?;
+        Ok(Self {
+            config,
+            session: Some(session),
+        })
+    }
+    fn take(mut self, config: &native::Config) -> Result<native::Session, String> {
+        if &self.config != config {
+            return Err(
+                "The prepared output no longer matches the playback format or device".into(),
+            );
+        }
+        Ok(self
+            .session
+            .take()
+            .expect("prepared session is consumed once"))
+    }
+}
+impl Drop for PreparedSession {
+    fn drop(&mut self) {
+        if let Some(session) = self.session.take() {
+            // A cancelled device can take time to shut down. Never join its
+            // native callbacks on the UI thread.
+            let _ = thread::Builder::new()
+                .name("discard-prepared-output".into())
+                .spawn(move || drop(session));
+        }
+    }
+}
+
+fn native_config(
+    settings: &OutputSettings,
+    sample_rate: u32,
+    device: &OutputDeviceSelection,
+) -> native::Config {
+    let kind = if settings.mode.resolved() == SpatialBackendKind::SafBinaural {
+        native::OutputKind::Stereo
+    } else {
+        native::OutputKind::SystemSpatial
+    };
+    #[cfg(test)]
+    let kind = if settings.null_output {
+        native::OutputKind::Null
+    } else {
+        kind
+    };
+    native::Config {
+        renderer: settings.renderer(),
+        output: kind,
+        device_id: match (kind, device) {
+            (native::OutputKind::Stereo, OutputDeviceSelection::EndpointId(id)) => id.clone(),
+            _ => String::new(),
+        },
+        input_rate: sample_rate,
+    }
+}
+
 struct Shared {
     stop: AtomicBool,
     playing: AtomicBool,
@@ -33,6 +101,7 @@ pub(super) struct Runtime {
     join: Option<JoinHandle<()>>,
 }
 impl Runtime {
+    #[cfg(test)]
     pub fn spawn(
         config: OutputStreamConfig,
         settings: OutputSettings,
@@ -40,6 +109,17 @@ impl Runtime {
         mirror: Arc<SceneViewMirror>,
         playing: bool,
         gain: f32,
+    ) -> Result<Self, String> {
+        Self::spawn_prepared(config, settings, reader, mirror, playing, gain, None)
+    }
+    pub fn spawn_prepared(
+        config: OutputStreamConfig,
+        settings: OutputSettings,
+        reader: SceneQueueReader,
+        mirror: Arc<SceneViewMirror>,
+        playing: bool,
+        gain: f32,
+        prepared: Option<PreparedSession>,
     ) -> Result<Self, String> {
         let mut snapshot = OutputSnapshot::idle();
         snapshot.phase = OutputPhase::Initializing;
@@ -58,7 +138,7 @@ impl Runtime {
         let join = thread::Builder::new()
             .name("macinrender-scene-producer".into())
             .spawn(move || {
-                if let Err(error) = run(&worker, &config, &settings, &reader, &mirror) {
+                if let Err(error) = run(&worker, &config, &settings, &reader, &mirror, prepared) {
                     let mut snapshot = worker
                         .snapshot
                         .lock()
@@ -112,7 +192,18 @@ impl Drop for Runtime {
     fn drop(&mut self) {
         self.shared.stop.store(true, Ordering::Relaxed);
         if let Some(join) = self.join.take() {
-            let _ = join.join();
+            let initialized = self
+                .shared
+                .control
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_some();
+            if initialized {
+                // Stop an active consumer before its successor is attached.
+                let _ = join.join();
+            }
+            // A still-preparing worker owns no FIFO consumer or playing device.
+            // It observes stop before publishing its controls or starting audio.
         }
     }
 }
@@ -324,32 +415,16 @@ fn run(
     settings: &OutputSettings,
     reader: &SceneQueueReader,
     mirror: &SceneViewMirror,
+    prepared: Option<PreparedSession>,
 ) -> Result<(), String> {
-    let kind = if settings.mode.resolved() == SpatialBackendKind::SafBinaural {
-        native::OutputKind::Stereo
-    } else {
-        native::OutputKind::SystemSpatial
+    let native_config = native_config(settings, config.sample_rate, &config.output_device);
+    let mut session = match prepared {
+        Some(prepared) => prepared.take(&native_config)?,
+        None => native::Session::new(&native_config)?,
     };
-    #[cfg(test)]
-    let kind = if settings.null_output {
-        native::OutputKind::Null
-    } else {
-        kind
-    };
-    let device_id = if kind == native::OutputKind::Stereo {
-        match &config.output_device {
-            OutputDeviceSelection::EndpointId(id) => id.clone(),
-            OutputDeviceSelection::SystemDefault => String::new(),
-        }
-    } else {
-        String::new()
-    };
-    let mut session = native::Session::new(&native::Config {
-        renderer: settings.renderer(),
-        output: kind,
-        device_id,
-        input_rate: config.sample_rate,
-    })?;
+    if shared.stop.load(Ordering::Relaxed) {
+        return Ok(());
+    }
     let target =
         i64::try_from(config.start_frame).map_err(|_| "Scene target exceeds signed time")?;
     session.reset(NATIVE_EPOCH, target)?;
