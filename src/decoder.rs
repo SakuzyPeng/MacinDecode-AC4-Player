@@ -434,7 +434,7 @@ pub struct SceneLfePcm {
 }
 
 impl SceneLfePcm {
-    #[cfg(feature = "decode")]
+    #[cfg(any(feature = "decode", test))]
     pub(super) fn new(
         element_id: u64,
         initial_state: Option<SpatialObjectState>,
