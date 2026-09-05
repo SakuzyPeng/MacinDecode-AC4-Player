@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use eframe::egui::{self, Align, Align2, Color32, Layout, RichText, Stroke};
 
@@ -690,9 +690,8 @@ impl PlayerApp {
                 match self.decoder.seek(target) {
                     Ok(()) => {
                         self.playback_restore_pending = true;
-                        self.status = StatusLine::idle(
-                            "Adapting Windows Spatial Audio to a Scene topology change",
-                        );
+                        self.status =
+                            StatusLine::idle("Adapting output to a Scene topology change");
                         context.request_repaint_after(Duration::from_millis(20));
                         return;
                     }
@@ -795,7 +794,7 @@ impl PlayerApp {
         // and before the revision check so its snapshot reaches the status line
         // without a round trip.
         self.output
-            .advance_preview(self.playback_intent, context.input(|input| input.stable_dt));
+            .advance_preview(self.playback_intent, Instant::now());
 
         if self.output_revision != self.output.revision() {
             self.output_revision = self.output.revision();
@@ -2241,6 +2240,10 @@ fn preview_status_line(output: &OutputSnapshot, decoder: &DecoderSnapshot) -> St
         OutputPhase::Ended => StatusLine::ready(format!(
             "Scene preview ended at frame {}",
             output.playhead_frames()
+        )),
+        OutputPhase::Failed => StatusLine::warning(format!(
+            "Scene preview failed: {}",
+            output.error().unwrap_or("unknown scene error")
         )),
         _ => StatusLine::ready(format!(
             "Scene preview ready: {} objects, no audio output on this build{}",

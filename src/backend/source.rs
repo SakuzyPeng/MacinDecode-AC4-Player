@@ -5,12 +5,13 @@ use macindecode_windows_spatial_audio::{
     DynamicObjectRender, LfeObjectRender, RenderQuantum, SpatialSource,
 };
 
-use crate::decoder::{
-    DecodedSceneBlock, PlaybackKey, SceneLfePcm, SceneObjectPcm, SceneQueueReader, SceneSignature,
-};
+use crate::decoder::{DecodedSceneBlock, PlaybackKey, SceneQueueReader, SceneSignature};
 use crate::scene_view::{MAX_VIEW_OBJECTS, ObjectView, SceneViewMirror};
 
-use super::state::{element_state_at, has_instant_update, lfe_render_state, listener_render_state};
+use super::state::{
+    block_offset_at, element_state_at, has_instant_update, lfe_render_state, listener_render_state,
+    validate_block,
+};
 
 pub(super) struct SceneRenderSource {
     reader: SceneQueueReader,
@@ -173,18 +174,8 @@ impl SceneRenderSource {
                 self.has_lfe,
                 &self.scene_signature,
             )?;
-            let block_end = block
-                .start_frame()
-                .checked_add(i64::from(block.duration_frames()))
-                .ok_or_else(|| "Scene block end position overflow".to_owned())?;
-            if block_end <= self.timeline_frame {
+            let Some(offset_frames) = block_offset_at(&block, self.timeline_frame)? else {
                 continue;
-            }
-            let offset_frames = if block.start_frame() < self.timeline_frame {
-                u32::try_from(self.timeline_frame - block.start_frame())
-                    .map_err(|_| "Scene overlap exceeds a block".to_owned())?
-            } else {
-                0
             };
             self.current = Some(BlockCursor {
                 block,
@@ -204,71 +195,6 @@ impl SpatialSource for SceneRenderSource {
 struct BlockCursor {
     block: DecodedSceneBlock,
     offset_frames: u32,
-}
-
-fn validate_block(
-    block: &DecodedSceneBlock,
-    sample_rate: u32,
-    dynamic_object_count: u32,
-    stream_has_lfe: bool,
-    expected_signature: &SceneSignature,
-) -> Result<(), String> {
-    if block.sample_rate() != sample_rate {
-        return Err(format!(
-            "Scene sample rate changed from {sample_rate} to {} Hz",
-            block.sample_rate()
-        ));
-    }
-    let expected = usize::try_from(block.duration_frames())
-        .map_err(|_| "Scene block duration exceeds usize".to_owned())?;
-    let actual_dynamic_objects = u32::try_from(block.objects().len())
-        .map_err(|_| "Scene object count exceeds the Windows API range".to_owned())?;
-    if actual_dynamic_objects != dynamic_object_count {
-        return Err(format!(
-            "Scene dynamic-object count changed from {dynamic_object_count} to {actual_dynamic_objects} after Spatial Audio activation"
-        ));
-    }
-    if block.lfe().is_some() != stream_has_lfe {
-        return Err("Scene LFE layout changed after Spatial Audio activation".to_owned());
-    }
-    if expected_signature.configuration_generation() != block.configuration_generation() {
-        return Err(format!(
-            "Scene configuration generation changed from {} to {}; the Spatial Audio stream must be reconfigured",
-            expected_signature.configuration_generation(),
-            block.configuration_generation()
-        ));
-    }
-    if expected_signature.presentation_index() != block.presentation_index()
-        || expected_signature.presentation_id() != block.presentation_id()
-    {
-        return Err("Selected Scene presentation changed during Spatial Audio playback".to_owned());
-    }
-    let mut actual_object_ids = block
-        .objects()
-        .iter()
-        .map(SceneObjectPcm::element_id)
-        .collect::<Vec<_>>();
-    actual_object_ids.sort_unstable();
-    if actual_object_ids != expected_signature.object_element_ids() {
-        return Err("Scene dynamic-object element IDs changed during playback".to_owned());
-    }
-    if block.lfe().map(SceneLfePcm::element_id) != expected_signature.lfe_element_id() {
-        return Err("Scene LFE element ID changed during playback".to_owned());
-    }
-    for object in block.objects() {
-        if object.samples().len() != expected {
-            return Err(format!(
-                "Scene object {} PCM length does not match its block",
-                object.element_id()
-            ));
-        }
-    }
-    if let Some(component) = block.lfe()
-        && component.samples().len() != expected
-    {
-        return Err("Scene LFE PCM length does not match its block".to_owned());
-    }
-    Ok(())
 }
 
 fn copy_object_pcm(
@@ -385,7 +311,9 @@ impl LfeQuantumAccumulator {
 
 #[cfg(test)]
 mod tests {
-    use crate::decoder::{SceneMetadataUpdate, SpatialObjectState, SpatialPosition};
+    use crate::decoder::{
+        SceneLfePcm, SceneMetadataUpdate, SceneObjectPcm, SpatialObjectState, SpatialPosition,
+    };
 
     use super::*;
 

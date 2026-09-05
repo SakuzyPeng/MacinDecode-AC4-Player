@@ -128,7 +128,9 @@ object element IDs, and LFE element ID from the first block. `OutputStreamConfig
 (`backend.rs`) then decides whether a seek can `ReplaceSource` on the live stream or needs a full
 renderer rebuild. When the signature changes mid-stream the adapter reports a recoverable error that
 `app::is_reconfigurable_scene_error` matches by message prefix — so those error strings are a
-contract between `backend/source.rs` and `app.rs`; changing one requires changing both.
+contract between `backend/state.rs` and `app.rs`; changing one requires changing both. The preview
+uses the same block validation and timeline trimming and reports failures with their playhead so
+topology changes enter the same epoch/seek recovery path.
 `automatic_reconfigure_guard` keeps a failing rebuild from spinning.
 
 ### Seek
@@ -165,10 +167,12 @@ that into a failure). Pick the gate by counting consumers: the Scene FIFO's read
 `SceneViewMirror::write` have two (the render callback and the preview), so they key on `decode`;
 `backend::state::lfe_render_state` has one, so it keys on `spatial_output`.
 
-`cargo test` runs 122 tests with `--no-default-features` and 130 with `decode` on; the extra eight
-cover `backend/preview.rs`, which is the scene view's clock on a build with a decoder but no
-renderer — it walks the Scene FIFO at wall-clock rate through the same `backend::state` helpers the
-render callback uses, so the picture cannot drift from what playback would submit. With `decode` on
+Off Windows, `cargo test` runs 122 tests with `--no-default-features` and 139 with `decode` on.
+The extra tests cover the scene preview and its controller: elapsed time while hidden, pause/resume,
+seek trimming, topology failure/reconfiguration, reset, and the visible-object budget. The preview
+walks the Scene FIFO using `Instant`, not egui's input time, which freezes while hidden. It shares
+`backend::state` helpers with the render callback for block validation, timeline trimming and OAMD
+resolution. With `decode` on
 it also compiles three media-gated `decoder::worker` tests (ignored without
 `MACINDECODE_AC4_TEST_MEDIA`).
 The decode worker asks for a 16 MiB stack explicitly rather than inheriting the Windows linker's

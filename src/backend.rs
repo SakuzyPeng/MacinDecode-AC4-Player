@@ -1,5 +1,6 @@
 use core::fmt;
 use std::sync::Arc;
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
@@ -447,7 +448,7 @@ impl SpatialOutputController {
                 self.preview = Some(preview::ScenePreview::new(
                     reader,
                     Arc::clone(&self.scene_view),
-                    config.scene_signature.object_element_ids().to_vec(),
+                    config.scene_signature.clone(),
                     config.sample_rate,
                     config.start_frame,
                 ));
@@ -464,8 +465,7 @@ impl SpatialOutputController {
 
     /// The scene view's window onto the render callback.
     ///
-    /// Off Windows nothing ever writes it, so every read comes back empty and
-    /// the stage draws an empty room through the same path.
+    /// On builds without spatial output the preview writes this same mirror.
     #[must_use]
     pub fn scene_view(&self) -> &SceneViewMirror {
         &self.scene_view
@@ -481,7 +481,7 @@ impl SpatialOutputController {
         {
             self.preview = None;
         }
-        #[cfg(spatial_output)]
+        #[cfg(feature = "decode")]
         self.set_snapshot(OutputSnapshot::idle());
     }
 
@@ -523,7 +523,7 @@ impl SpatialOutputController {
             reason = "the preview has no decoded blocks to walk without the decode feature"
         )
     )]
-    pub fn advance_preview(&mut self, playing: bool, delta_seconds: f32) {
+    pub fn advance_preview(&mut self, playing: bool, now: Instant) {
         #[cfg(feature = "decode")]
         {
             let reserved = self.snapshot.reserved_dynamic_objects;
@@ -531,10 +531,10 @@ impl SpatialOutputController {
             let Some(preview) = self.preview.as_mut() else {
                 return;
             };
-            if playing {
-                preview.advance(delta_seconds);
-            }
-            let phase = if preview.has_ended() {
+            preview.tick(playing, now);
+            let phase = if preview.error().is_some() {
+                OutputPhase::Failed
+            } else if preview.has_ended() {
                 OutputPhase::Ended
             } else if playing {
                 OutputPhase::Playing
@@ -545,7 +545,8 @@ impl SpatialOutputController {
             } else {
                 OutputPhase::Paused
             };
-            let snapshot = OutputSnapshot::preview(phase, reserved, preview.playhead_frames());
+            let mut snapshot = OutputSnapshot::preview(phase, reserved, preview.playhead_frames());
+            snapshot.error = preview.error().map(str::to_owned);
             self.set_snapshot(snapshot);
         }
     }
@@ -676,6 +677,117 @@ impl SpatialOutputController {
 impl Default for SpatialOutputController {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(all(test, feature = "decode", not(spatial_output)))]
+mod preview_tests {
+    use super::*;
+    use crate::decoder::{
+        DecodedSceneBlock, PlaybackKey, SceneObjectPcm, SharedSceneQueue, SpatialObjectState,
+        SpatialPosition, scene_queue_pair,
+    };
+    use std::time::Duration;
+
+    fn block(start: i64, id: u64) -> DecodedSceneBlock {
+        DecodedSceneBlock::new(
+            48_000,
+            start,
+            2048,
+            1,
+            0,
+            None,
+            true,
+            vec![SceneObjectPcm::new(
+                id,
+                Some(SpatialObjectState::new(
+                    true,
+                    Some(SpatialPosition::new(0.0, 0.0, 0.0)),
+                    Some(1.0),
+                    true,
+                )),
+                vec![0.0; 2048],
+            )],
+            None,
+            Vec::new(),
+        )
+    }
+
+    fn configure(
+        output: &mut SpatialOutputController,
+        epoch: u64,
+        start: u64,
+        blocks: Vec<DecodedSceneBlock>,
+    ) -> SharedSceneQueue {
+        let key = PlaybackKey::new(1, epoch);
+        let config = OutputStreamConfig::new(
+            1,
+            epoch,
+            start,
+            48_000,
+            SceneSignature::from_block(blocks.first().expect("initial block")),
+            OutputDeviceSelection::SystemDefault,
+        )
+        .expect("preview config");
+        let (queue, reader) = scene_queue_pair(key);
+        for block in blocks {
+            queue.try_push(key, block).expect("queue block");
+        }
+        output.ensure_configured(&config, reader);
+        queue
+    }
+
+    #[test]
+    fn resetting_a_preview_disables_transport_and_updates_revision() {
+        let mut output = SpatialOutputController::new();
+        let _queue = configure(&mut output, 0, 0, vec![block(0, 7)]);
+        let now = Instant::now();
+        output.advance_preview(true, now);
+        output.advance_preview(true, now + Duration::from_millis(10));
+        assert!(output.snapshot().is_playing());
+        let revision = output.revision();
+        output.reset();
+        assert!(!output.snapshot().can_play());
+        assert!(!output.snapshot().is_preview());
+        assert_eq!(output.snapshot().playhead_frames(), 0);
+        assert!(output.revision() > revision);
+        output.advance_preview(true, now + Duration::from_secs(10));
+        assert_eq!(output.snapshot().phase(), OutputPhase::Idle);
+    }
+
+    #[test]
+    fn a_topology_failure_can_be_reconfigured_into_a_fresh_preview() {
+        let mut output = SpatialOutputController::new();
+        let _old_queue = configure(&mut output, 0, 0, vec![block(0, 7), block(2048, 8)]);
+        let now = Instant::now();
+        output.advance_preview(true, now);
+        output.advance_preview(true, now + Duration::from_millis(100));
+        assert_eq!(output.snapshot().phase(), OutputPhase::Failed);
+        assert_eq!(output.snapshot().playhead_frames(), 2048);
+        assert!(output.snapshot().is_preview());
+        assert!(
+            output
+                .snapshot()
+                .error()
+                .is_some_and(|error| error.starts_with("Scene dynamic-object element IDs changed"))
+        );
+
+        let _new_queue = configure(&mut output, 1, 2048, vec![block(2048, 8)]);
+        let resumed = now + Duration::from_secs(10);
+        output.advance_preview(true, resumed);
+        assert_eq!(
+            output.snapshot().playhead_frames(),
+            2048,
+            "reconfiguration resets the clock"
+        );
+        output.advance_preview(true, resumed + Duration::from_millis(10));
+        assert_eq!(output.snapshot().phase(), OutputPhase::Playing);
+        assert!(output.snapshot().error().is_none());
+        let frame = output
+            .scene_view()
+            .read(PlaybackKey::new(1, 1))
+            .expect("new epoch scene");
+        assert_eq!(frame.objects()[0].element_id, 8);
     }
 }
 

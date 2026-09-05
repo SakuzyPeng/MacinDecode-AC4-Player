@@ -174,10 +174,17 @@ FIFO 自己的 key 门是同一套语义，视图不可能显示 stream 已经�
 镜像的写入点是 WASAPI 渲染回调，所以没有回放就没有推动它的时钟——即使解码在跑，舞台也只会是一间
 空房间，FIFO 填到两秒上限后解码本身也停住。`backend::preview::ScenePreview` 是补上的那个时钟。
 
-它按 UI 的 `stable_dt` 走同一条 Scene FIFO，用 render source 用的**同一个**
+它按独立的 `Instant` 单调时钟走同一条 Scene FIFO；隐藏窗口只执行 `logic` 时，egui 的 UI 时间输入
+不会更新，因此不能使用 `stable_dt`。暂停会解除计时，恢复和重新配置时从当前时刻重新开始，避免把
+暂停或 seek 等待时间算进预览。它用 render source 用的**同一个**
 `backend::state::element_state_at` 解析 OAMD、同一个 `listener_render_state` 换算坐标，然后写同一个
 镜像。共用这两个函数是重点：画面不是一份平行推导，而是"如果这台机器能放音，此刻会提交给渲染器的
-那一组对象"。它唯一不碰的是 PCM——没有地方送。
+那一组对象"。它不提交 PCM——没有地方送。
+
+两条消费路径还共用 `backend::state::validate_block` 和 `block_offset_at`：过期块直接跳过，跨越
+零点或 seek 目标的首块从正确偏移开始。预览也检查完整 Scene signature 和采样率；不兼容时停在边界，
+保留失败状态和帧位置，拓扑错误由协调器按原有 epoch/seek 流程重建，避免继续显示已经被替换的对象。
+预览向镜像传递全部对象，由镜像执行 20 对象的有界复制并记录超额数量，所以遗漏提示不会被提前截断。
 
 三条约束：
 
@@ -188,8 +195,8 @@ FIFO 自己的 key 门是同一套语义，视图不可能显示 stream 已经�
   整除，每 tick 丢掉余数会让预览可测量地走慢；截断则是防止窗口被拖住几秒后一次性冲掉整个缓冲。
 
 `OutputSnapshot::is_preview()` 让 UI 说实话：设备标签是 `Scene preview · no audio output`，状态行也
-换成对应措辞。相位仍然走 Ready/Playing/Paused/Ended，因为传输控件、时间轴和重绘节奏本来就该一视同
-仁——**只有用词不同，没有第二套状态机**。
+换成对应措辞。相位仍然走 Ready/Playing/Paused/Ended/Failed，因为传输控件、时间轴和重绘节奏本来就该
+一视同仁。清空预览同时重置输出快照并更新 revision，删除文件后不会残留可播放状态。
 
 Windows 上不构造预览：那里 render source 拥有 FIFO，多一个消费者就是在和音频抢数据。
 

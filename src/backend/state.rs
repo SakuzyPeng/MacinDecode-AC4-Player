@@ -1,14 +1,103 @@
 //! Resolving an element's OAMD state at a point inside a Scene block.
 //!
 //! This is pure arithmetic over `crate::decoder`'s cross-platform types, and it
-//! is deliberately **not** gated on Windows even though only the Windows render
-//! callback calls it today. Two reasons, both practical:
-//!
-//! * Its tests run everywhere. Sitting inside `backend::source` they compiled
-//!   only on Windows, so on every other platform the ramp arithmetic — the part
-//!   most likely to be wrong and least likely to be noticed — went unexercised.
+//! is shared by the Windows render callback and the scene preview. Validation,
+//! timeline trimming and OAMD resolution must agree between those consumers;
+//! their arithmetic and its tests run on every platform.
 
-use crate::decoder::{DecodedSceneBlock, SpatialObjectState, SpatialPosition};
+use crate::decoder::{
+    DecodedSceneBlock, SceneLfePcm, SceneObjectPcm, SceneSignature, SpatialObjectState,
+    SpatialPosition,
+};
+
+/// Check the same Scene contract before either consumer accepts a block.
+/// Error prefixes are also the app's automatic-reconfiguration contract.
+pub(super) fn validate_block(
+    block: &DecodedSceneBlock,
+    sample_rate: u32,
+    dynamic_object_count: u32,
+    stream_has_lfe: bool,
+    expected_signature: &SceneSignature,
+) -> Result<(), String> {
+    if block.sample_rate() != sample_rate {
+        return Err(format!(
+            "Scene sample rate changed from {sample_rate} to {} Hz",
+            block.sample_rate()
+        ));
+    }
+    let expected = usize::try_from(block.duration_frames())
+        .map_err(|_| "Scene block duration exceeds usize".to_owned())?;
+    let actual_dynamic_objects = u32::try_from(block.objects().len())
+        .map_err(|_| "Scene object count exceeds the Windows API range".to_owned())?;
+    if actual_dynamic_objects != dynamic_object_count {
+        return Err(format!(
+            "Scene dynamic-object count changed from {dynamic_object_count} to {actual_dynamic_objects} after Spatial Audio activation"
+        ));
+    }
+    if block.lfe().is_some() != stream_has_lfe {
+        return Err("Scene LFE layout changed after Spatial Audio activation".to_owned());
+    }
+    if expected_signature.configuration_generation() != block.configuration_generation() {
+        return Err(format!(
+            "Scene configuration generation changed from {} to {}; the Spatial Audio stream must be reconfigured",
+            expected_signature.configuration_generation(),
+            block.configuration_generation()
+        ));
+    }
+    if expected_signature.presentation_index() != block.presentation_index()
+        || expected_signature.presentation_id() != block.presentation_id()
+    {
+        return Err("Selected Scene presentation changed during Spatial Audio playback".to_owned());
+    }
+    let mut actual_object_ids = block
+        .objects()
+        .iter()
+        .map(SceneObjectPcm::element_id)
+        .collect::<Vec<_>>();
+    actual_object_ids.sort_unstable();
+    if actual_object_ids != expected_signature.object_element_ids() {
+        return Err("Scene dynamic-object element IDs changed during playback".to_owned());
+    }
+    if block.lfe().map(SceneLfePcm::element_id) != expected_signature.lfe_element_id() {
+        return Err("Scene LFE element ID changed during playback".to_owned());
+    }
+    for object in block.objects() {
+        if object.samples().len() != expected {
+            return Err(format!(
+                "Scene object {} PCM length does not match its block",
+                object.element_id()
+            ));
+        }
+    }
+    if let Some(component) = block.lfe()
+        && component.samples().len() != expected
+    {
+        return Err("Scene LFE PCM length does not match its block".to_owned());
+    }
+    Ok(())
+}
+
+/// Offset of the first frame on the current presentation timeline.
+/// `None` skips an entirely expired block, including MP4 pre-zero preroll.
+pub(super) fn block_offset_at(
+    block: &DecodedSceneBlock,
+    timeline_frame: i64,
+) -> Result<Option<u32>, String> {
+    let block_end = block
+        .start_frame()
+        .checked_add(i64::from(block.duration_frames()))
+        .ok_or_else(|| "Scene block end position overflow".to_owned())?;
+    if block_end <= timeline_frame {
+        return Ok(None);
+    }
+    let offset = if block.start_frame() < timeline_frame {
+        u32::try_from(timeline_frame - block.start_frame())
+            .map_err(|_| "Scene overlap exceeds a block".to_owned())?
+    } else {
+        0
+    };
+    Ok(Some(offset))
+}
 
 /// The element's state `offset_frames` into `block`, following every metadata
 /// update up to that point and interpolating whichever ramp is still running.
