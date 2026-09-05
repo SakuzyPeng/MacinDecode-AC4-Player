@@ -22,23 +22,26 @@ fn main() {
     }
 }
 
-/// Emit `spatial_output` when this build can actually play something.
-///
-/// Playback needs two independent things, and the codebase keeps them apart on
-/// purpose: `feature = "decode"` says there is a decoder (it needs the ETSI
-/// spec tables, and is otherwise platform-agnostic), while
-/// `target_os = "windows"` says there is COM and WASAPI. The render callback
-/// needs *both* — it reads decoded Scene blocks and hands them to Windows
-/// Spatial Audio — so its gate is their conjunction.
-///
-/// Deriving it here rather than writing `all(target_os = "windows", feature =
-/// "decode")` at each of its ~30 sites means the conjunction cannot drift: a
-/// site that gets only half of it is what broke `--no-default-features` on
-/// Windows in the first place.
+/// Derive the decode/native gates in one place. `windows_spatial_output`
+/// enables the existing COM/object path; `macinrender_output` enables the
+/// optional C ABI on macOS/Windows; `spatial_output` is their union. Shared
+/// Scene arithmetic and preview remain gated only by `decode`.
 fn declare_spatial_output() {
     println!("cargo::rustc-check-cfg=cfg(spatial_output)");
+    println!("cargo::rustc-check-cfg=cfg(windows_spatial_output)");
+    println!("cargo::rustc-check-cfg=cfg(macinrender_output)");
     let windows = env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows");
-    if windows && env::var_os("CARGO_FEATURE_DECODE").is_some() {
+    let macos = env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos");
+    let decode = env::var_os("CARGO_FEATURE_DECODE").is_some();
+    let macinrender =
+        decode && (windows || macos) && env::var_os("CARGO_FEATURE_MACINRENDER").is_some();
+    if windows && decode {
+        println!("cargo::rustc-cfg=windows_spatial_output");
+    }
+    if macinrender {
+        println!("cargo::rustc-cfg=macinrender_output");
+    }
+    if (windows && decode) || macinrender {
         println!("cargo::rustc-cfg=spatial_output");
     }
 }

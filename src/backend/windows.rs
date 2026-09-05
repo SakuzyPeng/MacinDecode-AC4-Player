@@ -19,6 +19,7 @@ pub(super) fn spawn(
     config: &OutputStreamConfig,
     reader: SceneQueueReader,
     mirror: Arc<SceneViewMirror>,
+    pose: Arc<crate::head_tracking::PoseMirror>,
 ) -> Result<Renderer, String> {
     Renderer::spawn(
         StreamConfig {
@@ -28,15 +29,18 @@ pub(super) fn spawn(
             start_frame: config.start_frame,
             output_device: native_selection(&config.output_device),
         },
-        Box::new(SceneRenderSource::new(
-            reader,
-            mirror,
-            config.sample_rate,
-            config.dynamic_object_count,
-            config.has_lfe,
-            config.scene_signature.clone(),
-            config.start_frame,
-        )),
+        Box::new(
+            SceneRenderSource::new(
+                reader,
+                mirror,
+                config.sample_rate,
+                config.dynamic_object_count,
+                config.has_lfe,
+                config.scene_signature.clone(),
+                config.start_frame,
+            )
+            .with_pose(pose),
+        ),
     )
 }
 
@@ -45,17 +49,21 @@ pub(super) fn replace_source(
     config: &OutputStreamConfig,
     reader: SceneQueueReader,
     mirror: Arc<SceneViewMirror>,
+    pose: Arc<crate::head_tracking::PoseMirror>,
 ) -> Result<(), String> {
     renderer.replace_source(
-        Box::new(SceneRenderSource::new(
-            reader,
-            mirror,
-            config.sample_rate,
-            config.dynamic_object_count,
-            config.has_lfe,
-            config.scene_signature.clone(),
-            config.start_frame,
-        )),
+        Box::new(
+            SceneRenderSource::new(
+                reader,
+                mirror,
+                config.sample_rate,
+                config.dynamic_object_count,
+                config.has_lfe,
+                config.scene_signature.clone(),
+                config.start_frame,
+            )
+            .with_pose(pose),
+        ),
         config.start_frame,
     )
 }
@@ -134,6 +142,9 @@ impl Drop for DeviceCatalogWorker {
 
 pub(super) fn snapshot(native: RenderSnapshot) -> OutputSnapshot {
     OutputSnapshot {
+        queued_output_frames: None,
+        buffering: false,
+        clock: super::OutputClock::Callback,
         phase: match native.phase {
             RenderPhase::Initializing => OutputPhase::Initializing,
             RenderPhase::Ready => OutputPhase::Ready,

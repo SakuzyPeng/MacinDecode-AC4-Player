@@ -434,7 +434,7 @@ pub struct SceneLfePcm {
 }
 
 impl SceneLfePcm {
-    #[cfg(feature = "decode")]
+    #[cfg(any(feature = "decode", test))]
     pub(super) fn new(
         element_id: u64,
         initial_state: Option<SpatialObjectState>,
@@ -607,6 +607,29 @@ impl DecodedSceneBlock {
     pub fn metadata_updates(&self) -> &[SceneMetadataUpdate] {
         &self.metadata_updates
     }
+
+    #[cfg(any(feature = "decode", test))]
+    pub(super) fn truncate_at(&mut self, end_frame: i64) -> bool {
+        if end_frame <= self.start_frame {
+            return false;
+        }
+        let retained = u32::try_from(end_frame.saturating_sub(self.start_frame))
+            .unwrap_or(u32::MAX)
+            .min(self.duration_frames);
+        if retained < self.duration_frames {
+            self.duration_frames = retained;
+            let length = usize::try_from(retained).expect("owned Scene frame fits in memory");
+            for object in &mut self.objects {
+                object.samples.truncate(length);
+            }
+            if let Some(lfe) = &mut self.lfe {
+                lfe.samples.truncate(length);
+            }
+            self.metadata_updates
+                .retain(|update| update.offset_frames < retained);
+        }
+        true
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -723,6 +746,14 @@ impl SharedSceneQueue {
             queue.end_of_stream = true;
             changed.notify_all();
         }
+    }
+
+    fn snapshot(&self, key: PlaybackKey) -> Option<QueueSnapshot> {
+        let queue = lock_recover(&self.state.0);
+        (queue.key == key).then_some(QueueSnapshot {
+            buffered_frames: queue.buffered_frames,
+            capacity_frames: queue.capacity_frames,
+        })
     }
 
     #[cfg(any(feature = "decode", test))]
@@ -1002,6 +1033,18 @@ impl DecoderController {
                 }
             }
         }
+        // The consumer continues draining after the decode worker publishes EOS.
+        // Its buffer count must not remain frozen in the final worker snapshot.
+        if let (Some(buffer), Some(metrics)) = (
+            self.queue.snapshot(self.playback_key()),
+            self.snapshot.metrics.as_mut(),
+        ) && (metrics.buffered_frames != buffer.buffered_frames
+            || metrics.buffer_capacity_frames != buffer.capacity_frames)
+        {
+            metrics.buffered_frames = buffer.buffered_frames;
+            metrics.buffer_capacity_frames = buffer.capacity_frames;
+            self.revision = self.revision.saturating_add(1);
+        }
     }
 
     pub const fn snapshot(&self) -> &DecoderSnapshot {
@@ -1056,14 +1099,41 @@ impl DecoderController {
     /// Returns an error when no source/index is available, the target exceeds the duration, or
     /// no complete random-access point exists at or before the requested frame.
     pub fn seek(&mut self, target_frame: u64) -> Result<(), String> {
+        self.validate_seek(target_frame)?;
         let path = self
             .active_path
             .clone()
-            .ok_or_else(|| "No active media is loaded".to_owned())?;
+            .ok_or("No active media is loaded")?;
         let metrics = self
             .snapshot
             .metrics()
             .cloned()
+            .ok_or("Media indexing has not completed yet")?;
+        let sender = self
+            .command_sender
+            .as_ref()
+            .ok_or("The decoder is unavailable")?;
+        self.playback_epoch = self.playback_epoch.checked_add(1).unwrap_or(1);
+        let key = self.playback_key();
+        self.queue.reset(key);
+        self.snapshot = DecoderSnapshot::seeking(path, metrics, target_frame);
+        self.revision = self.revision.saturating_add(1);
+        sender
+            .send(WorkerCommand::Seek { key, target_frame })
+            .map_err(|_| "MacinDecode Core worker stopped unexpectedly".to_owned())
+    }
+
+    /// Check a future seek without changing the FIFO, epoch, or playback state.
+    ///
+    /// # Errors
+    /// Returns the same source/index/range errors as `seek`.
+    pub fn validate_seek(&self, target_frame: u64) -> Result<(), String> {
+        if self.active_path.is_none() {
+            return Err("No active media is loaded".into());
+        }
+        let metrics = self
+            .snapshot
+            .metrics()
             .ok_or_else(|| "Media indexing has not completed yet".to_owned())?;
         if metrics.is_indexing() {
             return Err("Media indexing has not completed yet".to_owned());
@@ -1081,18 +1151,10 @@ impl DecoderController {
                 }
             });
         }
-        let sender = self
-            .command_sender
-            .as_ref()
-            .ok_or_else(|| "The Windows decoder is unavailable".to_owned())?;
-        self.playback_epoch = self.playback_epoch.checked_add(1).unwrap_or(1);
-        let key = self.playback_key();
-        self.queue.reset(key);
-        self.snapshot = DecoderSnapshot::seeking(path, metrics, target_frame);
-        self.revision = self.revision.saturating_add(1);
-        sender
-            .send(WorkerCommand::Seek { key, target_frame })
-            .map_err(|_| "MacinDecode Core worker stopped unexpectedly".to_owned())
+        if self.command_sender.is_none() {
+            return Err("The decoder is unavailable".into());
+        }
+        Ok(())
     }
 
     pub fn reopen(&mut self) {
@@ -1210,6 +1272,87 @@ mod tests {
             index_error: None,
             target_frame: 0,
         }
+    }
+
+    #[test]
+    fn container_end_trims_pcm_and_events_without_speeding_up_ramps() {
+        let state = SpatialObjectState::new(
+            true,
+            Some(SpatialPosition::new(0.0, 1.0, 0.0)),
+            Some(1.0),
+            true,
+        );
+        let mut block = DecodedSceneBlock::new(
+            48_000,
+            100,
+            32,
+            1,
+            0,
+            None,
+            true,
+            vec![SceneObjectPcm::new(7, Some(state), vec![0.1; 32])],
+            Some(SceneLfePcm::new(9, Some(state), vec![0.2; 32])),
+            vec![
+                SceneMetadataUpdate::new(7, 4, 20, 8, state),
+                SceneMetadataUpdate::new(7, 16, 0, 8, state),
+            ],
+        );
+        assert!(block.truncate_at(116));
+        assert_eq!(block.duration_frames(), 16);
+        assert_eq!(block.objects()[0].samples().len(), 16);
+        assert_eq!(block.lfe().unwrap().samples().len(), 16);
+        assert_eq!(block.metadata_updates().len(), 1);
+        assert_eq!(block.metadata_updates()[0].ramp_frames(), 20);
+        assert!(!block.truncate_at(100));
+    }
+
+    #[cfg(feature = "decode")]
+    #[test]
+    fn seek_preflight_preserves_the_current_epoch_and_queued_audio() {
+        let mut controller = DecoderController::new();
+        let path = PathBuf::from("fixture.ac4");
+        controller.active_path = Some(path.clone());
+        controller.snapshot =
+            DecoderSnapshot::progress(DecodePhase::Ready, path, indexed_metrics());
+        let key = controller.playback_key();
+        let revision = controller.revision();
+        controller.queue.try_push(key, block(48_000, 4800)).unwrap();
+        assert!(controller.validate_seek(96_000).is_ok());
+        assert!(controller.validate_seek(0).is_err());
+        assert_eq!(controller.playback_key(), key);
+        assert_eq!(controller.revision(), revision);
+        assert_eq!(controller.snapshot().phase(), DecodePhase::Ready);
+        assert_eq!(
+            controller.try_pop_scene_block().unwrap().duration_frames(),
+            4800
+        );
+    }
+
+    #[cfg(feature = "decode")]
+    #[test]
+    fn polling_updates_buffer_occupancy_after_decoder_eos() {
+        let mut controller = DecoderController::new();
+        let key = controller.playback_key();
+        controller.queue.try_push(key, block(48_000, 4800)).unwrap();
+        controller.queue.mark_end_of_stream(key);
+        controller.snapshot = DecoderSnapshot::progress(
+            DecodePhase::EndOfStream,
+            PathBuf::from("fixture.ac4"),
+            indexed_metrics(),
+        );
+        controller.poll();
+        assert_eq!(
+            controller.snapshot().metrics().unwrap().buffered_frames(),
+            4800
+        );
+        let revision = controller.revision();
+        controller.try_pop_scene_block().unwrap();
+        controller.poll();
+        assert_eq!(
+            controller.snapshot().metrics().unwrap().buffered_frames(),
+            0
+        );
+        assert!(controller.revision() > revision);
     }
 
     #[test]
