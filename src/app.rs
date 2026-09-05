@@ -272,6 +272,23 @@ const fn output_repaint_delay(
     }
 }
 
+fn advance_scene_preview(
+    output: &mut SpatialOutputController,
+    playing: bool,
+    context: &egui::Context,
+    now: Instant,
+) {
+    let previous_revision = output.revision();
+    output.advance_preview(playing, now);
+    // Recovery is checked before preview advancement. At decoded EOS there is
+    // no decoder poll left to wake the next pass, and Failed has no playback
+    // repaint cadence. Schedule one pass for a newly reported failure, without
+    // keeping a latched/unrecoverable error repainting indefinitely.
+    if output.revision() != previous_revision && output.snapshot().phase() == OutputPhase::Failed {
+        context.request_repaint();
+    }
+}
+
 const fn should_replay_current_on_completion(mode: PlaybackMode, item_count: usize) -> bool {
     match mode {
         PlaybackMode::RepeatOne => true,
@@ -793,8 +810,12 @@ impl PlayerApp {
         // configuration so a preview built this frame also advances this frame,
         // and before the revision check so its snapshot reaches the status line
         // without a round trip.
-        self.output
-            .advance_preview(self.playback_intent, Instant::now());
+        advance_scene_preview(
+            &mut self.output,
+            self.playback_intent,
+            context,
+            Instant::now(),
+        );
 
         if self.output_revision != self.output.revision() {
             self.output_revision = self.output.revision();
@@ -2594,6 +2615,80 @@ fn draw_drop_overlay(context: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(all(feature = "decode", not(spatial_output)))]
+    fn a_preview_failure_after_decoded_eos_schedules_recovery_without_spinning() {
+        use crate::decoder::{
+            DecodedSceneBlock, PlaybackKey, SceneObjectPcm, SceneSignature, scene_queue_pair,
+        };
+
+        let key = PlaybackKey::new(1, 0);
+        let (queue, reader) = scene_queue_pair(key);
+        for (start, id) in [(0, 7), (2048, 8)] {
+            queue
+                .try_push(
+                    key,
+                    DecodedSceneBlock::new(
+                        48_000,
+                        start,
+                        2048,
+                        1,
+                        0,
+                        None,
+                        true,
+                        vec![SceneObjectPcm::new(id, None, vec![0.0; 2048])],
+                        None,
+                        Vec::new(),
+                    ),
+                )
+                .expect("queue scene");
+        }
+        queue.mark_end_of_stream(key);
+        let config = OutputStreamConfig::new(
+            1,
+            0,
+            0,
+            48_000,
+            SceneSignature::new(1, 0, None, vec![7], None),
+            OutputDeviceSelection::SystemDefault,
+        )
+        .expect("preview config");
+        let mut output = SpatialOutputController::new();
+        output.ensure_configured(&config, reader);
+        let context = egui::Context::default();
+        let raw = egui::RawInput::default();
+        for _ in 0..3 {
+            let _ = context.run_logic(&raw, |_| {});
+        }
+        let now = Instant::now();
+        let _ = context.run_logic(&raw, |ctx| {
+            advance_scene_preview(&mut output, true, ctx, now);
+        });
+        assert!(!context.has_requested_repaint());
+        let _ = context.run_logic(&raw, |ctx| {
+            advance_scene_preview(&mut output, true, ctx, now + Duration::from_millis(100));
+        });
+        assert_eq!(output.snapshot().phase(), OutputPhase::Failed);
+        assert!(
+            context.has_requested_repaint(),
+            "recovery needs another logic pass at decoded EOS"
+        );
+        for tick in 2..=4 {
+            let _ = context.run_logic(&raw, |ctx| {
+                advance_scene_preview(
+                    &mut output,
+                    true,
+                    ctx,
+                    now + Duration::from_millis(tick * 100),
+                );
+            });
+        }
+        assert!(
+            !context.has_requested_repaint(),
+            "a latched failure must not keep waking the UI"
+        );
+    }
 
     #[test]
     fn dynamic_object_numbers_are_one_based_and_do_not_reserve_lfe_zero() {

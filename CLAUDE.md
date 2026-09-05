@@ -167,7 +167,7 @@ that into a failure). Pick the gate by counting consumers: the Scene FIFO's read
 `SceneViewMirror::write` have two (the render callback and the preview), so they key on `decode`;
 `backend::state::lfe_render_state` has one, so it keys on `spatial_output`.
 
-Off Windows, `cargo test` runs 122 tests with `--no-default-features` and 139 with `decode` on.
+Off Windows, `cargo test` runs 122 tests with `--no-default-features` and 140 with `decode` on.
 The extra tests cover the scene preview and its controller: elapsed time while hidden, pause/resume,
 seek trimming, topology failure/reconfiguration, reset, and the visible-object budget. The preview
 walks the Scene FIFO using `Instant`, not egui's input time, which freezes while hidden. It shares
