@@ -74,6 +74,7 @@ def main():
     parser.add_argument("--output", type=pathlib.Path, default=ROOT / "dist")
     args = parser.parse_args()
     native = cargo_native(args.target_dir)
+    extra_build_info = {}
     args.output.mkdir(parents=True, exist_ok=True)
     if sys.platform == "darwin":
         package = args.output / "MacinDecode AC-4 Player.app"
@@ -116,6 +117,11 @@ def main():
             directory = pathlib.Path(openblas).parent.parent / "bin"
             for path in directory.glob("*.dll"):
                 shutil.copy2(path, package)
+            header = directory.parent / "include" / "openblas_config.h"
+            if header.is_file():
+                version = re.search(r'#define\s+OPENBLAS_VERSION\s+"([^"]+)"', header.read_text())
+                if version:
+                    extra_build_info["openblas"] = version.group(1).strip()
         dumpbin = shutil.which("dumpbin")
         if not dumpbin and "compiler" in native:
             dumpbin = str(native["compiler"] / "dumpbin.exe")
@@ -126,6 +132,9 @@ def main():
         raise SystemExit("Packaging is currently supported on macOS and Windows")
     legal.mkdir(parents=True, exist_ok=True)
     shutil.copy2(ROOT / "LICENSE", legal / "PLAYER_LICENSE")
+    shutil.copy2(ROOT / "assets/fonts/OFL.txt", legal / "PLAYER_FONT_OFL.txt")
+    if sys.platform == "win32":
+        shutil.copy2(ROOT / "assets/licenses/OPENBLAS.txt", legal / "OPENBLAS_LICENSE")
     shutil.copy2(native["source"] / "LICENSE", legal / "MACINRENDER_LICENSE")
     shutil.copy2(native["source"] / "docs/THIRD_PARTY_LICENSES.md", legal / "THIRD_PARTY_NOTICES.md")
     shutil.copytree(native["source"] / "third_party/licenses", legal / "licenses", dirs_exist_ok=True)
@@ -135,7 +144,7 @@ def main():
     (legal / "BUILD_INFO.json").write_text(json.dumps(dict(player_commit=commit, macinrender_commit=native_commit,
         player_dirty=bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT)),
         macinrender_dirty=bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=native["source"])),
-        c_abi="1.36", native_build="Release", sofa=True, iamf=False), indent=2) + "\n")
+        c_abi="1.36", native_build="Release", sofa=True, iamf=False, **extra_build_info), indent=2) + "\n")
     (legal / "DEPENDENCIES.txt").write_text(dependencies)
     if sys.platform == "darwin":
         for path in libraries.glob("*.dylib"):
