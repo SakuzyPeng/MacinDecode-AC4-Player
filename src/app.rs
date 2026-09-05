@@ -1816,6 +1816,7 @@ impl PlayerApp {
             egui::ViewportId::from_hash_of("playback-diagnostics"),
             egui::ViewportBuilder::default()
                 .with_title("MacinDecode AC-4 Diagnostics")
+                .with_icon(crate::app_icon::load())
                 .with_inner_size([460.0, 390.0])
                 .with_min_inner_size([400.0, 300.0]),
             |root, _class| {
@@ -1841,6 +1842,7 @@ impl PlayerApp {
             egui::ViewportId::from_hash_of("bitstream-details"),
             egui::ViewportBuilder::default()
                 .with_title("MacinDecode AC-4 Bitstream Details")
+                .with_icon(crate::app_icon::load())
                 .with_inner_size([760.0, 680.0])
                 .with_min_inner_size([560.0, 420.0]),
             |root, _class| {

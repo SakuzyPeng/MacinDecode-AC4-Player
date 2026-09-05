@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" fill="none" role="img" aria-labelledby="front-block-title front-block-description">
+  <title id="front-block-title">MacinDecode — 悬浮声块 · 正面满幅</title>
+  <desc id="front-block-description">陶橙色声块正面朝向观看者，铺满圆角图标轮廓，中央保留奶油白播放三角。柔和的上下明暗与边缘阴影赋予哑光块体质感。</desc>
+  <defs>
+    <linearGradient id="front-block-face-fill" x1="256" y1="24" x2="256" y2="480" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#DC945B"/>
+      <stop offset="0.48" stop-color="#CE7A3B"/>
+      <stop offset="1" stop-color="#BD6B35"/>
+    </linearGradient>
+    <linearGradient id="front-block-cutout-fill" x1="256" y1="142" x2="256" y2="366" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFEFA"/>
+      <stop offset="1" stop-color="#FBF7F0"/>
+    </linearGradient>
+    <filter id="front-block-shadow" x="0" y="0" width="512" height="512" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="7" stdDeviation="7" flood-color="#332A1F" flood-opacity="0.18"/>
+    </filter>
+    <mask id="front-block-play-cutout" x="0" y="0" width="512" height="512" maskUnits="userSpaceOnUse" maskContentUnits="userSpaceOnUse" style="mask-type:luminance">
+      <rect width="512" height="512" fill="white"/>
+      <path d="M 188 151 C 188 142 194 138 201 142 L 374 240 C 386 247 386 257 374 264 L 201 362 C 194 366 188 362 188 353 Z" fill="black"/>
+    </mask>
+  </defs>
+  <g id="front-block-icon">
+    <rect x="28" y="24" width="456" height="456" rx="104" fill="url(#front-block-cutout-fill)" filter="url(#front-block-shadow)"/>
+    <rect id="front-block-face" x="28" y="24" width="456" height="456" rx="104" fill="url(#front-block-face-fill)" mask="url(#front-block-play-cutout)"/>
+    <rect x="28.75" y="24.75" width="454.5" height="454.5" rx="103.25" stroke="#AE6337" stroke-width="1.5" opacity="0.42"/>
+    <path d="M 51 100 C 65 57 96 28 146 28 H 366 C 416 28 447 57 461 100" stroke="#F2BD91" stroke-width="2" stroke-linecap="round" opacity="0.66"/>
+    <path d="M 52 405 C 66 448 96 477 146 477 H 366 C 416 477 446 448 460 405" stroke="#9D562F" stroke-width="2" stroke-linecap="round" opacity="0.22"/>
+  </g>
+</svg>

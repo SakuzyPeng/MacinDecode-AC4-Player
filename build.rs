@@ -16,9 +16,24 @@ fn main() {
     println!("cargo:rerun-if-env-changed={FONT_OVERRIDE_ENV}");
 
     declare_spatial_output();
+    embed_windows_icon();
 
     if let Err(error) = prepare_ui_font() {
         panic!("failed to prepare the UI font: {error}");
+    }
+}
+
+fn embed_windows_icon() {
+    println!("cargo:rerun-if-changed=assets/icons/windows.rc");
+    println!("cargo:rerun-if-changed=assets/icons/app-windows.ico");
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        embed_resource::compile_for(
+            "assets/icons/windows.rc",
+            ["macindecode-ac4-player"],
+            embed_resource::ParamsIncludeDirs(["assets/icons"]),
+        )
+        .manifest_required()
+        .expect("failed to embed the Windows application icon");
     }
 }
 

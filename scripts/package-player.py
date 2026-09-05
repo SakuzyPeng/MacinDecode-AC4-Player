@@ -83,15 +83,19 @@ def main():
         contents = package / "Contents"
         executable_dir = contents / "MacOS"
         libraries = contents / "Frameworks"
-        legal = contents / "Resources" / "Legal"
+        resources = contents / "Resources"
+        legal = resources / "Legal"
         executable_dir.mkdir(parents=True)
         libraries.mkdir()
+        resources.mkdir()
+        shutil.copy2(ROOT / "assets/icons/app-macos.icns", resources / "AppIcon.icns")
         shutil.copy2(args.target_dir / "release/macindecode-ac4-player", executable_dir)
         for name in ["libmradm_capi.dylib", "libmr_headtrack.dylib"]:
             shutil.copy2(native["binary"] / name, libraries / name, follow_symlinks=True)
         info = dict(CFBundleExecutable="macindecode-ac4-player", CFBundleIdentifier="com.macinrender.macindecode-ac4-player",
                     CFBundleName="MacinDecode AC-4 Player", CFBundlePackageType="APPL", CFBundleVersion="1",
                     CFBundleShortVersionString="0.1.0", LSMinimumSystemVersion="14.0",
+                    CFBundleIconFile="AppIcon.icns",
                     NSHighResolutionCapable=True,
                     NSMotionUsageDescription="MacinDecode uses AirPods head orientation for spatial audio playback and its scene view.")
         with (contents / "Info.plist").open("wb") as stream:

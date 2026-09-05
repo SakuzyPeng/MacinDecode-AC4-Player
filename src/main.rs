@@ -7,6 +7,7 @@ compile_error!(
 );
 
 mod app;
+mod app_icon;
 mod backend;
 mod bitstream_ui;
 pub mod decoder;
@@ -28,6 +29,7 @@ fn main() -> eframe::Result {
         multisampling: scene3d::gpu::MSAA_SAMPLES,
         viewport: eframe::egui::ViewportBuilder::default()
             .with_app_id("com.macinrender.macindecode-ac4-player")
+            .with_icon(app_icon::load())
             .with_inner_size([1_180.0, 760.0])
             .with_min_inner_size([920.0, 620.0])
             .with_title("MacinDecode AC-4 Player"),

@@ -1,0 +1,151 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" fill="none" role="img" aria-labelledby="listener-title listener-description">
+  <title id="listener-title">MacinDecode — 听众与对象轨迹</title>
+  <desc id="listener-description">默认灰褐色体素听众头部，带深色方眼和陶橙色朝向块。一个陶橙色对象沿倾斜轨道环绕头部，留下固定大小、逐渐淡出的离散方块轨迹。</desc>
+  <defs>
+    <linearGradient id="listener-tile-fill" x1="256" y1="28" x2="256" y2="484" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFEFA" />
+      <stop offset="1" stop-color="#F5EDE0" />
+    </linearGradient>
+    <filter id="listener-tile-shadow" x="0" y="0" width="512" height="512" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="7" stdDeviation="7" flood-color="#332A1F" flood-opacity="0.14" />
+    </filter>
+    <filter id="listener-ground-blur" x="112" y="368" width="304" height="84" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="10" />
+    </filter>
+  </defs>
+  <g id="listener-base">
+    <rect x="28" y="24" width="456" height="456" rx="104" fill="url(#listener-tile-fill)" filter="url(#listener-tile-shadow)" />
+    <rect x="28.75" y="24.75" width="454.5" height="454.5" rx="103.25" stroke="#E9DECE" stroke-width="1.5" />
+    <path d="M 55 100 C 69 62 98 38 146 36 H 366 C 414 36 443 62 457 100" stroke="#FFFEFA" stroke-width="2" stroke-linecap="round" opacity="0.9" />
+  </g>
+  <g id="listener-symbol">
+    <ellipse cx="247" cy="402" rx="101" ry="10" fill="#70543C" opacity=".16" filter="url(#listener-ground-blur)" />
+    <g id="trajectory-sample-32">
+      <path id="trajectory-sample-32-top" d="M 208.357 164.296 L 221.425 157.763 L 234.492 164.296 L 221.425 170.830 Z" fill="#D99968" />
+      <path id="trajectory-sample-32-right" d="M 221.425 170.830 L 234.492 164.296 L 234.492 180.300 L 221.425 186.834 Z" fill="#C78E61" />
+      <path id="trajectory-sample-32-front" d="M 208.357 164.296 L 221.425 170.830 L 221.425 186.834 L 208.357 180.300 Z" fill="#B6835B" />
+    </g>
+    <g id="trajectory-sample-34">
+      <path id="trajectory-sample-34-top" d="M 251.352 153.126 L 264.419 146.592 L 277.486 153.126 L 264.419 159.660 Z" fill="#D79461" />
+      <path id="trajectory-sample-34-right" d="M 264.419 159.660 L 277.486 153.126 L 277.486 169.130 L 264.419 175.664 Z" fill="#C68A5C" />
+      <path id="trajectory-sample-34-front" d="M 251.352 153.126 L 264.419 159.660 L 264.419 175.664 L 251.352 169.130 Z" fill="#B58056" />
+    </g>
+    <g id="trajectory-sample-30">
+      <path id="trajectory-sample-30-top" d="M 167.606 181.504 L 180.673 174.970 L 193.740 181.504 L 180.673 188.038 Z" fill="#DA9D6E" />
+      <path id="trajectory-sample-30-right" d="M 180.673 188.038 L 193.740 181.504 L 193.740 197.508 L 180.673 204.042 Z" fill="#C99267" />
+      <path id="trajectory-sample-30-front" d="M 167.606 181.504 L 180.673 188.038 L 180.673 204.042 L 167.606 197.508 Z" fill="#B78760" />
+    </g>
+    <g id="trajectory-sample-36">
+      <path id="trajectory-sample-36-top" d="M 293.629 148.763 L 306.696 142.229 L 319.763 148.763 L 306.696 155.297 Z" fill="#D5905A" />
+      <path id="trajectory-sample-36-right" d="M 306.696 155.297 L 319.763 148.763 L 319.763 164.767 L 306.696 171.301 Z" fill="#C48655" />
+      <path id="trajectory-sample-36-front" d="M 293.629 148.763 L 306.696 155.297 L 306.696 171.301 L 293.629 164.767 Z" fill="#B37C51" />
+    </g>
+    <g id="trajectory-sample-28">
+      <path id="trajectory-sample-28-top" d="M 131.902 203.565 L 144.970 197.031 L 158.037 203.565 L 144.970 210.099 Z" fill="#DCA275" />
+      <path id="trajectory-sample-28-right" d="M 144.970 210.099 L 158.037 203.565 L 158.037 219.569 L 144.970 226.103 Z" fill="#CA966D" />
+      <path id="trajectory-sample-28-front" d="M 131.902 203.565 L 144.970 210.099 L 144.970 226.103 L 131.902 219.569 Z" fill="#B88A65" />
+    </g>
+    <g id="trajectory-sample-38">
+      <path id="trajectory-sample-38-top" d="M 332.278 151.507 L 345.345 144.973 L 358.412 151.507 L 345.345 158.041 Z" fill="#D48B53" />
+      <path id="trajectory-sample-38-right" d="M 345.345 158.041 L 358.412 151.507 L 358.412 167.511 L 345.345 174.045 Z" fill="#C3814F" />
+      <path id="trajectory-sample-38-front" d="M 332.278 151.507 L 345.345 158.041 L 345.345 174.045 L 332.278 167.511 Z" fill="#B2784B" />
+    </g>
+    <g id="trajectory-sample-26">
+      <path id="trajectory-sample-26-top" d="M 103.705 228.960 L 116.772 222.427 L 129.840 228.960 L 116.772 235.494 Z" fill="#DDA67B" />
+      <path id="trajectory-sample-26-right" d="M 116.772 235.494 L 129.840 228.960 L 129.840 244.965 L 116.772 251.498 Z" fill="#CB9A73" />
+      <path id="trajectory-sample-26-front" d="M 103.705 228.960 L 116.772 235.494 L 116.772 251.498 L 103.705 244.965 Z" fill="#B98D6A" />
+    </g>
+    <g id="trajectory-sample-40">
+      <path id="trajectory-sample-40-top" d="M 364.638 161.169 L 377.705 154.636 L 390.773 161.169 L 377.705 167.703 Z" fill="#D2864C" />
+      <path id="trajectory-sample-40-right" d="M 377.705 167.703 L 390.773 161.169 L 390.773 177.173 L 377.705 183.707 Z" fill="#C17D49" />
+      <path id="trajectory-sample-40-front" d="M 364.638 161.169 L 377.705 167.703 L 377.705 183.707 L 364.638 177.173 Z" fill="#B07446" />
+    </g>
+    <g id="trajectory-sample-24">
+      <path id="trajectory-sample-24-top" d="M 84.955 255.942 L 98.023 249.408 L 111.090 255.942 L 98.023 262.475 Z" fill="#DFAB82" />
+      <path id="trajectory-sample-24-right" d="M 98.023 262.475 L 111.090 255.942 L 111.090 271.946 L 98.023 278.480 Z" fill="#CD9E78" />
+      <path id="trajectory-sample-24-front" d="M 84.955 255.942 L 98.023 262.475 L 98.023 278.480 L 84.955 271.946 Z" fill="#BA916F" />
+    </g>
+    <g id="live-audio-object">
+      <path id="live-audio-object-top" d="M 344.763 148.135 L 388.321 126.356 L 431.879 148.135 L 388.321 169.914 Z" fill="#D2864C" />
+      <path id="live-audio-object-right" d="M 388.321 169.914 L 431.879 148.135 L 431.879 201.482 L 388.321 223.261 Z" fill="#C17D49" />
+      <path id="live-audio-object-front" d="M 344.763 148.135 L 388.321 169.914 L 388.321 223.261 L 344.763 201.482 Z" fill="#B07446" />
+    </g>
+    <g id="trajectory-sample-22">
+      <path id="trajectory-sample-22-top" d="M 76.944 282.652 L 90.011 276.118 L 103.079 282.652 L 90.011 289.185 Z" fill="#E0AF88" />
+      <path id="trajectory-sample-22-right" d="M 90.011 289.185 L 103.079 282.652 L 103.079 298.656 L 90.011 305.190 Z" fill="#CEA17E" />
+      <path id="trajectory-sample-22-front" d="M 76.944 282.652 L 90.011 289.185 L 90.011 305.190 L 76.944 298.656 Z" fill="#BB9473" />
+    </g>
+    <g id="listener-head">
+      <g id="listener-shell">
+        <path id="listener-shell-top" d="M 152.905 180.440 L 242.000 135.893 L 331.095 180.440 L 242.000 224.988 Z" fill="#837665" />
+        <path id="listener-shell-right" d="M 242.000 224.988 L 331.095 180.440 L 331.095 289.560 L 242.000 334.107 Z" fill="#7B6F5F" />
+        <path id="listener-shell-front" d="M 152.905 180.440 L 242.000 224.988 L 242.000 334.107 L 152.905 289.560 Z" fill="#746859" />
+      </g>
+      <g id="listener-facing-cube">
+        <path id="listener-facing-cube-top" d="M 172.209 269.473 L 190.028 260.564 L 207.847 269.473 L 190.028 278.383 Z" fill="#D2854A" />
+        <path id="listener-facing-cube-right" d="M 190.028 278.383 L 207.847 269.473 L 207.847 291.297 L 190.028 300.207 Z" fill="#C17C47" />
+        <path id="listener-facing-cube-front" d="M 172.209 269.473 L 190.028 278.383 L 190.028 300.207 L 172.209 291.297 Z" fill="#B07344" />
+      </g>
+      <g id="listener-left-eye">
+        <path id="listener-left-eye-top" d="M 162.804 232.541 L 175.673 226.107 L 188.543 232.541 L 175.673 238.976 Z" fill="#453C31" />
+        <path id="listener-left-eye-right" d="M 175.673 238.976 L 188.543 232.541 L 188.543 248.303 L 175.673 254.738 Z" fill="#453C31" />
+        <path id="listener-left-eye-front" d="M 162.804 232.541 L 175.673 238.976 L 175.673 254.738 L 162.804 248.303 Z" fill="#453C31" />
+      </g>
+      <g id="listener-right-eye">
+        <path id="listener-right-eye-top" d="M 196.462 249.371 L 209.332 242.936 L 222.201 249.371 L 209.332 255.805 Z" fill="#443B30" />
+        <path id="listener-right-eye-right" d="M 209.332 255.805 L 222.201 249.371 L 222.201 265.132 L 209.332 271.567 Z" fill="#443B30" />
+        <path id="listener-right-eye-front" d="M 196.462 249.371 L 209.332 255.805 L 209.332 271.567 L 196.462 265.132 Z" fill="#443B30" />
+      </g>
+    </g>
+    <g id="trajectory-sample-20">
+      <path id="trajectory-sample-20-top" d="M 80.222 307.251 L 93.290 300.718 L 106.357 307.251 L 93.290 313.785 Z" fill="#E2B48E" />
+      <path id="trajectory-sample-20-right" d="M 93.290 313.785 L 106.357 307.251 L 106.357 323.255 L 93.290 329.789 Z" fill="#CFA583" />
+      <path id="trajectory-sample-20-front" d="M 80.222 307.251 L 93.290 313.785 L 93.290 329.789 L 80.222 323.255 Z" fill="#BC9778" />
+    </g>
+    <g id="trajectory-sample-18">
+      <path id="trajectory-sample-18-top" d="M 94.565 328.047 L 107.632 321.513 L 120.699 328.047 L 107.632 334.580 Z" fill="#E4B895" />
+      <path id="trajectory-sample-18-right" d="M 107.632 334.580 L 120.699 328.047 L 120.699 344.051 L 107.632 350.585 Z" fill="#D0A989" />
+      <path id="trajectory-sample-18-front" d="M 94.565 328.047 L 107.632 334.580 L 107.632 350.585 L 94.565 344.051 Z" fill="#BD9A7D" />
+    </g>
+    <g id="trajectory-sample-16">
+      <path id="trajectory-sample-16-top" d="M 118.984 343.607 L 132.051 337.073 L 145.118 343.607 L 132.051 350.140 Z" fill="#E5BD9B" />
+      <path id="trajectory-sample-16-right" d="M 132.051 350.140 L 145.118 343.607 L 145.118 359.611 L 132.051 366.145 Z" fill="#D2AD8E" />
+      <path id="trajectory-sample-16-front" d="M 118.984 343.607 L 132.051 350.140 L 132.051 366.145 L 118.984 359.611 Z" fill="#BE9D82" />
+    </g>
+    <g id="trajectory-sample-02">
+      <path id="trajectory-sample-02-top" d="M 379.596 273.410 L 392.664 266.877 L 405.731 273.410 L 392.664 279.944 Z" fill="#F1DECB" />
+      <path id="trajectory-sample-02-right" d="M 392.664 279.944 L 405.731 273.410 L 405.731 289.415 L 392.664 295.948 Z" fill="#DCCAB8" />
+      <path id="trajectory-sample-02-front" d="M 379.596 273.410 L 392.664 279.944 L 392.664 295.948 L 379.596 289.415 Z" fill="#C7B6A6" />
+    </g>
+    <g id="trajectory-sample-14">
+      <path id="trajectory-sample-14-top" d="M 151.799 352.860 L 164.866 346.326 L 177.933 352.860 L 164.866 359.394 Z" fill="#E7C1A2" />
+      <path id="trajectory-sample-14-right" d="M 164.866 359.394 L 177.933 352.860 L 177.933 368.864 L 164.866 375.398 Z" fill="#D3B194" />
+      <path id="trajectory-sample-14-front" d="M 151.799 352.860 L 164.866 359.394 L 164.866 375.398 L 151.799 368.864 Z" fill="#BFA186" />
+    </g>
+    <g id="trajectory-sample-04">
+      <path id="trajectory-sample-04-top" d="M 351.928 298.955 L 364.995 292.421 L 378.062 298.955 L 364.995 305.489 Z" fill="#EFD9C4" />
+      <path id="trajectory-sample-04-right" d="M 364.995 305.489 L 378.062 298.955 L 378.062 314.959 L 364.995 321.493 Z" fill="#DAC6B2" />
+      <path id="trajectory-sample-04-front" d="M 351.928 298.955 L 364.995 305.489 L 364.995 321.493 L 351.928 314.959 Z" fill="#C6B3A0" />
+    </g>
+    <g id="trajectory-sample-12">
+      <path id="trajectory-sample-12-top" d="M 190.750 355.169 L 203.817 348.636 L 216.884 355.169 L 203.817 361.703 Z" fill="#E8C6A9" />
+      <path id="trajectory-sample-12-right" d="M 203.817 361.703 L 216.884 355.169 L 216.884 371.173 L 203.817 377.707 Z" fill="#D4B59A" />
+      <path id="trajectory-sample-12-front" d="M 190.750 355.169 L 203.817 361.703 L 203.817 377.707 L 190.750 371.173 Z" fill="#C1A48B" />
+    </g>
+    <g id="trajectory-sample-06">
+      <path id="trajectory-sample-06-top" d="M 316.618 321.267 L 329.685 314.733 L 342.752 321.267 L 329.685 327.800 Z" fill="#EDD4BD" />
+      <path id="trajectory-sample-06-right" d="M 329.685 327.800 L 342.752 321.267 L 342.752 337.271 L 329.685 343.804 Z" fill="#D9C1AC" />
+      <path id="trajectory-sample-06-front" d="M 316.618 321.267 L 329.685 327.800 L 329.685 343.804 L 316.618 337.271 Z" fill="#C4AF9B" />
+    </g>
+    <g id="trajectory-sample-10">
+      <path id="trajectory-sample-10-top" d="M 233.156 350.376 L 246.223 343.842 L 259.290 350.376 L 246.223 356.910 Z" fill="#EACBAF" />
+      <path id="trajectory-sample-10-right" d="M 246.223 356.910 L 259.290 350.376 L 259.290 366.380 L 246.223 372.914 Z" fill="#D6B9A0" />
+      <path id="trajectory-sample-10-front" d="M 233.156 350.376 L 246.223 356.910 L 246.223 372.914 L 233.156 366.380 Z" fill="#C2A891" />
+    </g>
+    <g id="trajectory-sample-08">
+      <path id="trajectory-sample-08-top" d="M 276.097 338.810 L 289.164 332.276 L 302.232 338.810 L 289.164 345.343 Z" fill="#ECCFB6" />
+      <path id="trajectory-sample-08-right" d="M 289.164 345.343 L 302.232 338.810 L 302.232 354.814 L 289.164 361.347 Z" fill="#D7BDA6" />
+      <path id="trajectory-sample-08-front" d="M 276.097 338.810 L 289.164 345.343 L 289.164 361.347 L 276.097 354.814 Z" fill="#C3AB96" />
+    </g>
+  </g>
+</svg>
