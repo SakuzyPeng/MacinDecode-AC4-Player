@@ -781,7 +781,7 @@ fn decode_access_unit(
     }
 
     for frame in decoded.frames() {
-        let block = own_scene_frame(frame)?;
+        let mut block = own_scene_frame(frame)?;
         metrics.decoded_scene_frames = metrics.decoded_scene_frames.saturating_add(1);
         metrics.decoded_frames = metrics
             .decoded_frames
@@ -789,6 +789,16 @@ fn decode_access_unit(
         metrics.metadata_updates = metrics
             .metadata_updates
             .saturating_add(u64::try_from(block.metadata_updates.len()).unwrap_or(u64::MAX));
+
+        // Codec frames include encoder padding. MP4's presentation duration is
+        // already known before indexing; trim before any output backend sees PCM.
+        if let Some(duration) = metrics.duration_frames {
+            let end =
+                i64::try_from(duration).map_err(|_| "Media duration exceeds signed sample time")?;
+            if !block.truncate_at(end) {
+                continue;
+            }
+        }
 
         let block_end = block
             .start_frame()

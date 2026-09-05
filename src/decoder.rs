@@ -607,6 +607,29 @@ impl DecodedSceneBlock {
     pub fn metadata_updates(&self) -> &[SceneMetadataUpdate] {
         &self.metadata_updates
     }
+
+    #[cfg(any(feature = "decode", test))]
+    pub(super) fn truncate_at(&mut self, end_frame: i64) -> bool {
+        if end_frame <= self.start_frame {
+            return false;
+        }
+        let retained = u32::try_from(end_frame.saturating_sub(self.start_frame))
+            .unwrap_or(u32::MAX)
+            .min(self.duration_frames);
+        if retained < self.duration_frames {
+            self.duration_frames = retained;
+            let length = usize::try_from(retained).expect("owned Scene frame fits in memory");
+            for object in &mut self.objects {
+                object.samples.truncate(length);
+            }
+            if let Some(lfe) = &mut self.lfe {
+                lfe.samples.truncate(length);
+            }
+            self.metadata_updates
+                .retain(|update| update.offset_frames < retained);
+        }
+        true
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1230,6 +1253,38 @@ mod tests {
             index_error: None,
             target_frame: 0,
         }
+    }
+
+    #[test]
+    fn container_end_trims_pcm_and_events_without_speeding_up_ramps() {
+        let state = SpatialObjectState::new(
+            true,
+            Some(SpatialPosition::new(0.0, 1.0, 0.0)),
+            Some(1.0),
+            true,
+        );
+        let mut block = DecodedSceneBlock::new(
+            48_000,
+            100,
+            32,
+            1,
+            0,
+            None,
+            true,
+            vec![SceneObjectPcm::new(7, Some(state), vec![0.1; 32])],
+            Some(SceneLfePcm::new(9, Some(state), vec![0.2; 32])),
+            vec![
+                SceneMetadataUpdate::new(7, 4, 20, 8, state),
+                SceneMetadataUpdate::new(7, 16, 0, 8, state),
+            ],
+        );
+        assert!(block.truncate_at(116));
+        assert_eq!(block.duration_frames(), 16);
+        assert_eq!(block.objects()[0].samples().len(), 16);
+        assert_eq!(block.lfe().unwrap().samples().len(), 16);
+        assert_eq!(block.metadata_updates().len(), 1);
+        assert_eq!(block.metadata_updates()[0].ramp_frames(), 20);
+        assert!(!block.truncate_at(100));
     }
 
     #[cfg(feature = "decode")]

@@ -848,6 +848,93 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    #[ignore = "requires MACINDECODE_AC4_TEST_MEDIA; checks MP4 padding and end-position reconfiguration"]
+    fn real_media_ends_at_the_container_boundary_and_can_seek_there() {
+        use crate::decoder::{DecodePhase, DecoderController};
+        let path = std::env::var_os("MACINDECODE_AC4_TEST_MEDIA").expect("set media path");
+        let mut decoder = DecoderController::new();
+        decoder.ensure_open(std::path::Path::new(&path));
+        let deadline = Instant::now() + Duration::from_secs(90);
+        loop {
+            decoder.poll();
+            assert_ne!(
+                decoder.snapshot().phase(),
+                DecodePhase::Failed,
+                "{:?}",
+                decoder.snapshot()
+            );
+            if decoder.snapshot().metrics().is_some_and(|metrics| {
+                !metrics.is_indexing() && metrics.scene_signature().is_some()
+            }) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "index timed out");
+            thread::sleep(Duration::from_millis(10));
+        }
+        let duration = decoder
+            .snapshot()
+            .metrics()
+            .unwrap()
+            .duration_frames()
+            .unwrap();
+        let target = duration.saturating_sub(48_000);
+        decoder.seek(target).unwrap();
+        while !matches!(
+            decoder.snapshot().phase(),
+            DecodePhase::Ready | DecodePhase::EndOfStream
+        ) {
+            decoder.poll();
+            assert_ne!(
+                decoder.snapshot().phase(),
+                DecodePhase::Failed,
+                "{:?}",
+                decoder.snapshot()
+            );
+            assert!(Instant::now() < deadline, "seek timed out");
+            thread::sleep(Duration::from_millis(10));
+        }
+        let metrics = decoder.snapshot().metrics().unwrap();
+        let config = OutputStreamConfig::new(
+            decoder.request_id(),
+            decoder.playback_epoch(),
+            target,
+            metrics.sample_rate(),
+            metrics.scene_signature().unwrap().clone(),
+            OutputDeviceSelection::SystemDefault,
+        )
+        .unwrap();
+        let runtime = Runtime::spawn(
+            config,
+            OutputSettings {
+                null_output: true,
+                mode: SpatialBackendKind::SystemSpatial,
+                ..Default::default()
+            },
+            decoder.scene_reader(),
+            Arc::new(SceneViewMirror::new()),
+            true,
+            0.0,
+        )
+        .unwrap();
+        loop {
+            decoder.poll();
+            let status = runtime.snapshot();
+            assert_ne!(status.phase, OutputPhase::Failed, "{:?}", status.error);
+            if status.phase == OutputPhase::Ended {
+                assert_eq!(status.playhead_frames, duration);
+                decoder.seek(status.playhead_frames).unwrap();
+                println!("container and output end agree at {duration}; EOS seek accepted");
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "tail playback timed out: {status:?}"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
     #[test]
     fn metadata_bits_are_translated_instead_of_copied() {
         assert_eq!(renderer_fields(8), 4);

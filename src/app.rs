@@ -1127,7 +1127,13 @@ impl PlayerApp {
                 self.decoder.playback_epoch(),
             )
         {
-            let target = self.output.snapshot().playhead_frames();
+            let target = self.output.snapshot().playhead_frames().min(
+                self.decoder
+                    .snapshot()
+                    .metrics()
+                    .and_then(DecodeMetrics::duration_frames)
+                    .unwrap_or(u64::MAX),
+            );
             match self.decoder.seek(target) {
                 Ok(()) => {
                     self.pending_output_change = Some(previous);
@@ -1169,6 +1175,9 @@ impl PlayerApp {
             .show(context, |ui| {
                 if let Some(error) = &self.audio_settings_error {
                     ui.colored_label(theme::WARNING, error);
+                }
+                if self.output.settings_pending() {
+                    ui.label("Preparing HRTF… playback continues");
                 }
                 ui.add_enabled_ui(
                     !self.output.settings_pending() && self.pending_output_change.is_none(),
