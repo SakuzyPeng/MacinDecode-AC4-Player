@@ -37,6 +37,10 @@
 对象数量限制见 Microsoft 的
 [Spatial Sound runtime resource limits](https://github.com/MicrosoftDocs/win32/blob/docs/desktop-src/CoreAudio/spatial-sound.md#microsoft-spatial-sound-runtime-resource-implications)。
 
+在 Windows 体验手动头部追踪时，建议先确认回放链路本身延迟正常。虚拟声卡、虚拟混音软件及无线耳机
+可能引入额外的缓冲或传输延迟，让声音方向的变化落后于操作。可先选择声卡直接输出到有线耳机作为对照，
+再逐一接入虚拟声卡或无线耳机，便于区分回放链路延迟与头部追踪本身的响应。
+
 ## 平台与限制
 
 - Windows：支持文件检查、解码和空间音频播放。
