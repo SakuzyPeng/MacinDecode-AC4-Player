@@ -55,5 +55,6 @@ python3 scripts/package-player.py
 ```
 
 打包脚本复制实际 Cargo 构建的库、许可证和构建信息。Mac `.app` 包含运动权限声明及本地签名；
+Windows 包包含 MacinRender、OpenBLAS 及所需的 MSVC 运行库，并逐个检查可执行文件和 DLL 的依赖。
 裸 `cargo run` 缺少应用权限声明时，AirPods 采集明确显示不可用并使用手动朝向。软件双耳模式
 首次检测到支持设备时可能出现系统运动权限提示。实际三轴方向还应通过 AirPods 真机听验确认。

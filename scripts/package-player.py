@@ -5,6 +5,7 @@ import json
 import os
 import pathlib
 import plistlib
+import re
 import shutil
 import subprocess
 import sys
@@ -28,6 +29,43 @@ def cargo_native(target):
     if not candidates:
         raise SystemExit("No native Release build found; run cargo build --release first")
     return max(candidates, key=lambda item: item[0])[1]
+
+
+def windows_dependencies(package, native, dumpbin):
+    """Stage the MSVC redistributable and check every packaged PE import."""
+    redist = None
+    compiler = native.get("compiler")
+    if compiler:
+        vc = next((path for path in compiler.parents if path.name.lower() == "vc"), None)
+        if vc:
+            redist = vc / "Redist" / "MSVC"
+    pending = sorted(package.glob("*.exe")) + sorted(package.glob("*.dll"))
+    checked = set()
+    reports = []
+    while pending:
+        artifact = pending.pop(0)
+        if artifact.name.lower() in checked:
+            continue
+        checked.add(artifact.name.lower())
+        report = subprocess.check_output([dumpbin, "/dependents", artifact.name], cwd=package, text=True)
+        reports.append(report)
+        for name in re.findall(r"^\s+([\w.+-]+\.dll)\s*$", report, flags=re.MULTILINE | re.IGNORECASE):
+            bundled = package / name
+            if bundled.is_file():
+                pending.append(bundled)
+                continue
+            # The Rust executable uses the dynamic CRT even when the native
+            # renderer was built with /MT. Do not rely on this PC's installed CRT.
+            if name.lower().startswith(("vcruntime", "msvcp", "concrt")):
+                candidates = list(redist.glob(f"*/x64/Microsoft.VC*.CRT/{name}")) if redist else []
+                if not candidates:
+                    raise SystemExit(f"Cannot find the x64 MSVC redistributable for {name}")
+                source = max(candidates, key=lambda path: path.stat().st_mtime)
+                shutil.copy2(source, bundled)
+                pending.append(bundled)
+            elif not name.lower().startswith(("api-ms-", "ext-ms-")) and not (pathlib.Path(os.environ["SystemRoot"]) / "System32" / name).is_file():
+                raise SystemExit(f"Unbundled dependency: {artifact.name} requires {name}")
+    return "\n".join(reports)
 
 
 def main():
@@ -81,7 +119,9 @@ def main():
         dumpbin = shutil.which("dumpbin")
         if not dumpbin and "compiler" in native:
             dumpbin = str(native["compiler"] / "dumpbin.exe")
-        dependencies = subprocess.check_output([dumpbin or "dumpbin", "/dependents", str(package / "mradm_capi.dll")], text=True)
+        if not (package / "mradm_capi.dll").is_file():
+            raise SystemExit("Native Release build did not provide mradm_capi.dll")
+        dependencies = windows_dependencies(package, native, dumpbin or "dumpbin")
     else:
         raise SystemExit("Packaging is currently supported on macOS and Windows")
     legal.mkdir(parents=True, exist_ok=True)
