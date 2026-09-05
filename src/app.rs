@@ -4,8 +4,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use eframe::egui::{self, Align, Align2, Color32, Layout, RichText, Stroke};
 
 use crate::backend::{
-    OutputDeviceSelection, OutputPhase, OutputSnapshot, OutputStreamConfig, SpatialBackendKind,
-    SpatialOutputController,
+    OutputDeviceSelection, OutputPhase, OutputSettings, OutputSnapshot, OutputStreamConfig,
+    SpatialBackendKind, SpatialOutputController, SpeakerLayout,
 };
 use crate::bitstream_ui::{self, BitstreamAction};
 use crate::decoder::{
@@ -43,6 +43,9 @@ pub struct PlayerApp {
     muted: bool,
     bitstream_details_open: bool,
     diagnostics_open: bool,
+    output_settings_open: bool,
+    pending_output_change: Option<OutputSettings>,
+    audio_settings_error: Option<String>,
     camera: scene3d::camera::Camera,
     /// Whether zero-based LFE / one-based dynamic-object numbers are printed
     /// on every element face.
@@ -63,6 +66,7 @@ pub struct PlayerApp {
 }
 
 const OUTPUT_DEVICE_STORAGE_KEY: &str = "preferred-output-device-v1";
+const OUTPUT_SETTINGS_STORAGE_KEY: &str = "spatial-output-settings-v1";
 const SCENE_CAMERA_STORAGE_KEY: &str = "scene-camera-v1";
 
 /// Visible dynamic-object numbers describe the fixed scene slots, not Core's
@@ -305,7 +309,16 @@ impl PlayerApp {
             .and_then(|storage| eframe::get_value(storage, OUTPUT_DEVICE_STORAGE_KEY))
             .unwrap_or_default();
         let mut output = SpatialOutputController::new();
-        output.set_preferred_device(preferred_device);
+        let settings = creation_context
+            .storage
+            .and_then(|storage| {
+                eframe::get_value::<OutputSettings>(storage, OUTPUT_SETTINGS_STORAGE_KEY)
+            })
+            .unwrap_or_else(|| OutputSettings {
+                native_device: preferred_device,
+                ..Default::default()
+            });
+        output.install_settings(settings);
         // A view angle is something the user worked to find; losing it on every
         // restart is a small tax on the whole point of a free camera.
         let camera = creation_context
@@ -342,6 +355,9 @@ impl PlayerApp {
             muted: false,
             bitstream_details_open: false,
             diagnostics_open: false,
+            output_settings_open: false,
+            pending_output_change: None,
+            audio_settings_error: None,
             camera,
             object_numbers_visible: true,
             figure: scene3d::figure::Figure::default(),
@@ -604,6 +620,49 @@ impl PlayerApp {
         let master_gain = if self.muted { 0.0 } else { self.volume };
         self.output.set_master_gain(master_gain);
         self.output.poll();
+        self.backend = self.output.settings().mode;
+        let [yaw, pitch, roll] = self.output.head_snapshot().pose.euler();
+        self.figure.head_yaw = yaw;
+        self.figure.head_pitch = pitch;
+        self.figure.head_roll = roll;
+        if let Some(result) = self.output.take_settings_result() {
+            self.audio_settings_error = result.as_ref().err().cloned();
+            self.status = match result {
+                Ok(()) => StatusLine::idle("Audio settings applied"),
+                Err(error) => StatusLine::warning(format!("Audio settings unchanged: {error}")),
+            };
+        }
+        if self
+            .output
+            .is_configured_for_playback(request_id, playback_epoch)
+        {
+            if self.output.snapshot().phase() == OutputPhase::Failed {
+                if let Some(previous) = self.pending_output_change.take() {
+                    let error = self
+                        .output
+                        .snapshot()
+                        .error()
+                        .unwrap_or("Output initialization failed")
+                        .to_owned();
+                    self.audio_settings_error = Some(error.clone());
+                    let target = self.output.snapshot().playhead_frames();
+                    if self.decoder.seek(target).is_ok() {
+                        self.output.reset();
+                        self.output.install_settings(previous);
+                        self.playback_restore_pending = true;
+                        self.status =
+                            StatusLine::warning(format!("Restoring previous output: {error}"));
+                        context.request_repaint_after(Duration::from_millis(20));
+                        return;
+                    }
+                }
+            } else if matches!(
+                self.output.snapshot().phase(),
+                OutputPhase::Ready | OutputPhase::Playing | OutputPhase::Paused
+            ) {
+                self.pending_output_change = None;
+            }
+        }
 
         let output_matches_decoder = self
             .output
@@ -903,18 +962,24 @@ impl PlayerApp {
                 )
             }
         };
-        let required_objects = self
+        let source_objects = self
             .decoder
             .snapshot()
             .metrics()
             .and_then(|metrics| u32::try_from(metrics.object_count()).ok())
             .unwrap_or(0);
+        let required_objects = self
+            .output
+            .required_dynamic_objects(source_objects as usize);
+        let system_output =
+            self.output.settings().mode.resolved() == SpatialBackendKind::SystemSpatial;
         let default_device = devices.iter().find(|device| device.is_default());
-        let default_eligible = !self.output.device_catalog_ready()
+        let default_eligible = required_objects.is_none()
+            || !self.output.device_catalog_ready()
             || default_device.is_some_and(|device| {
                 device
                     .max_dynamic_objects()
-                    .is_some_and(|available| available >= required_objects)
+                    .is_some_and(|available| available >= required_objects.unwrap_or(0))
             });
         let device_detail = if output.max_dynamic_objects() > 0 {
             format!(
@@ -929,6 +994,7 @@ impl PlayerApp {
                 .to_owned()
         };
         let mut selected = preferred.clone();
+        let mut show_settings = self.output_settings_open;
         egui::Panel::top("header")
             .exact_size(72.0)
             .frame(
@@ -947,12 +1013,14 @@ impl PlayerApp {
                                 .color(theme::TEXT),
                         );
                         ui.label(
-                            RichText::new("Native spatial playback shell")
+                            RichText::new(self.output.settings().mode.resolved().label())
                                 .size(12.0)
                                 .color(theme::MUTED),
                         );
                     });
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.button("Audio settings").clicked() { show_settings = true; }
+                        ui.add_enabled_ui(!system_output, |ui| {
                         egui::ComboBox::from_id_salt("output-device")
                             .selected_text(preferred_label)
                             .width(220.0)
@@ -972,7 +1040,7 @@ impl PlayerApp {
                                         .map_or_else(
                                             || {
                                                 format!(
-                                                    "System default cannot provide {required_objects} dynamic objects"
+                                                    "System default cannot provide {} dynamic objects", required_objects.unwrap_or(0)
                                                 )
                                             },
                                             str::to_owned,
@@ -982,8 +1050,8 @@ impl PlayerApp {
                                 ui.separator();
                                 for device in &devices {
                                     let capacity = device.max_dynamic_objects();
-                                    let eligible = capacity
-                                        .is_some_and(|available| available >= required_objects);
+                                    let eligible = required_objects.is_none() || capacity
+                                        .is_some_and(|available| available >= required_objects.unwrap_or(0));
                                     let label = if device.is_default() {
                                         format!("{} · default", device.label())
                                     } else {
@@ -1004,7 +1072,7 @@ impl PlayerApp {
                                         let reason = device.spatial_error().map_or_else(
                                             || {
                                                 format!(
-                                                    "Needs {required_objects} dynamic objects; endpoint provides {}",
+                                                    "Needs {} dynamic objects; endpoint provides {}", required_objects.unwrap_or(0),
                                                     capacity.unwrap_or(0)
                                                 )
                                             },
@@ -1016,6 +1084,7 @@ impl PlayerApp {
                                 ui.separator();
                                 ui.add_enabled(false, egui::Label::new(device_detail));
                             });
+                        });
                         ui.label(
                             RichText::new("OUTPUT DEVICE")
                                 .size(10.0)
@@ -1034,8 +1103,226 @@ impl PlayerApp {
                     Stroke::new(1.0, theme::BORDER),
                 );
             });
-        if selected != preferred && self.output.set_preferred_device(selected) {
-            self.status = StatusLine::idle("Changing Windows audio endpoint");
+        self.output_settings_open = show_settings;
+        if selected != preferred {
+            let mut settings = self.output.settings().clone();
+            if settings.mode.resolved() == SpatialBackendKind::SafBinaural {
+                settings.stereo_device = selected;
+            } else {
+                settings.native_device = selected;
+            }
+            self.change_output_settings(settings, root.ctx());
+        }
+    }
+
+    fn change_output_settings(&mut self, settings: OutputSettings, context: &egui::Context) {
+        let previous = self.output.settings().clone();
+        if settings == previous {
+            return;
+        }
+        self.audio_settings_error = None;
+        if previous.needs_rebuild(&settings)
+            && self.output.is_configured_for_playback(
+                self.decoder.request_id(),
+                self.decoder.playback_epoch(),
+            )
+        {
+            let target = self.output.snapshot().playhead_frames();
+            match self.decoder.seek(target) {
+                Ok(()) => {
+                    self.pending_output_change = Some(previous);
+                    self.output.pause();
+                    self.output.reset();
+                    self.output.install_settings(settings);
+                    self.playback_restore_pending = true;
+                    self.status =
+                        StatusLine::idle("Reconfiguring audio from the current playback position");
+                }
+                Err(error) => {
+                    self.audio_settings_error = Some(error.clone());
+                    self.status = StatusLine::warning(format!("Audio settings unchanged: {error}"));
+                }
+            }
+        } else {
+            self.output.hot_settings(settings);
+        }
+        context.request_repaint_after(Duration::from_millis(20));
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "audio settings share a single transactional update"
+    )]
+    fn draw_output_settings(&mut self, context: &egui::Context) {
+        if !self.output_settings_open {
+            return;
+        }
+        let mut open = true;
+        let mut settings = self.output.settings().clone();
+        let head = self.output.head_snapshot();
+        let mut manual = None;
+        let mut recenter = false;
+        egui::Window::new("Audio settings")
+            .open(&mut open)
+            .resizable(false)
+            .default_width(390.0)
+            .show(context, |ui| {
+                if let Some(error) = &self.audio_settings_error {
+                    ui.colored_label(theme::WARNING, error);
+                }
+                ui.add_enabled_ui(
+                    !self.output.settings_pending() && self.pending_output_change.is_none(),
+                    |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("Playback mode");
+                            egui::ComboBox::from_id_salt("spatial-output-mode")
+                                .selected_text(settings.mode.label())
+                                .show_ui(ui, |ui| {
+                                    for mode in SpatialBackendKind::ALL {
+                                        ui.add_enabled_ui(mode.supported(), |ui| {
+                                            ui.selectable_value(
+                                                &mut settings.mode,
+                                                mode,
+                                                mode.label(),
+                                            );
+                                        });
+                                    }
+                                });
+                        });
+                        let mode = settings.mode.resolved();
+                        if mode == SpatialBackendKind::SystemSpatial {
+                            ui.horizontal(|ui| {
+                                ui.label("Speaker layout");
+                                egui::ComboBox::from_id_salt("speaker-layout")
+                                    .selected_text(settings.layout.label())
+                                    .show_ui(ui, |ui| {
+                                        for layout in SpeakerLayout::ALL {
+                                            ui.selectable_value(
+                                                &mut settings.layout,
+                                                layout,
+                                                layout.label(),
+                                            );
+                                        }
+                                    });
+                            });
+                            ui.label("Apple speaker geometry · system default output");
+                            if settings.layout == SpeakerLayout::TwentyTwoTwo {
+                                ui.horizontal(|ui| {
+                                    ui.label("LFE routing");
+                                    ui.selectable_value(
+                                        &mut settings.split_lfe,
+                                        true,
+                                        "Equal-power copy",
+                                    );
+                                    ui.selectable_value(&mut settings.split_lfe, false, "Direct");
+                                });
+                            }
+                        }
+                        if mode == SpatialBackendKind::SafBinaural {
+                            ui.separator();
+                            ui.label(if settings.sofa.is_empty() {
+                                "HRTF: built-in KEMAR".to_owned()
+                            } else {
+                                format!(
+                                    "HRTF: {}",
+                                    Path::new(&settings.sofa)
+                                        .file_name()
+                                        .unwrap_or_default()
+                                        .to_string_lossy()
+                                )
+                            });
+                            ui.horizontal(|ui| {
+                                if ui.button("Choose SOFA…").clicked()
+                                    && let Some(path) = rfd::FileDialog::new()
+                                        .add_filter("SOFA HRIR", &["sofa"])
+                                        .pick_file()
+                                {
+                                    settings.sofa = path.to_string_lossy().into_owned();
+                                }
+                                if ui.button("Use KEMAR").clicked() {
+                                    settings.sofa.clear();
+                                }
+                            });
+                        }
+                        ui.separator();
+                        if matches!(
+                            mode,
+                            SpatialBackendKind::SafBinaural
+                                | SpatialBackendKind::WindowsSpatialAudio
+                        ) {
+                            ui.horizontal(|ui| {
+                                ui.label("Head orientation");
+                                egui::ComboBox::from_id_salt("head-source")
+                                    .selected_text(settings.head_source.label())
+                                    .show_ui(ui, |ui| {
+                                        for source in crate::head_tracking::HeadSource::ALL {
+                                            ui.add_enabled_ui(
+                                                source != crate::head_tracking::HeadSource::AirPods
+                                                    || cfg!(target_os = "macos"),
+                                                |ui| {
+                                                    ui.selectable_value(
+                                                        &mut settings.head_source,
+                                                        source,
+                                                        source.label(),
+                                                    );
+                                                },
+                                            );
+                                        }
+                                    });
+                            });
+                            let mut angles = head.pose.euler();
+                            let mut changed = false;
+                            ui.horizontal(|ui| {
+                                for (index, label) in
+                                    ["Yaw", "Pitch", "Roll"].into_iter().enumerate()
+                                {
+                                    ui.label(label);
+                                    let limit = if index == 1 { 85.0 } else { 180.0 };
+                                    changed |= ui
+                                        .add(
+                                            egui::DragValue::new(&mut angles[index])
+                                                .speed(0.5)
+                                                .range(-limit..=limit)
+                                                .suffix("°"),
+                                        )
+                                        .changed();
+                                }
+                            });
+                            let (rect, response) = ui
+                                .allocate_exact_size(egui::vec2(370.0, 54.0), egui::Sense::drag());
+                            ui.painter().rect_filled(rect, 4.0, theme::SURFACE);
+                            ui.painter().text(
+                                rect.center(),
+                                Align2::CENTER_CENTER,
+                                "Drag here to turn your head",
+                                egui::FontId::proportional(12.0),
+                                theme::MUTED,
+                            );
+                            if response.dragged() {
+                                let delta = ui.input(|input| input.pointer.delta());
+                                angles[0] -= delta.x * 0.35;
+                                angles[1] = (angles[1] - delta.y * 0.35).clamp(-85.0, 85.0);
+                                changed = true;
+                            }
+                            if changed {
+                                manual = Some(angles);
+                                settings.head_source = crate::head_tracking::HeadSource::Manual;
+                            }
+                            recenter = ui.button("Recenter").clicked();
+                            ui.label(head.status.label());
+                        } else {
+                            ui.label("Head orientation is controlled by the system spatializer.");
+                        }
+                    },
+                );
+            });
+        self.output_settings_open = open;
+        self.change_output_settings(settings, context);
+        if let Some(angles) = manual {
+            self.output.manual_head(angles);
+        }
+        if recenter {
+            self.output.recenter_head();
         }
     }
 
@@ -2081,6 +2368,7 @@ impl eframe::App for PlayerApp {
         self.draw_scene(root);
         self.draw_bitstream_details_window(&context);
         self.draw_diagnostics_window(&context);
+        self.draw_output_settings(&context);
 
         if context.input(|input| !input.raw.hovered_files.is_empty()) {
             draw_drop_overlay(&context);
@@ -2088,6 +2376,7 @@ impl eframe::App for PlayerApp {
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        eframe::set_value(storage, OUTPUT_SETTINGS_STORAGE_KEY, self.output.settings());
         eframe::set_value(
             storage,
             OUTPUT_DEVICE_STORAGE_KEY,
@@ -2211,16 +2500,22 @@ fn output_status_line(output: &OutputSnapshot, decoder: &DecoderSnapshot) -> Sta
     }
     match output.phase() {
         OutputPhase::Unavailable | OutputPhase::Idle => decoder_status_line(decoder),
-        OutputPhase::Initializing => StatusLine::idle(format!(
-            "Opening Windows Spatial Audio for {} dynamic objects",
-            output.reserved_dynamic_objects()
-        )),
+        OutputPhase::Initializing => StatusLine::idle(format!("Opening {}", output.device_label())),
         OutputPhase::Ready => StatusLine::ready(format!(
             "Windows Spatial Audio ready: {} of {} dynamic slots reserved{}",
             output.reserved_dynamic_objects(),
             output.max_dynamic_objects(),
             seek_index_suffix(decoder)
         )),
+        OutputPhase::Playing if output.queued_output_frames().is_some() => {
+            StatusLine::ready(format!(
+                "Spatial playback at frame {}: {} queued output frames, {} underruns{}",
+                output.playhead_frames(),
+                output.queued_output_frames().unwrap_or(0),
+                output.underruns(),
+                seek_index_suffix(decoder)
+            ))
+        }
         OutputPhase::Playing => StatusLine::ready(format!(
             "Spatial playback at frame {}: {} object buffers, {} underruns{}",
             output.playhead_frames(),
@@ -2237,7 +2532,7 @@ fn output_status_line(output: &OutputSnapshot, decoder: &DecoderSnapshot) -> Sta
             output.playhead_frames()
         )),
         OutputPhase::Failed => StatusLine::warning(format!(
-            "Windows Spatial Audio failed: {}",
+            "Spatial audio output failed: {}",
             output.error().unwrap_or("unknown native output error")
         )),
     }
@@ -2529,8 +2824,8 @@ fn draw_diagnostics_content(
                         ui.separator();
                         key_value(
                             ui,
-                            "Native adapters",
-                            &format!("1 active / {} declared", SpatialBackendKind::ALL.len() - 1),
+                            "Available playback modes",
+                            &SpatialBackendKind::ALL.into_iter().filter(|mode| *mode != SpatialBackendKind::Automatic && mode.supported()).count().to_string(),
                         );
                         ui.separator();
                         key_value(ui, "Spatial stream", output_phase_label(output.phase()));
@@ -2539,14 +2834,18 @@ fn draw_diagnostics_content(
                         ui.separator();
                         key_value(
                             ui,
-                            "Dynamic objects",
-                            &format!(
+                            if backend.resolved() == SpatialBackendKind::WindowsSpatialAudio { "Dynamic objects" } else { "Scene objects" },
+                            &if backend.resolved() == SpatialBackendKind::WindowsSpatialAudio { format!(
                                 "{} active / {} reserved / {} max",
                                 output.active_dynamic_objects(),
                                 output.reserved_dynamic_objects(),
                                 output.max_dynamic_objects()
-                            ),
+                            ) } else { format!("{} active / {} total", output.active_dynamic_objects(), output.reserved_dynamic_objects()) },
                         );
+                        ui.separator();
+                        key_value(ui, "Playback clock", output.clock_label());
+                        ui.separator();
+                        key_value(ui, "Queued output frames", &output.queued_output_frames().map_or_else(|| "Not reported".into(), |n| n.to_string()));
                         ui.separator();
                         key_value(
                             ui,

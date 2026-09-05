@@ -1676,6 +1676,7 @@ dependencies = [
  "macindecode-ac4-inspect",
  "macindecode-ac4-mp4",
  "macindecode-ac4-scene",
+ "macindecode-macinrender",
  "macindecode-windows-spatial-audio",
  "rfd",
  "serde",
@@ -1690,6 +1691,15 @@ source = "git+https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git?rev=eb7c613
 dependencies = [
  "macindecode-ac4-bitstream",
  "macindecode-ac4-decode",
+]
+
+[[package]]
+name = "macindecode-macinrender"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "libloading",
+ "serde_json",
 ]
 
 [[package]]

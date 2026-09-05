@@ -79,11 +79,16 @@ impl Part {
 /// anyway. A world-locked mode would need both, and would have to give up AABBs
 /// for the body; that is deliberately out of scope here.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[allow(
+    clippy::struct_field_names,
+    reason = "only the head rotates; the figure's body remains fixed"
+)]
 pub struct Figure {
     /// Head tracking, degrees. Zero until the tracking path lands.
     pub head_yaw: f32,
     /// Head tracking, degrees; positive looks up.
     pub head_pitch: f32,
+    pub head_roll: f32,
 }
 
 /// Half-depth of the hat shell in model units: the head's 8 units inflated by
@@ -171,10 +176,16 @@ impl Figure {
         let (pitch_sin, pitch_cos) = pitch.sin_cos();
         let (yaw_sin, yaw_cos) = yaw.sin_cos();
 
-        [
+        let base = [
             [yaw_cos, 0.0, -yaw_sin],
             [yaw_sin * pitch_sin, pitch_cos, yaw_cos * pitch_sin],
             [yaw_sin * pitch_cos, -pitch_sin, yaw_cos * pitch_cos],
+        ];
+        let (roll_sin, roll_cos) = self.head_roll.to_radians().sin_cos();
+        [
+            std::array::from_fn(|i| base[0][i] * roll_cos - base[1][i] * roll_sin),
+            std::array::from_fn(|i| base[0][i] * roll_sin + base[1][i] * roll_cos),
+            base[2],
         ]
     }
 
@@ -337,6 +348,7 @@ mod tests {
         let turned = Figure {
             head_yaw: 90.0,
             head_pitch: 0.0,
+            head_roll: 0.0,
         }
         .parts(FLOOR);
         let turned_wedge = turned[PART_COUNT - 1];
@@ -349,6 +361,7 @@ mod tests {
         let turned = Figure {
             head_yaw: 55.0,
             head_pitch: 0.0,
+            head_roll: 0.0,
         }
         .parts(FLOOR);
 
@@ -370,16 +383,44 @@ mod tests {
     }
 
     #[test]
+    fn visual_head_basis_matches_the_audio_pose_including_roll() {
+        let angles = [35.0, 20.0, 45.0];
+        let figure = Figure {
+            head_yaw: angles[0],
+            head_pitch: angles[1],
+            head_roll: angles[2],
+        };
+        let pose = crate::head_tracking::Quaternion::from_euler(angles).conjugate();
+        let axes = figure.head_axes();
+        for (actual, expected) in pose
+            .rotate_listener([0.0, 1.0, 0.0])
+            .into_iter()
+            .zip(axes[1])
+        {
+            assert!((actual - expected).abs() < 0.0001);
+        }
+        for (actual, expected) in pose
+            .rotate_listener([0.0, 0.0, -1.0])
+            .into_iter()
+            .zip(axes[2].map(|v| -v))
+        {
+            assert!((actual - expected).abs() < 0.0001);
+        }
+    }
+
+    #[test]
     fn head_pitch_moves_the_complete_head_assembly() {
         let level = Figure::default().parts(FLOOR);
         let up = Figure {
             head_yaw: 0.0,
             head_pitch: 40.0,
+            head_roll: 0.0,
         }
         .parts(FLOOR);
         let down = Figure {
             head_yaw: 0.0,
             head_pitch: -40.0,
+            head_roll: 0.0,
         }
         .parts(FLOOR);
 
@@ -411,14 +452,17 @@ mod tests {
             Figure {
                 head_yaw: 26.22,
                 head_pitch: 0.0,
+                head_roll: 0.0,
             },
             Figure {
                 head_yaw: 0.0,
                 head_pitch: -40.0,
+                head_roll: 0.0,
             },
             Figure {
                 head_yaw: 55.0,
                 head_pitch: 35.0,
+                head_roll: 0.0,
             },
         ] {
             let parts = pose.parts(FLOOR);

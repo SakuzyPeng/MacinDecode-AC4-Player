@@ -7,7 +7,7 @@ license = "MIT"
 publish = false
 
 [workspace]
-members = ["crates/windows-spatial-audio"]
+members = ["crates/windows-spatial-audio", "crates/macinrender"]
 default-members = [".", "crates/windows-spatial-audio"]
 resolver = "3"
 
@@ -44,7 +44,8 @@ serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
 
 [features]
-default = ["decode"]
+default = ["decode", "macinrender"]
+macinrender = ["decode", "dep:macindecode-macinrender"]
 # Decoding is the point of the app, so it is on by default and a build without
 # it is the explicit opt-out rather than a silent downgrade. `--no-default-features`
 # gives the inspection-only shell, which is also the only configuration that
@@ -57,6 +58,9 @@ decode = [
 
 [target.'cfg(target_os = "windows")'.dependencies]
 macindecode-windows-spatial-audio = { path = "crates/windows-spatial-audio" }
+
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+macindecode-macinrender = { path = "crates/macinrender", optional = true }
 
 [lints.rust]
 unsafe_code = "forbid"

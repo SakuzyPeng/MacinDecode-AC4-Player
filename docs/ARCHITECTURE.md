@@ -11,7 +11,9 @@ Playback coordinator
         │ bounded render quanta
 AC-4 decode adapter ───────── Spatial output backend
         │                     ├── Windows Spatial Audio
-MacinDecode scene API         └── macOS AU Spatial Mixer
+MacinDecode scene API         └── MacinRender Scene + device output
+                                    ├── SAF VBAP → macOS/Windows system spatial audio
+                                    └── SAF binaural → stereo device
 ```
 
 GUI、播放协调器和解码适配器均留在 Rust 进程内，直接依赖
@@ -23,18 +25,17 @@ GUI、播放协调器和解码适配器均留在 Rust 进程内，直接依赖
 
 ## 当前边界
 
-本仓库目前实现 GUI、只读 inspection、跨平台 Core 解码和 Windows Spatial Audio 输出。
+本仓库实现 GUI、只读 inspection、跨平台 Core 解码、Windows 对象直通，以及可选的 MacinRender
+系统空间音频／软件双耳输出。新输出链和固定几何、布局、LFE 默认值见 [MacinRender 集成](MACINRENDER.md)。
 
-**解码与回放是两道门，不要混为一谈。** Core 的解码 crate 自身不带任何 `target_os`，其 release CI
-在 Linux / macOS / Windows 六个 target 上都构建 `audio-decode`，所以解码走 Cargo feature
-`decode`（默认开），跟平台无关；真正只有 Windows 的是**输出**——COM、WASAPI 和渲染回调。这两道门
-在代码里分别是 `#[cfg(feature = "decode")]` 和 `#[cfg(target_os = "windows")]`。
+`decode` 控制 Core 解码；`windows_spatial_output` 表示 Windows + decode；`macinrender_output`
+表示 macOS/Windows + decode + macinrender；`spatial_output` 为两种真实输出的并集。均由
+`build.rs` 统一生成并注册 `rustc-check-cfg`。原有 Windows 专用代码使用独立的 Windows 门控，
+共享 Scene 算术与无声预览只依赖 decode。
 
-**渲染回调同时需要两者**，所以它有第三道门 `#[cfg(spatial_output)]`——由 `build.rs` 按两者的合取
-发出（配 `rustc-check-cfg`），`src/` 里任何地方都不手写这个合取。理由不是洁癖：只写对一半正是
-`--no-default-features` 在 Windows 上编不过的那次事故。给跨平台类型挂 `allow(dead_code)` 时按
-**消费者个数**选门——FIFO 的读侧和 `SceneViewMirror::write` 有两个（渲染回调与场景预览），挂
-`decode`；`lfe_render_state` 只有一个，挂 `spatial_output`。
+`backend::controller` 管理模式、设备偏好、热更新和头部控制，复用原生对象控制器，或创建
+`backend::macinrender` producer。后者是 Scene FIFO 的唯一消费者；元数据历史不保留 PCM，
+由输出设备的呈现时钟驱动画面。独立 HRTF 加载线程不阻塞 producer 或状态查询。
 
 - `model` 校验用户选择的媒体路径并保存壳层状态；
 - `inspection` 在单独线程调用 `macindecode-ac4-inspect`，缓存 owned report，不阻塞 GUI；
@@ -54,9 +55,9 @@ GUI、播放协调器和解码适配器均留在 Rust 进程内，直接依赖
 - `backend::source` 在任意 Windows render quantum 上消费 Scene FIFO，裁剪负时间和重叠、为空隙补零，
   并在 quantum 起点计算 OAMD ramp 状态；
 - `backend::windows` 把播放器语义适配为独立 native crate 的安全接口，不把 COM 类型泄漏到播放器；
-- `crates/windows-spatial-audio` 是唯一允许 `unsafe` 的边界，负责 endpoint 枚举/选择、COM 对象流、
+- `crates/windows-spatial-audio` 是 Windows COM 的 `unsafe` 边界，负责 endpoint 枚举/选择、COM 对象流、
   动态对象、静态 LFE、事件等待、source replacement 和原始 `f32` buffer；主程序仍设置
-  `unsafe_code = "forbid"`；
+  `unsafe_code = "forbid"`。新增 `crates/macinrender` 独立封装 C ABI、句柄生命周期与原生头部采集；
 - `backend::state` 是 OAMD 状态解析（`element_state_at` 及其 ramp 插值）与瞬跳语义判定。它**不带平台
   门控**：内容只是跨平台解码器类型上的算术，放在 Windows-only 的 `backend::source` 里意味着它的测试
   哪都跑不了——而这恰好是最容易算错、又最不容易被发现的一段；
@@ -76,7 +77,9 @@ Core 的 MP4 入口当前要求完整文件切片，因此 decode worker 会先�
 
 ## 场景视图镜像
 
-3D 对象场景要显示对象此刻在哪里，而唯一知道这件事的是运行在 WASAPI 事件线程上的 render
+以下描述 Windows 对象直通路径；MacinRender 路径按设备呈现时间解析同一份元数据语义。
+
+3D 对象场景要显示对象此刻在哪里，而对象直通路径的权威来源是运行在 WASAPI 事件线程上的 render
 callback。`scene_view::SceneViewMirror` 是这条单向通道，`Arc<Mutex<SceneViewFrame>>`。
 
 **所有权**：`backend::SpatialOutputController` 持有唯一的 `Arc`，经 `backend::windows` 的
@@ -209,4 +212,5 @@ Windows 上不构造预览：那里 render source 拥有 FIFO，多一个消费�
 3. 让 Windows Spatial Audio 后端消费 FIFO，并保持另一后端的能力协商契约（已完成首版）。
 4. 增加播放列表切换、连续播放、Play/Pause、欠载诊断与真实文件回归（已完成首版）。
 5. 增加 seek、Windows 设备切换与无重开恢复（已完成）。
-6. 接入 macOS AU Spatial Mixer。
+6. 接入 MacinRender SAF 渲染、系统空间输出、软件双耳与头部控制（已实现）。
+7. 扩展到实时 Apple AUSpatialMixer、EAR／HOA 后端，以及物理多声道设备输出。

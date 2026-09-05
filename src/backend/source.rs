@@ -14,6 +14,8 @@ use super::state::{
 };
 
 pub(super) struct SceneRenderSource {
+    pose: Arc<crate::head_tracking::PoseMirror>,
+    last_pose: crate::head_tracking::Quaternion,
     reader: SceneQueueReader,
     /// Where the UI reads this stream's object positions from. Written at the
     /// end of every quantum; see [`SceneViewMirror`] for why that never blocks.
@@ -40,6 +42,8 @@ impl SceneRenderSource {
         start_frame: u64,
     ) -> Self {
         Self {
+            pose: Arc::new(crate::head_tracking::PoseMirror::default()),
+            last_pose: crate::head_tracking::Quaternion::default(),
             key: reader.playback_key(),
             reader,
             mirror,
@@ -54,6 +58,11 @@ impl SceneRenderSource {
             },
             current: None,
         }
+    }
+
+    pub(super) fn with_pose(mut self, pose: Arc<crate::head_tracking::PoseMirror>) -> Self {
+        self.pose = pose;
+        self
     }
 
     fn render_quantum(&mut self, frame_count: u32) -> Result<RenderQuantum, String> {
@@ -153,6 +162,14 @@ impl SceneRenderSource {
             self.timeline_frame,
             self.sample_rate,
         );
+        if let Some(pose) = self.pose.try_pose() {
+            self.last_pose = pose;
+        }
+        // The scene mirror stays in world coordinates; only the system submission
+        // is rotated into head space. Rotating both the room and avatar would double it.
+        for object in objects.values_mut() {
+            object.position = self.last_pose.rotate_listener(object.position);
+        }
         Ok(RenderQuantum {
             objects: objects.into_values().collect(),
             lfe: lfe.map(LfeQuantumAccumulator::finish),

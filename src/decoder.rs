@@ -725,6 +725,14 @@ impl SharedSceneQueue {
         }
     }
 
+    fn snapshot(&self, key: PlaybackKey) -> Option<QueueSnapshot> {
+        let queue = lock_recover(&self.state.0);
+        (queue.key == key).then_some(QueueSnapshot {
+            buffered_frames: queue.buffered_frames,
+            capacity_frames: queue.capacity_frames,
+        })
+    }
+
     #[cfg(any(feature = "decode", test))]
     #[cfg_attr(
         all(not(feature = "decode"), not(test)),
@@ -1002,6 +1010,18 @@ impl DecoderController {
                 }
             }
         }
+        // The consumer continues draining after the decode worker publishes EOS.
+        // Its buffer count must not remain frozen in the final worker snapshot.
+        if let (Some(buffer), Some(metrics)) = (
+            self.queue.snapshot(self.playback_key()),
+            self.snapshot.metrics.as_mut(),
+        ) && (metrics.buffered_frames != buffer.buffered_frames
+            || metrics.buffer_capacity_frames != buffer.capacity_frames)
+        {
+            metrics.buffered_frames = buffer.buffered_frames;
+            metrics.buffer_capacity_frames = buffer.capacity_frames;
+            self.revision = self.revision.saturating_add(1);
+        }
     }
 
     pub const fn snapshot(&self) -> &DecoderSnapshot {
@@ -1210,6 +1230,33 @@ mod tests {
             index_error: None,
             target_frame: 0,
         }
+    }
+
+    #[cfg(feature = "decode")]
+    #[test]
+    fn polling_updates_buffer_occupancy_after_decoder_eos() {
+        let mut controller = DecoderController::new();
+        let key = controller.playback_key();
+        controller.queue.try_push(key, block(48_000, 4800)).unwrap();
+        controller.queue.mark_end_of_stream(key);
+        controller.snapshot = DecoderSnapshot::progress(
+            DecodePhase::EndOfStream,
+            PathBuf::from("fixture.ac4"),
+            indexed_metrics(),
+        );
+        controller.poll();
+        assert_eq!(
+            controller.snapshot().metrics().unwrap().buffered_frames(),
+            4800
+        );
+        let revision = controller.revision();
+        controller.try_pop_scene_block().unwrap();
+        controller.poll();
+        assert_eq!(
+            controller.snapshot().metrics().unwrap().buffered_frames(),
+            0
+        );
+        assert!(controller.revision() > revision);
     }
 
     #[test]

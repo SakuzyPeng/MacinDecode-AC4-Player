@@ -6,8 +6,8 @@
 //! their arithmetic and its tests run on every platform.
 
 use crate::decoder::{
-    DecodedSceneBlock, SceneLfePcm, SceneObjectPcm, SceneSignature, SpatialObjectState,
-    SpatialPosition,
+    DecodedSceneBlock, SceneLfePcm, SceneMetadataUpdate, SceneObjectPcm, SceneSignature,
+    SpatialObjectState, SpatialPosition,
 };
 
 /// Check the same Scene contract before either consumer accepts a block.
@@ -107,10 +107,23 @@ pub(super) fn element_state_at(
     initial_state: Option<SpatialObjectState>,
     offset_frames: u32,
 ) -> Option<SpatialObjectState> {
+    state_at_updates(
+        block.metadata_updates(),
+        element_id,
+        initial_state,
+        offset_frames,
+    )
+}
+
+pub(super) fn state_at_updates(
+    updates: &[SceneMetadataUpdate],
+    element_id: u64,
+    initial_state: Option<SpatialObjectState>,
+    offset_frames: u32,
+) -> Option<SpatialObjectState> {
     let mut state = initial_state;
     let mut ramp: Option<MetadataRamp> = None;
-    for update in block
-        .metadata_updates()
+    for update in updates
         .iter()
         .copied()
         .filter(|update| update.element_id() == element_id)
@@ -238,7 +251,7 @@ pub(super) fn listener_render_state(state: Option<SpatialObjectState>) -> (bool,
 /// carries no LFE state at all — so only the render callback, submitting bed
 /// gain to Windows Spatial Audio, ever asks for it.
 #[cfg_attr(
-    not(spatial_output),
+    not(windows_spatial_output),
     allow(dead_code, reason = "only the render callback submits LFE bed gain")
 )]
 pub(super) fn lfe_render_state(state: Option<SpatialObjectState>) -> (bool, f32) {

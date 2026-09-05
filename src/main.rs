@@ -10,6 +10,7 @@ mod app;
 mod backend;
 mod bitstream_ui;
 pub mod decoder;
+mod head_tracking;
 mod inspection;
 mod model;
 mod scene3d;
