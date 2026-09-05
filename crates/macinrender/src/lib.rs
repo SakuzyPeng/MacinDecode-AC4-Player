@@ -630,6 +630,29 @@ mod tests {
         }
     }
 
+    fn check_takeover_continuity(control: &Control, underruns: u64) {
+        use std::time::{Duration, Instant};
+        let until = Instant::now() + Duration::from_millis(500);
+        let mut frame = control.status().unwrap().presented;
+        let mut progressed = Instant::now();
+        while Instant::now() < until {
+            let status = control.status().unwrap();
+            assert_eq!(
+                status.underruns, underruns,
+                "renderer takeover interrupted audio"
+            );
+            if status.presented > frame {
+                frame = status.presented;
+                progressed = Instant::now();
+            }
+            assert!(
+                progressed.elapsed() < Duration::from_millis(250),
+                "renderer takeover stalled"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     #[test]
     #[ignore = "requires MACINDECODE_AC4_TEST_SOFA; validates concurrent HRTF preparation"]
     fn hrtf_preparation_keeps_the_producer_and_output_controls_live() {
@@ -714,8 +737,6 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         let outcome = loader.join().unwrap();
-        stop.store(true, Ordering::Relaxed);
-        producer.join().unwrap();
         assert!(outcome.is_ok(), "{outcome:?}");
         assert!(
             advanced,
@@ -725,11 +746,15 @@ mod tests {
             "SOFA prepared in {:?}; longest presentation gap {longest_gap:?}",
             preparation_start.elapsed()
         );
+        check_takeover_continuity(&control, underruns);
         let cached = Instant::now();
         control.switch_renderer(&cached_settings).unwrap();
         assert!(
             cached.elapsed() < Duration::from_millis(500),
             "KEMAR interpolation tables were rebuilt"
         );
+        check_takeover_continuity(&control, underruns);
+        stop.store(true, Ordering::Relaxed);
+        producer.join().unwrap();
     }
 }
