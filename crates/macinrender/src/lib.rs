@@ -653,6 +653,10 @@ mod tests {
         assert!(control.switch_renderer(&invalid).is_err());
         let before = control.status().unwrap().presented;
         let loader_control = control.clone();
+        // Large user datasets take substantially longer with OpenBLAS/MSVC
+        // than Accelerate. Bound preparation separately from realtime calls.
+        let preparation_start = Instant::now();
+        let preparation_deadline = preparation_start + Duration::from_secs(120);
         let loader = std::thread::spawn(move || {
             loader_control.switch_renderer(&RendererSettings {
                 sofa: path,
@@ -669,7 +673,10 @@ mod tests {
             );
             assert_ne!(status.phase, Phase::Failed);
             advanced |= status.presented > before;
-            assert!(Instant::now() < deadline, "HRTF preparation timed out");
+            assert!(
+                Instant::now() < preparation_deadline,
+                "HRTF preparation timed out"
+            );
             std::thread::sleep(Duration::from_millis(10));
         }
         let outcome = loader.join().unwrap();
@@ -680,5 +687,6 @@ mod tests {
             advanced,
             "media did not advance while preparing the SOFA dataset"
         );
+        eprintln!("SOFA prepared in {:?}", preparation_start.elapsed());
     }
 }
