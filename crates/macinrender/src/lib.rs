@@ -581,6 +581,43 @@ mod tests {
         }
     }
 
+    fn feed_test_tone(mut session: Session, stop: &std::sync::atomic::AtomicBool) {
+        use std::sync::atomic::Ordering;
+        let samples = [0.01; 480];
+        let initial = [(
+            7,
+            ObjectState {
+                active: true,
+                gain: 1.0,
+                position: Some([0.0, 1.0, 0.0]),
+            },
+        )];
+        let planes = [Plane {
+            element: 7,
+            samples: &samples,
+        }];
+        let mut start = 0;
+        while !stop.load(Ordering::Relaxed) {
+            if session
+                .submit(&Frame {
+                    epoch: 1,
+                    generation: 1,
+                    start,
+                    duration: 480,
+                    complete: true,
+                    planes: &planes,
+                    initial: &initial,
+                    updates: &[],
+                })
+                .unwrap()
+            {
+                start += 480;
+            } else {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+    }
+
     #[test]
     #[ignore = "requires MACINDECODE_AC4_TEST_SOFA; validates concurrent HRTF preparation"]
     fn hrtf_preparation_keeps_the_producer_and_output_controls_live() {
@@ -606,41 +643,7 @@ mod tests {
         control.play(true).unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
-        let producer = std::thread::spawn(move || {
-            let samples = [0.01; 480];
-            let initial = [(
-                7,
-                ObjectState {
-                    active: true,
-                    gain: 1.0,
-                    position: Some([0.0, 1.0, 0.0]),
-                },
-            )];
-            let planes = [Plane {
-                element: 7,
-                samples: &samples,
-            }];
-            let mut start = 0;
-            while !worker_stop.load(Ordering::Relaxed) {
-                if session
-                    .submit(&Frame {
-                        epoch: 1,
-                        generation: 1,
-                        start,
-                        duration: 480,
-                        complete: true,
-                        planes: &planes,
-                        initial: &initial,
-                        updates: &[],
-                    })
-                    .unwrap()
-                {
-                    start += 480;
-                } else {
-                    std::thread::sleep(Duration::from_millis(1));
-                }
-            }
-        });
+        let producer = std::thread::spawn(move || feed_test_tone(session, &worker_stop));
         let deadline = Instant::now() + Duration::from_secs(40);
         while control.status().unwrap().presented < 4800 {
             assert!(Instant::now() < deadline, "startup timed out");
