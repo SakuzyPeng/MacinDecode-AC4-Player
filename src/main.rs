@@ -13,6 +13,7 @@ mod bitstream_ui;
 pub mod decoder;
 mod head_tracking;
 mod inspection;
+mod media;
 mod model;
 mod scene3d;
 mod scene_view;
@@ -20,13 +21,8 @@ mod theme;
 
 fn main() -> eframe::Result {
     let native_options = eframe::NativeOptions {
-        // The object scene renders into egui's own render pass, so the depth and
-        // MSAA attachments have to come from eframe. Both values are read from
-        // `scene3d::gpu` rather than written out here: the pipelines declare the
-        // matching format and sample count, and a mismatch is a validation panic
-        // at pipeline creation rather than a runtime downgrade.
-        depth_buffer: scene3d::gpu::DEPTH_BUFFER_BITS,
-        multisampling: scene3d::gpu::MSAA_SAMPLES,
+        // Only the object scene needs MSAA and depth. It owns scene-sized
+        // attachments; egui composites the resolved image in its normal pass.
         viewport: eframe::egui::ViewportBuilder::default()
             .with_app_id("com.macinrender.macindecode-ac4-player")
             .with_icon(app_icon::load())

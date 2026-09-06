@@ -3,7 +3,10 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
-use macindecode_ac4_inspect::{FieldStatus, InspectReport, ReportedField, inspect_path};
+use crate::media::MediaSource;
+use macindecode_ac4_inspect::{
+    FieldStatus, InspectReport, InspectSourceHint, ReportedField, inspect_bytes,
+};
 use serde_json::Value;
 
 #[derive(Debug)]
@@ -33,7 +36,7 @@ struct InspectionResult {
 }
 
 pub struct InspectionController {
-    request_sender: Option<Sender<PathBuf>>,
+    request_sender: Option<Sender<MediaSource>>,
     result_receiver: Receiver<InspectionResult>,
     states: HashMap<PathBuf, InspectionState>,
     startup_error: Option<String>,
@@ -64,6 +67,11 @@ impl InspectionController {
     }
 
     pub fn ensure_requested(&mut self, path: &Path) {
+        self.ensure_requested_source(MediaSource::new(path));
+    }
+
+    pub fn ensure_requested_source(&mut self, source: MediaSource) {
+        let path = source.path();
         if self.states.contains_key(path) {
             return;
         }
@@ -83,7 +91,7 @@ impl InspectionController {
 
         self.states
             .insert(owned_path.clone(), InspectionState::Pending);
-        if sender.send(owned_path.clone()).is_err() {
+        if sender.send(source).is_err() {
             self.states.insert(
                 owned_path,
                 InspectionState::Failed("Inspection worker stopped unexpectedly".to_owned()),
@@ -127,13 +135,22 @@ impl InspectionController {
 }
 
 fn inspection_worker(
-    request_receiver: &Receiver<PathBuf>,
+    request_receiver: &Receiver<MediaSource>,
     result_sender: &Sender<InspectionResult>,
 ) {
-    while let Ok(path) = request_receiver.recv() {
-        let result = inspect_path(&path)
+    while let Ok(source) = request_receiver.recv() {
+        let path = source.path().to_path_buf();
+        let result = source.read().and_then(|bytes| {
+            inspect_bytes(
+                &bytes,
+                InspectSourceHint {
+                    name: Some(&path.display().to_string()),
+                    ..Default::default()
+                },
+            )
             .map(InspectionSnapshot::new)
-            .map_err(|error| error.to_string());
+            .map_err(|error| error.to_string())
+        });
         if result_sender
             .send(InspectionResult { path, result })
             .is_err()

@@ -48,7 +48,9 @@ GUI、播放协调器和解码适配器均留在 Rust 进程内，直接依赖
   `/STACK:8000000` 隐式满足，换个平台就没了，所以要求必须写在代码里；
 - `decoder::worker` 把 Core 的借用 Scene view 复制为播放器自有的对象/LFE PCM、稳定元素 ID、
   起点状态与 ramp 更新，Core 类型不会越过该适配边界；
-- 活动压缩文件只读一次并保存在当前 request；初始顺序解码立即开始，独立 worker 并行建立 AU 时间线
+- `media::MediaSource` 为当前选择建立不可变的文件快照；inspection 和 decode worker 共享一次读取与同一份
+  `Arc<Vec<u8>>`，`OnceLock` 只在工作线程上等待读盘，不等待检查解析结束、不阻塞 GUI。换源建立新快照，
+  seek 与重播沿用已加载字节；纯检查构建在检查完成后释放压缩字节。初始顺序解码立即开始，独立 worker 并行建立 AU 时间线
   与 Full random-access 索引；
 - Scene FIFO 最多保存 2 秒 PCM，300 ms 即可进入 ready。切换来源递增 request ID，seek、重播和
   自动恢复递增 playback epoch；组合 key 使旧 worker 输出无法重新进入当前来源；
@@ -74,6 +76,15 @@ GUI、播放协调器和解码适配器均留在 Rust 进程内，直接依赖
 Core 的 MP4 入口当前要求完整文件切片，因此 decode worker 会先把压缩源读入内存；有界约束针对
 解码后的对象 PCM。后续若 Core 增加 seekable source API，可替换容器读取层而不改变 Scene FIFO
 或平台后端契约。
+
+## 场景图形资源
+
+`scene3d::gpu` 为场景自身的物理像素区域分配 4× MSAA 颜色、深度和单采样 resolve 纹理；
+不再让 eframe 为整个窗口分配多采样与深度附件。纹理在尺寸不变时复用，尺寸变化时替换，
+尺寸计算与 egui callback 的取整、屏幕裁剪一致。场景保持原来的抗锯齿和深度遮挡，GUI 使用
+普通单采样 pass，以预乘 alpha 合成场景纹理，场景工具条和菜单仍由 egui 正常覆盖。
+MSAA 与深度附件每次清空、pass 结束后丢弃，标为 `TRANSIENT_ATTACHMENT`，允许 Apple GPU 等
+支持的平台使用片上临时存储；不受益的平台由 wgpu 按普通附件处理。只有 resolve 纹理跨 pass 保留。
 
 ## 场景视图镜像
 

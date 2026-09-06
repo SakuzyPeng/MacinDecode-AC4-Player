@@ -1,4 +1,3 @@
-use std::fs;
 use std::ops::Range;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -6,6 +5,8 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::Duration;
+
+use crate::media::MediaSource;
 
 use macindecode_ac4_bitstream::topology::{Ac4Topology, RandomAccess};
 use macindecode_ac4_bitstream::{Ac4Toc, SyncFrameIter};
@@ -121,15 +122,15 @@ fn decoder_worker(
         match command {
             WorkerCommand::Open {
                 key,
-                path,
+                source,
                 reuse_cached,
             } => {
-                let failure_path = path.clone();
-                loaded = loaded.filter(|media| reuse_cached && media.path == path);
+                let failure_path = source.path().to_path_buf();
+                loaded = loaded.filter(|media| reuse_cached && media.path == source.path());
                 if let Some(media) = loaded.as_mut() {
                     media.session = new_session();
                 } else {
-                    loaded = match LoadedMedia::open(key, path, event_sender) {
+                    loaded = match LoadedMedia::open(key, &source, event_sender) {
                         Ok(media) => Some(media),
                         Err(error) => {
                             send_failure(key, &failure_path, error, event_sender);
@@ -484,12 +485,11 @@ struct LoadedMedia {
 impl LoadedMedia {
     fn open(
         key: PlaybackKey,
-        path: std::path::PathBuf,
+        source: &MediaSource,
         event_sender: &Sender<WorkerEvent>,
     ) -> Result<Self, String> {
-        let bytes = Arc::new(
-            fs::read(&path).map_err(|error| format!("Failed to read AC-4 media: {error}"))?,
-        );
+        let bytes = source.read()?;
+        let path = source.path().to_path_buf();
         if is_raw_ac4(&bytes) {
             Self::open_raw(key, path, bytes, event_sender)
         } else {

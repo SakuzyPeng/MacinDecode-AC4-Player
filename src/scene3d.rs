@@ -6,8 +6,8 @@
 //! viewport in a paper UI.
 //!
 //! Layering, and the reason for it: everything except [`gpu`] works in plain
-//! arrays and is unit tested, because `cargo test` cannot bring up wgpu in a
-//! headless environment. [`gpu`] only uploads what [`mesh`] produced. This
+//! arrays and is unit tested without a graphics adapter. [`gpu`] renders what
+//! [`mesh`] produced; its opt-in GPU readback test needs no window. This
 //! mirrors the discipline the rest of the crate already keeps — `unsafe` shut
 //! inside the native crate, Core types kept out of `backend`.
 //!

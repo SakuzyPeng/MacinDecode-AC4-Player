@@ -11,6 +11,8 @@ use std::thread::JoinHandle;
 #[cfg(feature = "decode")]
 use std::time::Duration;
 
+use crate::media::MediaSource;
+
 #[cfg(feature = "decode")]
 mod worker;
 
@@ -858,7 +860,7 @@ fn lock_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 pub(super) enum WorkerCommand {
     Open {
         key: PlaybackKey,
-        path: PathBuf,
+        source: MediaSource,
         reuse_cached: bool,
     },
     Seek {
@@ -957,6 +959,13 @@ impl DecoderController {
     }
 
     pub fn ensure_open(&mut self, path: &Path) {
+        if self.active_path.as_deref() != Some(path) {
+            self.ensure_open_source(&MediaSource::new(path));
+        }
+    }
+
+    pub fn ensure_open_source(&mut self, source: &MediaSource) {
+        let path = source.path();
         if self.active_path.as_deref() == Some(path) {
             return;
         }
@@ -973,7 +982,7 @@ impl DecoderController {
         self.revision = self.revision.saturating_add(1);
         let command = WorkerCommand::Open {
             key,
-            path: path.to_path_buf(),
+            source: source.clone(),
             reuse_cached: false,
         };
         if self
@@ -1194,7 +1203,7 @@ impl DecoderController {
         if sender
             .send(WorkerCommand::Open {
                 key,
-                path: path.clone(),
+                source: MediaSource::new(&path),
                 reuse_cached: true,
             })
             .is_err()
@@ -1390,8 +1399,8 @@ mod tests {
         assert!(old_reader.try_pop().is_none());
         assert!(
             matches!(pending_commands.try_recv().unwrap(), WorkerCommand::Open {
-            key, path: source, reuse_cached: true
-        } if key == new_key && source == path)
+            key, source, reuse_cached: true
+        } if key == new_key && source.path() == path)
         );
         events
             .send(WorkerEvent {

@@ -1693,6 +1693,7 @@ dependencies = [
  "macindecode-ac4-scene",
  "macindecode-macinrender",
  "macindecode-windows-spatial-audio",
+ "pollster 0.4.0",
  "rfd",
  "serde",
  "serde_json",

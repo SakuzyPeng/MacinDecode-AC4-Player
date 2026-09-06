@@ -44,6 +44,9 @@ serde = { version = "1", features = ["derive"] }
 embed-resource = "=3.0.11"
 sha2 = "0.10"
 
+[dev-dependencies]
+pollster = "0.4"
+
 [features]
 default = ["decode", "macinrender"]
 macinrender = ["decode", "dep:macindecode-macinrender"]

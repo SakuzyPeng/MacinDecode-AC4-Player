@@ -16,6 +16,7 @@ use crate::decoder::{
     DecodeMetrics, DecodePhase, DecoderController, DecoderSnapshot, PREBUFFER_MILLISECONDS,
 };
 use crate::inspection::InspectionController;
+use crate::media::MediaSource;
 use crate::model::SelectedSource;
 use crate::scene3d;
 use crate::theme;
@@ -27,6 +28,7 @@ use crate::theme;
 pub struct PlayerApp {
     playlist: Vec<SelectedSource>,
     selected_source: Option<usize>,
+    media_source: Option<MediaSource>,
     inspection: InspectionController,
     decoder: DecoderController,
     decoder_revision: u64,
@@ -362,6 +364,7 @@ impl PlayerApp {
         Self {
             playlist: Vec::new(),
             selected_source: None,
+            media_source: None,
             inspection: InspectionController::new(),
             decoder: DecoderController::new(),
             decoder_revision: 0,
@@ -632,10 +635,23 @@ impl PlayerApp {
         self.selected_source().map(SelectedSource::path)
     }
 
+    fn selected_media(&mut self) -> Option<MediaSource> {
+        let path = self.selected_path();
+        // The inspection-only shell has no consumer that needs to replay the
+        // source. Let the inspection worker release its bytes with the report.
+        if !cfg!(feature = "decode") {
+            return path.map(MediaSource::new);
+        }
+        if self.media_source.as_ref().map(MediaSource::path) != path {
+            self.media_source = path.map(MediaSource::new);
+        }
+        self.media_source.clone()
+    }
+
     fn sync_inspection(&mut self, context: &egui::Context) {
         self.inspection.poll();
-        if let Some(path) = self.selected_path().map(Path::to_path_buf) {
-            self.inspection.ensure_requested(&path);
+        if let Some(source) = self.selected_media() {
+            self.inspection.ensure_requested_source(source);
         } else {
             self.bitstream_details_open = false;
         }
@@ -645,8 +661,8 @@ impl PlayerApp {
     }
 
     fn sync_decoder(&mut self, context: &egui::Context) {
-        if let Some(path) = self.selected_path().map(Path::to_path_buf) {
-            self.decoder.ensure_open(&path);
+        if let Some(source) = self.selected_media() {
+            self.decoder.ensure_open_source(&source);
         } else {
             self.decoder.close();
         }
