@@ -856,8 +856,15 @@ fn lock_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[derive(Debug)]
 #[cfg_attr(not(feature = "decode"), allow(dead_code))]
 pub(super) enum WorkerCommand {
-    Open { key: PlaybackKey, path: PathBuf },
-    Seek { key: PlaybackKey, target_frame: u64 },
+    Open {
+        key: PlaybackKey,
+        path: PathBuf,
+        reuse_cached: bool,
+    },
+    Seek {
+        key: PlaybackKey,
+        target_frame: u64,
+    },
     Close,
     Shutdown,
 }
@@ -967,6 +974,7 @@ impl DecoderController {
         let command = WorkerCommand::Open {
             key,
             path: path.to_path_buf(),
+            reuse_cached: false,
         };
         if self
             .command_sender
@@ -1161,6 +1169,43 @@ impl DecoderController {
         let _ = self.seek(0);
     }
 
+    /// Retry a failed decode from the beginning without requiring valid seek metrics.
+    /// The worker retains the loaded bytes/index and creates a fresh Core session.
+    ///
+    /// # Errors
+    /// Returns an error when decoding has not failed, no source is active, or the worker is unavailable.
+    pub fn retry(&mut self) -> Result<(), String> {
+        if self.snapshot.phase() != DecodePhase::Failed {
+            return Err("The current decode has not failed".into());
+        }
+        let path = self
+            .active_path
+            .clone()
+            .ok_or("No active media is loaded")?;
+        let sender = self
+            .command_sender
+            .as_ref()
+            .ok_or("The decoder is unavailable")?;
+        self.playback_epoch = self.playback_epoch.checked_add(1).unwrap_or(1);
+        let key = self.playback_key();
+        self.queue.reset(key);
+        self.snapshot = DecoderSnapshot::opening(path.clone());
+        self.revision = self.revision.saturating_add(1);
+        if sender
+            .send(WorkerCommand::Open {
+                key,
+                path: path.clone(),
+                reuse_cached: true,
+            })
+            .is_err()
+        {
+            let error = "MacinDecode Core worker stopped unexpectedly";
+            self.snapshot = DecoderSnapshot::failed(path, error);
+            return Err(error.into());
+        }
+        Ok(())
+    }
+
     fn advance_request(&mut self) {
         self.request_id = self.request_id.checked_add(1).unwrap_or(1);
     }
@@ -1304,6 +1349,65 @@ mod tests {
         assert_eq!(block.metadata_updates().len(), 1);
         assert_eq!(block.metadata_updates()[0].ramp_frames(), 20);
         assert!(!block.truncate_at(100));
+    }
+
+    #[cfg(feature = "decode")]
+    #[test]
+    fn failed_decode_retry_does_not_require_metrics_or_accept_old_epoch_events() {
+        let (commands, pending_commands) = std::sync::mpsc::channel();
+        let (events, event_rx) = std::sync::mpsc::channel();
+        let path = PathBuf::from("fixture.mp4");
+        let mut controller = DecoderController {
+            command_sender: Some(commands),
+            event_receiver: Some(event_rx),
+            join_handle: None,
+            queue: SharedSceneQueue::new(),
+            snapshot: DecoderSnapshot::failed(path.clone(), "simulated Core failure"),
+            active_path: Some(path.clone()),
+            request_id: 7,
+            playback_epoch: 2,
+            index_state: ControllerIndexState::Ready {
+                duration_frames: Some(480_000),
+                seekable_from_frame: Some(0),
+            },
+            revision: 0,
+        };
+        let old_key = controller.playback_key();
+        controller.queue.reset(old_key);
+        controller
+            .queue
+            .try_push(old_key, block(48_000, 4800))
+            .unwrap();
+        let old_reader = controller.scene_reader();
+        assert!(
+            controller.seek(0).is_err(),
+            "failed snapshots have no seek metrics"
+        );
+        controller.retry().unwrap();
+        let new_key = controller.playback_key();
+        assert_ne!(new_key, old_key);
+        assert_eq!(controller.request_id(), 7, "keep the cached index identity");
+        assert!(old_reader.try_pop().is_none());
+        assert!(
+            matches!(pending_commands.try_recv().unwrap(), WorkerCommand::Open {
+            key, path: source, reuse_cached: true
+        } if key == new_key && source == path)
+        );
+        events
+            .send(WorkerEvent {
+                kind: WorkerEventKind::Snapshot {
+                    key: old_key,
+                    snapshot: Box::new(DecoderSnapshot::failed(path, "late failure")),
+                },
+            })
+            .unwrap();
+        controller.poll();
+        assert_eq!(controller.snapshot().phase(), DecodePhase::Opening);
+        assert!(controller.try_pop_scene_block().is_none());
+        assert!(
+            controller.retry().is_err(),
+            "a pending retry must not restart every frame"
+        );
     }
 
     #[cfg(feature = "decode")]

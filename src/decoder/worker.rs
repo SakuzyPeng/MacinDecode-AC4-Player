@@ -64,6 +64,45 @@ enum RunControl {
     Shutdown,
 }
 
+#[derive(Default)]
+struct SeekPreroll {
+    blocks: Vec<DecodedSceneBlock>,
+    frames: u64,
+    published: bool,
+}
+
+impl SeekPreroll {
+    fn push(&mut self, block: DecodedSceneBlock) {
+        self.frames = self
+            .frames
+            .saturating_add(u64::from(block.duration_frames()));
+        self.blocks.push(block);
+    }
+
+    fn ready(&self, sample_rate: u32) -> bool {
+        has_prebuffer(self.frames, sample_rate)
+    }
+
+    fn publish(
+        &mut self,
+        key: PlaybackKey,
+        path: &Path,
+        metrics: &mut DecodeMetrics,
+        commands: &Receiver<WorkerCommand>,
+        events: &Sender<WorkerEvent>,
+        queue: &SharedSceneQueue,
+    ) -> Result<RunControl, String> {
+        self.published |= !self.blocks.is_empty();
+        for block in std::mem::take(&mut self.blocks) {
+            let control = enqueue_block(key, path, block, metrics, commands, events, queue)?;
+            if !matches!(control, RunControl::Complete) {
+                return Ok(control);
+            }
+        }
+        Ok(RunControl::Complete)
+    }
+}
+
 fn decoder_worker(
     command_receiver: &Receiver<WorkerCommand>,
     event_sender: &Sender<WorkerEvent>,
@@ -80,15 +119,24 @@ fn decoder_worker(
             },
         };
         match command {
-            WorkerCommand::Open { key, path } => {
+            WorkerCommand::Open {
+                key,
+                path,
+                reuse_cached,
+            } => {
                 let failure_path = path.clone();
-                loaded = match LoadedMedia::open(key, path, event_sender) {
-                    Ok(media) => Some(media),
-                    Err(error) => {
-                        send_failure(key, &failure_path, error, event_sender);
-                        None
-                    }
-                };
+                loaded = loaded.filter(|media| reuse_cached && media.path == path);
+                if let Some(media) = loaded.as_mut() {
+                    media.session = new_session();
+                } else {
+                    loaded = match LoadedMedia::open(key, path, event_sender) {
+                        Ok(media) => Some(media),
+                        Err(error) => {
+                            send_failure(key, &failure_path, error, event_sender);
+                            None
+                        }
+                    };
+                }
                 let Some(media) = loaded.as_mut() else {
                     continue;
                 };
@@ -541,15 +589,14 @@ impl LoadedMedia {
         event_sender: &Sender<WorkerEvent>,
         queue: &SharedSceneQueue,
     ) -> Result<RunControl, String> {
-        if !discontinuity {
-            return match self.container {
-                DecodeContainer::IsoBmff => {
-                    self.decode_initial_mp4(key, command_receiver, event_sender, queue)
-                }
-                DecodeContainer::RawAc4 => {
-                    self.decode_initial_raw(key, command_receiver, event_sender, queue)
-                }
-            };
+        if !discontinuity || target_frame == 0 {
+            if discontinuity {
+                self.session.reset();
+            }
+            // Presentation frame zero can follow encoded priming AUs. Replay
+            // must include those AUs, just like the initial open, rather than
+            // starting at a later sync sample whose presentation time is zero.
+            return self.decode_initial(key, command_receiver, event_sender, queue);
         }
 
         let index = self.index.ready()?;
@@ -591,6 +638,7 @@ impl LoadedMedia {
                 false,
                 target_frame,
             );
+            let mut preroll = SeekPreroll::default();
             let attempt = (|| {
                 for unit_index in start_index..index.access_units.len() {
                     if let Some(control) = pending_command(command_receiver) {
@@ -614,24 +662,48 @@ impl LoadedMedia {
                         command_receiver,
                         event_sender,
                         queue,
+                        Some(&mut preroll),
                     )?;
                     if !matches!(control, RunControl::Complete) {
                         return Ok(control);
                     }
                 }
+                let control = preroll.publish(
+                    key,
+                    &self.path,
+                    &mut metrics,
+                    command_receiver,
+                    event_sender,
+                    queue,
+                )?;
+                if !matches!(control, RunControl::Complete) {
+                    return Ok(control);
+                }
                 finish(key, &self.path, &metrics, event_sender, queue)
             })();
             match attempt {
                 Ok(control) => return Ok(control),
-                Err(error) if metrics.buffered_frames == 0 => {
+                Err(error) if !preroll.published => {
                     if index.seek_start_before(target_i64, start_index).is_none() {
                         return Err(error);
                     }
                     before_index = start_index;
-                    queue.reset(key);
                 }
                 Err(error) => return Err(error),
             }
+        }
+    }
+
+    fn decode_initial(
+        &mut self,
+        key: PlaybackKey,
+        commands: &Receiver<WorkerCommand>,
+        events: &Sender<WorkerEvent>,
+        queue: &SharedSceneQueue,
+    ) -> Result<RunControl, String> {
+        match self.container {
+            DecodeContainer::IsoBmff => self.decode_initial_mp4(key, commands, events, queue),
+            DecodeContainer::RawAc4 => self.decode_initial_raw(key, commands, events, queue),
         }
     }
 
@@ -680,6 +752,7 @@ impl LoadedMedia {
                 command_receiver,
                 event_sender,
                 queue,
+                None,
             )?;
             if !matches!(control, RunControl::Complete) {
                 return Ok(control);
@@ -733,6 +806,7 @@ impl LoadedMedia {
                 command_receiver,
                 event_sender,
                 queue,
+                None,
             )?;
             if !matches!(control, RunControl::Complete) {
                 return Ok(control);
@@ -769,6 +843,7 @@ fn decode_access_unit(
     command_receiver: &Receiver<WorkerCommand>,
     event_sender: &Sender<WorkerEvent>,
     queue: &SharedSceneQueue,
+    mut seek_preroll: Option<&mut SeekPreroll>,
 ) -> Result<RunControl, String> {
     let decoded = session
         .decode_access_unit(AccessUnit::new(raw_frame, context))
@@ -816,15 +891,30 @@ fn decode_access_unit(
             metrics.scene_signature = Some(super::SceneSignature::from_block(&block));
         }
 
-        let control = enqueue_block(
-            key,
-            path,
-            block,
-            metrics,
-            command_receiver,
-            event_sender,
-            queue,
-        )?;
+        let control = if let Some(preroll) = seek_preroll
+            .as_deref_mut()
+            .filter(|pending| !pending.published)
+        {
+            // An access point can emit provisional PCM before delayed A-SPX
+            // controls discover missing history. Keep the normal startup
+            // prebuffer private so an earlier access point can still be tried
+            // without leaking PCM, metadata, or Ready events to the consumer.
+            preroll.push(block);
+            if !preroll.ready(metrics.sample_rate) {
+                continue;
+            }
+            preroll.publish(key, path, metrics, command_receiver, event_sender, queue)?
+        } else {
+            enqueue_block(
+                key,
+                path,
+                block,
+                metrics,
+                command_receiver,
+                event_sender,
+                queue,
+            )?
+        };
         if !matches!(control, RunControl::Complete) {
             return Ok(control);
         }
@@ -921,8 +1011,11 @@ fn initial_metrics(
 }
 
 fn is_prebuffered(metrics: &DecodeMetrics) -> bool {
-    metrics.buffered_frames.saturating_mul(1_000)
-        >= u64::from(metrics.sample_rate).saturating_mul(PREBUFFER_MILLISECONDS)
+    has_prebuffer(metrics.buffered_frames, metrics.sample_rate)
+}
+
+fn has_prebuffer(frames: u64, sample_rate: u32) -> bool {
+    frames.saturating_mul(1_000) >= u64::from(sample_rate).saturating_mul(PREBUFFER_MILLISECONDS)
 }
 
 fn own_scene_frame(frame: Ac4SceneFrame<'_>) -> Result<DecodedSceneBlock, String> {
@@ -1062,7 +1155,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::super::{DecodePhase, DecoderController};
-    use super::{build_raw_index, parse_mp4_timing};
+    use super::{build_mp4_index, build_raw_index, parse_mp4_timing};
 
     fn local_media_path() -> PathBuf {
         std::env::var_os("MACINDECODE_AC4_TEST_MEDIA")
@@ -1080,7 +1173,7 @@ mod tests {
             controller.poll();
             if matches!(controller.snapshot().phase(), DecodePhase::Failed) {
                 panic!(
-                    "decode failed: {}",
+                    "decode failed while {description}: {}",
                     controller.snapshot().detail().unwrap_or("unknown error")
                 );
             }
@@ -1202,6 +1295,171 @@ mod tests {
                 })
             },
             "backward seek from EOS did not prebuffer",
+        );
+    }
+
+    #[test]
+    #[ignore = "requires MACINDECODE_AC4_TEST_MEDIA with local AC-4 MP4 media"]
+    fn replays_real_media_after_reconfiguring_at_the_end() {
+        let path = local_media_path();
+        let mut controller = DecoderController::new();
+        controller.ensure_open(&path);
+        wait_for_decoder(
+            &mut controller,
+            |controller| {
+                controller.snapshot().metrics().is_some_and(|metrics| {
+                    !metrics.is_indexing()
+                        && metrics.can_seek_to(0)
+                        && matches!(controller.snapshot().phase(), DecodePhase::Ready)
+                })
+            },
+            "initial decode and seek index did not complete",
+        );
+        let duration = controller
+            .snapshot()
+            .metrics()
+            .unwrap()
+            .duration_frames()
+            .unwrap();
+        for cycle in 0..4 {
+            controller.seek(duration.saturating_sub(48_000)).unwrap();
+            wait_for_decoder(
+                &mut controller,
+                |controller| {
+                    while controller.try_pop_scene_block().is_some() {}
+                    controller.snapshot().phase() == DecodePhase::EndOfStream
+                },
+                "tail did not reach decoded EOS",
+            );
+            while controller.try_pop_scene_block().is_some() {}
+            // Rebuilding an output after natural completion seeks to the
+            // already-presented end before the Play button requests frame zero.
+            controller.seek(duration).unwrap();
+            wait_for_decoder(
+                &mut controller,
+                |controller| controller.snapshot().phase() == DecodePhase::EndOfStream,
+                "output reconfiguration at EOS did not complete",
+            );
+            controller.seek(0).unwrap();
+            wait_for_decoder(
+                &mut controller,
+                |controller| controller.snapshot().phase() == DecodePhase::Ready,
+                "replay after output reconfiguration failed",
+            );
+            let first = controller.try_pop_scene_block().unwrap();
+            assert!(
+                first.start_frame() <= 0,
+                "cycle {cycle}: skipped the beginning"
+            );
+            assert!(first.start_frame() + i64::from(first.duration_frames()) > 0);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires MACINDECODE_AC4_TEST_MEDIA with local AC-4 MP4 media"]
+    fn seeks_real_media_just_after_random_access_points() {
+        let path = local_media_path();
+        let bytes = std::fs::read(&path).unwrap();
+        let index = build_mp4_index(&bytes, &AtomicBool::new(false))
+            .unwrap()
+            .unwrap();
+        let mut targets: Vec<_> = index
+            .access_units
+            .iter()
+            .filter(|unit| unit.safe_random_access && unit.presentation_start > 48_000)
+            .take(12)
+            .map(|unit| u64::try_from(unit.presentation_start).unwrap() + 1)
+            .collect();
+        assert!(
+            !targets.is_empty(),
+            "test media needs random access points during playback"
+        );
+        targets.insert(0, 1);
+        targets.push(index.duration_frames - 1);
+        let mut controller = DecoderController::new();
+        controller.ensure_open(&path);
+        wait_for_decoder(
+            &mut controller,
+            |controller| {
+                controller.snapshot().phase() == DecodePhase::Ready
+                    && controller
+                        .snapshot()
+                        .metrics()
+                        .is_some_and(|metrics| !metrics.is_indexing())
+            },
+            "initial indexing",
+        );
+        for target in targets {
+            controller.seek(target).unwrap();
+            wait_for_decoder(
+                &mut controller,
+                |controller| {
+                    matches!(
+                        controller.snapshot().phase(),
+                        DecodePhase::Ready | DecodePhase::EndOfStream
+                    )
+                },
+                &format!("mode-change seek to {target}"),
+            );
+            let first = controller.try_pop_scene_block().unwrap();
+            assert!(first.start_frame() <= i64::try_from(target).unwrap());
+            assert!(
+                first.start_frame() + i64::from(first.duration_frames())
+                    > i64::try_from(target).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "requires MACINDECODE_AC4_TEST_MEDIA with local AC-4 MP4 media"]
+    fn failed_real_media_can_retry_from_cached_bytes() {
+        struct MediaCopy(PathBuf);
+        impl Drop for MediaCopy {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let copy = MediaCopy(std::env::temp_dir().join(format!(
+            "macindecode-retry-{}-{unique}.mp4",
+            std::process::id()
+        )));
+        std::fs::copy(local_media_path(), &copy.0).unwrap();
+        let mut controller = DecoderController::new();
+        controller.ensure_open(&copy.0);
+        wait_for_decoder(
+            &mut controller,
+            |controller| {
+                controller.snapshot().phase() == DecodePhase::Ready
+                    && controller
+                        .snapshot()
+                        .metrics()
+                        .is_some_and(|metrics| !metrics.is_indexing())
+            },
+            "initial media did not load",
+        );
+        std::fs::remove_file(&copy.0).unwrap();
+        let old_key = controller.playback_key();
+        controller.snapshot = super::super::DecoderSnapshot::failed(
+            copy.0.clone(),
+            "simulated Core failure after loading",
+        );
+        controller.retry().unwrap();
+        wait_for_decoder(
+            &mut controller,
+            |controller| controller.snapshot().phase() == DecodePhase::Ready,
+            "retry did not resume from cached media",
+        );
+        assert_ne!(controller.playback_key(), old_key);
+        let first = controller.try_pop_scene_block().unwrap();
+        assert!(first.start_frame() <= 0);
+        assert!(first.start_frame() + i64::from(first.duration_frames()) > 0);
+        assert!(
+            !copy.0.exists(),
+            "retry must not depend on reopening the source file"
         );
     }
 

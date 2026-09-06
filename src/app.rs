@@ -305,6 +305,21 @@ fn advance_scene_preview(
     }
 }
 
+fn cancel_output_change_after_decode_failure(
+    output: &mut SpatialOutputController,
+    pending: &mut Option<OutputSettings>,
+) -> bool {
+    let previous = pending.take();
+    let interrupted = previous.is_some() || output.settings_pending();
+    output.pause();
+    output.reset();
+    let _ = output.take_settings_result();
+    if let Some(previous) = previous {
+        output.install_settings(previous);
+    }
+    interrupted
+}
+
 const fn should_replay_current_on_completion(mode: PlaybackMode, item_count: usize) -> bool {
     match mode {
         PlaybackMode::RepeatOne => true,
@@ -445,6 +460,8 @@ impl PlayerApp {
             let name = source.display_name().to_owned();
             self.output.pause();
             self.output.reset();
+            self.pending_output_change = None;
+            self.audio_settings_error = None;
             self.selected_source = Some(index);
             self.timeline_preview = 0.0;
             self.playback_intent = playback_intent;
@@ -522,6 +539,24 @@ impl PlayerApp {
         }
     }
 
+    fn retry_current_source(&mut self) {
+        match self.decoder.retry() {
+            Ok(()) => {
+                self.output.pause();
+                self.output.reset();
+                self.timeline_preview = 0.0;
+                self.timeline_dragging = false;
+                self.playback_intent = true;
+                self.playback_restore_pending = true;
+                self.pending_output_change = None;
+                self.automatic_reconfigure_guard = None;
+                self.waiting_for_device = None;
+                self.status = StatusLine::idle("Retrying playback from the beginning");
+            }
+            Err(error) => self.status = StatusLine::warning(error),
+        }
+    }
+
     fn handle_completed_playlist_item(
         &mut self,
         context: &egui::Context,
@@ -573,6 +608,8 @@ impl PlayerApp {
         self.waiting_for_device = None;
         self.output.pause();
         self.output.reset();
+        self.pending_output_change = None;
+        self.audio_settings_error = None;
         self.shuffle_history.clear();
         self.inspection
             .retain_paths(self.playlist.iter().map(SelectedSource::path));
@@ -633,6 +670,29 @@ impl PlayerApp {
         let playback_epoch = self.decoder.playback_epoch();
         let master_gain = if self.muted { 0.0 } else { self.volume };
         self.output.set_master_gain(master_gain);
+        if self.decoder.snapshot().phase() == DecodePhase::Failed {
+            // A decoder failure can arrive before the replacement output is
+            // configured. End the handoff here rather than waiting forever
+            // for that output to acknowledge Ready/Failed.
+            if cancel_output_change_after_decode_failure(
+                &mut self.output,
+                &mut self.pending_output_change,
+            ) {
+                self.audio_settings_error = Some(
+                    "The audio settings change was cancelled after a decode failure; previous settings were retained.".into(),
+                );
+            }
+            self.playback_intent = false;
+            self.playback_restore_pending = false;
+            self.automatic_reconfigure_guard = None;
+            self.waiting_for_device = None;
+            self.timeline_dragging = false;
+            self.output.poll();
+            self.backend = self.output.settings().mode;
+            self.output_revision = self.output.revision();
+            self.status = decoder_status_line(self.decoder.snapshot());
+            return;
+        }
         self.output.poll();
         #[cfg(macinrender_output)]
         if self.finish_output_preparation(context) {
@@ -676,7 +736,10 @@ impl PlayerApp {
                 }
             } else if matches!(
                 self.output.snapshot().phase(),
-                OutputPhase::Ready | OutputPhase::Playing | OutputPhase::Paused
+                OutputPhase::Ready
+                    | OutputPhase::Playing
+                    | OutputPhase::Paused
+                    | OutputPhase::Ended
             ) {
                 self.pending_output_change = None;
             }
@@ -1861,8 +1924,11 @@ impl PlayerApp {
     )]
     fn draw_transport(&mut self, root: &mut egui::Ui) {
         let output_phase = self.output.snapshot().phase();
+        let retry_failed_decode =
+            self.decoder.snapshot().phase() == DecodePhase::Failed && self.has_selected_source();
         let can_toggle = self.output.snapshot().can_play()
-            || (output_phase == OutputPhase::Ended && self.has_selected_source());
+            || (output_phase == OutputPhase::Ended && self.has_selected_source())
+            || retry_failed_decode;
         let playing = self.output.snapshot().is_playing();
         let can_previous = self.can_select_neighbor(PlaylistStep::Previous);
         let can_next = self.can_select_neighbor(PlaylistStep::Next);
@@ -1986,6 +2052,9 @@ impl PlayerApp {
         match action {
             Some(TransportAction::Previous) => {
                 self.select_neighbor(PlaylistStep::Previous);
+            }
+            Some(TransportAction::Toggle) if retry_failed_decode => {
+                self.retry_current_source();
             }
             Some(TransportAction::Toggle) if output_phase == OutputPhase::Ended => {
                 self.replay_current_source();
@@ -2607,7 +2676,7 @@ fn decoder_status_line(decoder: &DecoderSnapshot) -> StatusLine {
             ))
         }
         DecodePhase::Failed => StatusLine::warning(format!(
-            "MacinDecode Core failed for {source}: {}",
+            "MacinDecode Core failed for {source}: {}. Press Play to retry from the beginning.",
             decoder.detail().unwrap_or("unknown decode error")
         )),
     }
@@ -3038,6 +3107,65 @@ fn draw_drop_overlay(context: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decode_failure_unlocks_output_settings_and_restores_the_previous_choice() {
+        let mut output = SpatialOutputController::new();
+        let previous = output.settings().clone();
+        let mut replacement = previous.clone();
+        replacement.native_device = OutputDeviceSelection::EndpointId("replacement".into());
+        output.install_settings(replacement.clone());
+        let mut pending = Some(previous.clone());
+        assert!(cancel_output_change_after_decode_failure(
+            &mut output,
+            &mut pending
+        ));
+        assert!(pending.is_none());
+        assert!(!output.settings_pending());
+        assert_eq!(output.settings(), &previous);
+        output.hot_settings(replacement.clone());
+        assert_eq!(output.take_settings_result(), Some(Ok(())));
+        assert_eq!(output.settings(), &replacement);
+        assert!(!cancel_output_change_after_decode_failure(
+            &mut output,
+            &mut pending
+        ));
+        assert_eq!(
+            output.settings(),
+            &replacement,
+            "later failed-state polls must preserve a new user choice"
+        );
+    }
+
+    #[cfg(macinrender_output)]
+    #[test]
+    fn decode_failure_discards_a_preparation_that_has_not_handed_off() {
+        let mut output = SpatialOutputController::new();
+        let previous = output.settings().clone();
+        output
+            .prepare_settings(
+                OutputSettings {
+                    mode: SpatialBackendKind::SafBinaural,
+                    sofa: "missing-decode-recovery-test.sofa".into(),
+                    null_output: true,
+                    ..previous.clone()
+                },
+                48_000,
+                1,
+                0,
+            )
+            .unwrap();
+        let mut pending = None;
+        assert!(output.settings_pending());
+        assert!(cancel_output_change_after_decode_failure(
+            &mut output,
+            &mut pending
+        ));
+        assert!(!output.settings_pending());
+        assert!(output.take_prepared_settings(1, 0).is_none());
+        output.poll();
+        assert_eq!(output.settings(), &previous);
+    }
 
     #[test]
     #[cfg(all(feature = "decode", not(spatial_output)))]
