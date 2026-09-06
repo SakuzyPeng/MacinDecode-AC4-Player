@@ -3,6 +3,8 @@
 #![allow(clippy::missing_errors_doc, clippy::missing_panics_doc)]
 
 mod api;
+#[cfg(target_os = "macos")]
+pub mod atmos;
 pub mod motion;
 mod raw;
 

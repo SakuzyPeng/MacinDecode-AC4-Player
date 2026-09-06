@@ -26,6 +26,8 @@ struct Preparation {
 }
 
 pub struct SpatialOutputController {
+    #[cfg(all(target_os = "macos", macinrender_output))]
+    atmos: super::atmos::AtmosController,
     legacy: NativeOutputController,
     settings: OutputSettings,
     snapshot: OutputSnapshot,
@@ -65,6 +67,8 @@ impl SpatialOutputController {
             legacy.snapshot().clone()
         };
         Self {
+            #[cfg(all(target_os = "macos", macinrender_output))]
+            atmos: super::atmos::AtmosController::default(),
             legacy,
             settings: OutputSettings::default(),
             snapshot,
@@ -109,6 +113,8 @@ impl SpatialOutputController {
         self.legacy
             .set_preferred_device(self.settings.native_device.clone());
         self.configure_head();
+        #[cfg(all(target_os = "macos", macinrender_output))]
+        self.poll_atmos();
     }
     /// A same-format renderer change is committed only after native preparation succeeds.
     pub fn hot_settings(&mut self, settings: OutputSettings) {
@@ -258,6 +264,8 @@ impl SpatialOutputController {
             if self.config.as_ref() == Some(config) {
                 return;
             }
+            #[cfg(target_os = "macos")]
+            self.atmos.reset();
             self.legacy.reset();
             self.runtime = None;
             self.head.set_target(None);
@@ -291,6 +299,8 @@ impl SpatialOutputController {
         self.configure_head();
     }
     pub fn reset(&mut self) {
+        #[cfg(all(target_os = "macos", macinrender_output))]
+        self.atmos.reset();
         #[cfg(macinrender_output)]
         {
             self.head.set_target(None);
@@ -346,8 +356,34 @@ impl SpatialOutputController {
         } else {
             self.legacy.snapshot().clone()
         };
+        #[cfg(all(target_os = "macos", macinrender_output))]
+        let snapshot = {
+            let mut snapshot = snapshot;
+            snapshot
+                .atmos_assist
+                .clone_from(&self.snapshot.atmos_assist);
+            snapshot
+        };
         if snapshot != self.snapshot {
             self.snapshot = snapshot;
+            self.revision += 1;
+        }
+        #[cfg(all(target_os = "macos", macinrender_output))]
+        self.poll_atmos();
+    }
+    #[cfg(all(target_os = "macos", macinrender_output))]
+    fn poll_atmos(&mut self) {
+        let eligible = self.settings.atmos_label_assist
+            && self.settings.atmos_label_applicable()
+            && !self.snapshot.preview;
+        let status = self.atmos.update(
+            eligible,
+            self.playing,
+            self.snapshot.phase,
+            self.snapshot.playhead_frames,
+        );
+        if self.snapshot.atmos_assist.as_ref() != Some(&status) {
+            self.snapshot.atmos_assist = Some(status);
             self.revision += 1;
         }
     }
@@ -368,6 +404,8 @@ impl SpatialOutputController {
     }
     pub fn pause(&mut self) {
         self.playing = false;
+        #[cfg(all(target_os = "macos", macinrender_output))]
+        self.atmos.pause();
         #[cfg(macinrender_output)]
         if let Some(runtime) = &self.runtime {
             runtime.play(false);
@@ -488,6 +526,29 @@ impl Default for SpatialOutputController {
 #[cfg(all(test, macinrender_output))]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn auxiliary_failure_does_not_fail_or_rewind_primary_playback() {
+        let mut output = SpatialOutputController::new();
+        output.settings.mode = SpatialBackendKind::SystemSpatial;
+        output.playing = true;
+        output.snapshot.phase = OutputPhase::Playing;
+        output.snapshot.playhead_frames = 48_000;
+        output.atmos =
+            super::super::atmos::AtmosController::failed_for_test("injected tap failure");
+        output.poll_atmos();
+        assert_eq!(output.snapshot.phase, OutputPhase::Playing);
+        assert_eq!(output.snapshot.playhead_frames, 48_000);
+        assert!(output.snapshot.error.is_none());
+        assert!(
+            output
+                .snapshot
+                .atmos_assist_status()
+                .unwrap()
+                .contains("injected tap failure")
+        );
+    }
     use crate::decoder::{
         DecodedSceneBlock, PlaybackKey, SceneObjectPcm, SceneSignature, SpatialObjectState,
         SpatialPosition, scene_queue_pair,

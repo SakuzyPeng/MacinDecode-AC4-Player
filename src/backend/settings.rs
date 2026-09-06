@@ -47,6 +47,7 @@ pub struct OutputSettings {
     pub mode: SpatialBackendKind,
     pub layout: SpeakerLayout,
     pub split_lfe: bool,
+    pub atmos_label_assist: bool,
     pub sofa: String,
     pub native_device: OutputDeviceSelection,
     pub stereo_device: OutputDeviceSelection,
@@ -60,6 +61,7 @@ impl Default for OutputSettings {
             mode: SpatialBackendKind::Automatic,
             layout: SpeakerLayout::default(),
             split_lfe: true,
+            atmos_label_assist: true,
             sofa: String::new(),
             native_device: OutputDeviceSelection::SystemDefault,
             stereo_device: OutputDeviceSelection::SystemDefault,
@@ -68,6 +70,18 @@ impl Default for OutputSettings {
     }
 }
 impl OutputSettings {
+    #[cfg_attr(not(all(target_os = "macos", macinrender_output)), allow(dead_code))]
+    pub fn atmos_label_applicable(&self) -> bool {
+        #[cfg(test)]
+        if self.null_output {
+            return false;
+        }
+        self.mode.resolved() == SpatialBackendKind::SystemSpatial
+            && matches!(
+                self.layout,
+                SpeakerLayout::SevenOneFour | SpeakerLayout::NineOneSix
+            )
+    }
     pub fn validated(mut self) -> Self {
         if !self.mode.supported() {
             self.mode = SpatialBackendKind::Automatic;
@@ -122,5 +136,26 @@ mod tests {
             ["7.1.4", "9.1.6", "22.2"]
         );
         assert!(serde_json::from_str::<SpeakerLayout>("\"5.1\"").is_err());
+    }
+
+    #[test]
+    fn old_settings_enable_assist_and_toggle_does_not_rebuild_audio() {
+        let before: OutputSettings = serde_json::from_str("{}").unwrap();
+        assert!(before.atmos_label_assist);
+        let mut after = before.clone();
+        after.atmos_label_assist = false;
+        assert!(!before.needs_rebuild(&after));
+        let saved = serde_json::to_string(&after).unwrap();
+        assert!(
+            !serde_json::from_str::<OutputSettings>(&saved)
+                .unwrap()
+                .atmos_label_assist
+        );
+        after.mode = SpatialBackendKind::SystemSpatial;
+        after.layout = SpeakerLayout::TwentyTwoTwo;
+        assert!(!after.atmos_label_applicable());
+        after.layout = SpeakerLayout::NineOneSix;
+        assert!(after.atmos_label_applicable());
+        assert!(!after.atmos_label_assist);
     }
 }

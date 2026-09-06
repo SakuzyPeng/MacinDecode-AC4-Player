@@ -1401,6 +1401,13 @@ impl PlayerApp {
                                     });
                             });
                             ui.label("Apple speaker geometry · system default output");
+                            #[cfg(all(target_os = "macos", macinrender_output))]
+                            {
+                                let applicable = settings.atmos_label_applicable();
+                                ui.add_enabled(applicable, egui::Checkbox::new(
+                                    &mut settings.atmos_label_assist, "Control Center Atmos label"
+                                )).on_hover_text("Available for 7.1.4 and 9.1.6 system spatial output. Changes system content identification; AC-4 audio rendering stays the same.");
+                            }
                             if settings.layout == SpeakerLayout::TwentyTwoTwo {
                                 ui.horizontal(|ui| {
                                     ui.label("LFE routing");
@@ -3077,6 +3084,12 @@ fn draw_diagnostics_content(
                         );
                         ui.separator();
                         key_value(ui, "Underruns", &output.underruns().to_string());
+                        #[cfg(all(target_os = "macos", macinrender_output))]
+                        if let Some(status) = output.atmos_assist_status() {
+                            ui.separator();
+                            ui.label(RichText::new("Atmos label helper").size(11.0).color(theme::MUTED));
+                            ui.add(egui::Label::new(RichText::new(status).size(11.0).color(theme::TEXT)).wrap());
+                        }
                     });
                     ui.add_space(12.0);
                     ui.label(

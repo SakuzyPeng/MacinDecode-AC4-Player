@@ -1,0 +1,14 @@
+{
+  "asset": "atmos-assist.m4a",
+  "sha256": "b4a655f657abecc1568c5e03ff6607fe5d28e19474d99adf04e13aed9904f9d0",
+  "bytes": 1441513,
+  "source": "Procedurally generated 997 Hz sine at -30 dBFS, one moving ADM object; no third-party audio",
+  "source_duration_seconds": 30,
+  "encoded_duration_seconds": 30.016,
+  "sample_rate": 48000,
+  "bit_rate": 384000,
+  "codec": "E-AC-3/JOC",
+  "source_generator": "scripts/generate-atmos-assist.py",
+  "processing": "ADM -> MacinRender Release SAF/Apple geometry 7.1.4 i24 WAVE -> DME 5.7.2 cbi_wav 384 kbps -> FFmpeg stream copy MP4",
+  "license": "MIT"
+}

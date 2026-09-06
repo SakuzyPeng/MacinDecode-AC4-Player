@@ -4,6 +4,8 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(all(target_os = "macos", macinrender_output))]
+mod atmos;
 mod controller;
 #[cfg(macinrender_output)]
 mod macinrender;
@@ -167,6 +169,8 @@ enum OutputClock {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutputSnapshot {
+    #[cfg(all(target_os = "macos", macinrender_output))]
+    atmos_assist: Option<String>,
     queued_output_frames: Option<u64>,
     buffering: bool,
     clock: OutputClock,
@@ -192,8 +196,15 @@ pub struct OutputSnapshot {
 }
 
 impl OutputSnapshot {
+    #[cfg(all(target_os = "macos", macinrender_output))]
+    pub fn atmos_assist_status(&self) -> Option<&str> {
+        self.atmos_assist.as_deref()
+    }
+
     fn idle() -> Self {
         Self {
+            #[cfg(all(target_os = "macos", macinrender_output))]
+            atmos_assist: None,
             queued_output_frames: None,
             buffering: false,
             clock: OutputClock::Unknown,

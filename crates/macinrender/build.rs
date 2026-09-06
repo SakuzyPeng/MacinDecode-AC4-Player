@@ -21,6 +21,9 @@ fn main() {
     if os != "macos" && os != "windows" {
         return;
     }
+    if os == "macos" {
+        compile_atmos_assist();
+    }
     println!("cargo:rustc-cfg=native_macinrender");
     let out = PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("native");
     let mut configure = Command::new("cmake");
@@ -101,6 +104,28 @@ fn main() {
         .include(PathBuf::from(&source).join("include"))
         .include(PathBuf::from(source).join("gui/native"))
         .compile("macinrender_abi_probe");
+}
+
+fn compile_atmos_assist() {
+    println!("cargo:rerun-if-changed=../../assets/audio/atmos-assist.m4a");
+    cc::Build::new()
+        .cpp(true)
+        .std("c++17")
+        .flag("-fobjc-arc")
+        .flag("-fblocks")
+        .flag("-mmacosx-version-min=14.0")
+        .file("native/atmos_assist.mm")
+        .compile("macindecode_atmos_assist");
+    for framework in [
+        "AVFoundation",
+        "Foundation",
+        "MediaToolbox",
+        "CoreMedia",
+        "AudioToolbox",
+        "CoreAudio",
+    ] {
+        println!("cargo:rustc-link-lib=framework={framework}");
+    }
 }
 
 fn stage_openblas_runtime(destination: &std::path::Path) {

@@ -14,6 +14,31 @@ Player 将 AC-4 Core 的 Scene 转换为 renderer-native Scene，经 MacinRender
 - 软件朝向在 Mac 优先使用 AirPods，缺失或权限不可用时使用手动朝向；Windows 使用手动朝向。
   系统空间音频模式保持上游中性姿态，macOS 的系统头追由系统负责。
 
+## macOS 控制中心 Atmos 标识辅助
+
+`atmos_label_assist` 默认开启并随音频设置持久化，仅在 macOS 系统空间音频的 7.1.4、
+9.1.6 中生效。22.2 和软件双耳不启动辅助链，切回适用布局会恢复用户保存的选择。
+开关热切换不重建 AC-4 解码器或主音频输出。
+
+播放器在确认主音频呈现位置推进后，在同一进程启动公开 AVFoundation API 构建的静音
+AVQueuePlayer。每个播放项独立安装 post-effects MTAudioProcessingTap，正常及错误路径
+均清零输出；辅助链不消费 Scene FIFO，也不向 ASBR 传递音频。两个播放项循环使用内置
+自制 JOC 文件，来源与摘要见 `assets/audio/`。编码器不是构建或运行依赖。
+
+辅助状态由 SpatialOutputController 管理；准备备用输出不会启动辅助播放。暂停会释放辅助
+播放项，因为单独 AVQueuePlayer.pause() 的实测仍会触发 tap 取样；恢复时重新建立辅助链。
+seek、换曲、输出重建、结束及禁用会取消旧 generation，延迟完成的加载不能重新启动旧链。
+默认输出设备改变后等待主 PCM 再次推进，再重建辅助链。辅助错误只显示在诊断中，不改变
+主回放的成功/失败状态；本轮不自动重试，下一会话、设备变化或用户重新启用时再尝试。
+
+原生代码静态链接在播放器自身的桥接 crate 中，不改变上游 MacinRender 公共 C ABI。
+原生控制在主队列执行；Rust 析构只排入异步清理，不等待主队列。诊断的 Active 指辅助链
+运行状态，并非对控制中心显示文字的自动检测。
+
+`bash scripts/test-atmos-assist.sh 610` 验证真实原生加载、故障注入、异步取消、暂停恢复、
+超过 20 次循环以及 30 次重启后的资源回收。实际系统标识、听感和设备切换需在正式 `.app`
+和对应耳机上另外验证。
+
 ## 时间线与线程
 
 Scene FIFO 始终只有一个消费者。软件渲染路径由独立 producer 线程提交 PCM，保留有界的纯元数据
