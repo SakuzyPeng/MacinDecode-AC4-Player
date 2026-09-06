@@ -75,6 +75,10 @@ def main():
     args = parser.parse_args()
     native = cargo_native(args.target_dir)
     extra_build_info = {}
+    core_revisions = set(re.findall(
+        r'^source = "git\+https://github\.com/SakuzyPeng/MacinDecode-AC4-Core\.git[^\"]*#([0-9a-f]{40})"$',
+        (ROOT / "Cargo.lock").read_text(), flags=re.MULTILINE))
+    extra_build_info["ac4_core_commit"] = next(iter(core_revisions)) if len(core_revisions) == 1 else None
     args.output.mkdir(parents=True, exist_ok=True)
     if sys.platform == "darwin":
         package = args.output / "MacinDecode AC-4 Player.app"

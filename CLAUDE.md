@@ -55,7 +55,7 @@ endpoint. Real media goes only in the gitignored `.local-test-media/`, never in 
 
 ```bat
 cargo test decoder::worker::tests::decodes_local_media_into_a_bounded_scene_buffer -- --ignored
-cargo test decoder::worker::tests::seeks_real_media_across_epochs_without_rereading_the_file -- --ignored
+cargo test decoder::worker::tests::seeks_real_media_across_epochs_on_the_open_file -- --ignored
 cargo test backend::windows::tests::submits_decoded_scene_to_windows_spatial_audio -- --ignored
 cargo test -p macindecode-windows-spatial-audio ended_renderer_releases_objects_without_entering_failed_state -- --ignored
 ```
@@ -92,9 +92,10 @@ Any new asynchronous path must carry and check a key.
 ### Bounded Scene FIFO
 
 `SharedSceneQueue` holds at most `MAX_BUFFER_SECONDS` (2 s) of decoded per-channel frames;
-`PREBUFFER_MILLISECONDS` (300 ms) is enough to reach Ready. Compressed bytes are read once and held
-by the request — seek, replay, device recovery, and topology rebuild never touch the disk again, so
-external edits to the active file are invisible until it is reselected.
+`PREBUFFER_MILLISECONDS` (300 ms) is enough to reach Ready. Compressed packets are read on demand through a retained file handle with per-worker 256 KiB
+buffers. MP4 metadata is shared and capped at 64 MiB; the sparse seek index holds at most 8192 safe
+points. Seek and replay reuse the handle without reopening the path. Detectable in-place file
+changes stop playback; the file must then be removed and added again.
 
 ### Core type isolation
 

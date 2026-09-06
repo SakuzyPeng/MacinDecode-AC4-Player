@@ -1109,7 +1109,7 @@ impl DecoderController {
         PlaybackKey::new(self.request_id, self.playback_epoch)
     }
 
-    /// Starts a new playback epoch at an absolute presentation frame without rereading the file.
+    /// Starts a new playback epoch at an absolute presentation frame using the retained open file and metadata.
     ///
     /// # Errors
     ///
@@ -1179,7 +1179,7 @@ impl DecoderController {
     }
 
     /// Retry a failed decode from the beginning without requiring valid seek metrics.
-    /// The worker retains the loaded bytes/index and creates a fresh Core session.
+    /// The worker retains the open file/index and creates a fresh Core session.
     ///
     /// # Errors
     /// Returns an error when decoding has not failed, no source is active, or the worker is unavailable.

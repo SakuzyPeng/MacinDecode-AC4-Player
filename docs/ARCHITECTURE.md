@@ -48,10 +48,10 @@ GUI、播放协调器和解码适配器均留在 Rust 进程内，直接依赖
   `/STACK:8000000` 隐式满足，换个平台就没了，所以要求必须写在代码里；
 - `decoder::worker` 把 Core 的借用 Scene view 复制为播放器自有的对象/LFE PCM、稳定元素 ID、
   起点状态与 ramp 更新，Core 类型不会越过该适配边界；
-- `media::MediaSource` 为当前选择建立不可变的文件快照；inspection 和 decode worker 共享一次读取与同一份
-  `Arc<Vec<u8>>`，`OnceLock` 只在工作线程上等待读盘，不等待检查解析结束、不阻塞 GUI。换源建立新快照，
-  seek 与重播沿用已加载字节；纯检查构建在检查完成后释放压缩字节。初始顺序解码立即开始，独立 worker 并行建立 AU 时间线
-  与 Full random-access 索引；
+- `media::MediaSource` 为当前选择延迟打开一次文件，并通过 `OnceLock` 共享文件句柄和 `moov`；
+  inspection、index 和 decode 各自使用独立游标与 256 KiB 缓冲，只有实际定位读盘共享短锁。
+  文件 I/O 全部在工作线程上执行。换源创建新句柄，seek 与重播沿用原句柄；纯检查构建在报告完成后释放句柄。
+  初始顺序解码不等待扫描结束，独立 worker 并行建立 Full random-access 索引；
 - Scene FIFO 最多保存 2 秒 PCM，300 ms 即可进入 ready。切换来源递增 request ID，seek、重播和
   自动恢复递增 playback epoch；组合 key 使旧 worker 输出无法重新进入当前来源；
 - `backend::source` 在任意 Windows render quantum 上消费 Scene FIFO，裁剪负时间和重叠、为空隙补零，
@@ -73,9 +73,17 @@ GUI、播放协调器和解码适配器均留在 Rust 进程内，直接依赖
 要重新过一遍拖拽时同样的限幅。这一层是承重的——非有限的仰角会把 NaN 顺着视图矩阵带进场景里的每
 一个顶点，而 `f32::clamp` 对 NaN 是直接放行的。
 
-Core 的 MP4 入口当前要求完整文件切片，因此 decode worker 会先把压缩源读入内存；有界约束针对
-解码后的对象 PCM。后续若 Core 增加 seekable source API，可替换容器读取层而不改变 Scene FIFO
-或平台后端契约。
+Core 的 `Ac4Mp4Metadata` 只借用 `moov`，复用完整文件入口的轨道、DSI、sample-description 和时间线校验；
+`std` reader 跳过 `mdat`，按描述符读取单个 AU。Annex G 同样使用有界 sync-frame 缓冲，并保留 CRC 检查。
+MP4 元数据最多 64 MiB，packet 最多约 16 MiB；正常文件只占用实际元数据与 packet 大小，文件偏移始终为 `u64`。
+
+索引只保存同时满足容器 sync 与 Core Full random access 的起点（裸流只检查后者），最多 8192 点。
+达到上限后逐级抽稀，并保留首点、最小呈现时间点和末点；允许从更早安全点预卷，精确目标与失败回退语义不变。
+MP4 seek 重走紧凑 sample table 到目标 AU，不保存第二份逐 AU 大表；raw seek 直接定位到 sync header。
+
+文件句柄保持原文件实体，因此改名、路径替换或删除不要求重新打开路径。Windows 允许共享读与删除，拒绝共享写；
+每次实际读盘前后检查文件长度和修改时间，检测到就地改写则报错，避免继续拼接变化的数据。整文件不可变字节快照已移除。
+检查工作在换源、重试或移除时取消，返回结果带请求 ID，过期结果不能完成新请求；逐帧问题明细上限 1024 条并报告省略数量。
 
 ## 场景图形资源
 
