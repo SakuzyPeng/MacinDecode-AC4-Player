@@ -37,7 +37,9 @@ GUI、播放协调器和解码适配器均留在 Rust 进程内，直接依赖
 `backend::macinrender` producer。后者是 Scene FIFO 的唯一消费者；元数据历史不保留 PCM，
 由输出设备的呈现时钟驱动画面。独立 HRTF 加载线程不阻塞 producer 或状态查询。
 
-- `model` 校验用户选择的媒体路径并保存壳层状态；
+- `model` 校验媒体路径；`playlist` 定义稳定的媒体、列表和条目 ID、浏览状态与播放游标；
+- `library` 的独立工作线程持有 SQLite 连接，以事务提交列表操作并发布浏览/播放列表的共享快照；
+  `preferences` 管理版本化 JSON、原子替换、备份与应用数据目录锁，详见 [播放列表与持久化](PLAYLISTS.md)；
 - `inspection` 在单独线程调用 `macindecode-ac4-inspect`，缓存 owned report，不阻塞 GUI；
 - `decoder` 在单独线程组合 `macindecode-ac4-mp4`、
   `macindecode-ac4-bitstream` 与 `macindecode-ac4-scene(audio-decode)`；该线程**显式**申请 16 MiB 栈。
@@ -67,8 +69,8 @@ GUI、播放协调器和解码适配器均留在 Rust 进程内，直接依赖
 - `app` 连接上一曲/下一曲、顺序/单曲循环/列表循环/随机播放、Play/Pause、精确 seek、持久化设备
   选择与持久化相机视角、断开回退/恢复、拓扑自动重建、音量/静音和真实输出诊断。
 
-`app` 存进 `eframe` 存档的两样东西——输出设备选择和相机视角——都在**读回时**做校验，而不是假定
-文件是自己写的。存档是一个纯文本 JSON，可能来自旧版本、也可能被手改过。相机因此不直接 serde
+输出设备选择和相机视角在 `settings.json` 中保存，并在**读回时**做校验，而不是假定
+文件是自己写的。旧 eframe RON 业务键仅作为首次迁移来源。相机不直接 serde
 `Camera` 本身，而是过一层 `CameraState` 快照：预设缓动属于会话内状态，不该落盘；读回时每个字段都
 要重新过一遍拖拽时同样的限幅。这一层是承重的——非有限的仰角会把 NaN 顺着视图矩阵带进场景里的每
 一个顶点，而 `f32::clamp` 对 NaN 是直接放行的。

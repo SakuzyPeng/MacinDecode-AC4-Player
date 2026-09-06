@@ -4,8 +4,9 @@ use std::path::{Path, PathBuf};
 
 const SUPPORTED_EXTENSIONS: [&str; 3] = ["m4a", "mp4", "ac4"];
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SelectedSource {
+    #[serde(with = "crate::playlist::native_path")]
     path: PathBuf,
     display_name: String,
 }
@@ -17,10 +18,10 @@ impl SelectedSource {
         }
         let display_name = path
             .file_name()
-            .and_then(OsStr::to_str)
             .filter(|name| !name.is_empty())
             .ok_or(SourceSelectionError::MissingFileName)?
-            .to_owned();
+            .to_string_lossy()
+            .into_owned();
         Ok(Self { path, display_name })
     }
 

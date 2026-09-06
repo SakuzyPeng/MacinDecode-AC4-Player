@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -57,6 +57,7 @@ pub struct InspectionController {
     request_sender: Option<Sender<InspectionRequest>>,
     result_receiver: Receiver<InspectionResult>,
     states: HashMap<PathBuf, InspectionState>,
+    recent: VecDeque<PathBuf>,
     startup_error: Option<String>,
     next_id: u64,
     pending: Option<PendingRequest>,
@@ -75,6 +76,7 @@ impl InspectionController {
                 request_sender: Some(request_sender),
                 result_receiver,
                 states: HashMap::new(),
+                recent: VecDeque::new(),
                 startup_error: None,
                 next_id: 0,
                 pending: None,
@@ -83,15 +85,12 @@ impl InspectionController {
                 request_sender: None,
                 result_receiver,
                 states: HashMap::new(),
+                recent: VecDeque::new(),
                 startup_error: Some(format!("Failed to start inspection worker: {error}")),
                 next_id: 0,
                 pending: None,
             },
         }
-    }
-
-    pub fn ensure_requested(&mut self, path: &Path) {
-        self.ensure_requested_source(MediaSource::new(path));
     }
 
     pub fn ensure_requested_source(&mut self, source: MediaSource) {
@@ -104,8 +103,10 @@ impl InspectionController {
             self.cancel_pending();
         }
         if self.states.contains_key(path) {
+            self.touch(path);
             return;
         }
+        self.touch(path);
 
         let owned_path = path.to_path_buf();
         let Some(sender) = self.request_sender.as_ref() else {
@@ -146,6 +147,11 @@ impl InspectionController {
     }
 
     pub fn retry(&mut self, path: &Path) {
+        self.retry_source(MediaSource::new(path));
+    }
+
+    pub fn retry_source(&mut self, source: MediaSource) {
+        let path = source.path();
         if self
             .pending
             .as_ref()
@@ -154,7 +160,7 @@ impl InspectionController {
             self.cancel_pending();
         }
         self.states.remove(path);
-        self.ensure_requested(path);
+        self.ensure_requested_source(source);
     }
 
     pub fn poll(&mut self) {
@@ -175,21 +181,18 @@ impl InspectionController {
         }
     }
 
-    pub fn state(&self, path: &Path) -> Option<&InspectionState> {
-        self.states.get(path)
+    fn touch(&mut self, path: &Path) {
+        self.recent.retain(|entry| entry != path);
+        self.recent.push_back(path.to_path_buf());
+        while self.recent.len() > 16 {
+            if let Some(old) = self.recent.pop_front() {
+                self.states.remove(&old);
+            }
+        }
     }
 
-    pub fn retain_paths<'a>(&mut self, paths: impl IntoIterator<Item = &'a Path>) {
-        let retained = paths.into_iter().map(Path::to_path_buf).collect::<Vec<_>>();
-        if self
-            .pending
-            .as_ref()
-            .is_some_and(|pending| !retained.contains(&pending.path))
-        {
-            self.cancel_pending();
-        }
-        self.states
-            .retain(|path, _state| retained.iter().any(|candidate| candidate == path));
+    pub fn state(&self, path: &Path) -> Option<&InspectionState> {
+        self.states.get(path)
     }
 
     pub fn has_pending(&self) -> bool {
@@ -356,15 +359,16 @@ mod tests {
             request_sender: Some(requests),
             result_receiver: received,
             states: HashMap::new(),
+            recent: VecDeque::new(),
             startup_error: None,
             next_id: 0,
             pending: None,
         };
         let a = Path::new("first.ac4");
         let b = Path::new("second.ac4");
-        controller.ensure_requested(a);
+        controller.ensure_requested_source(MediaSource::new(a));
         let old = queued.recv().unwrap();
-        controller.ensure_requested(b);
+        controller.ensure_requested_source(MediaSource::new(b));
         let replaced = queued.recv().unwrap();
         assert!(old.cancel.load(Ordering::Acquire));
         assert!(controller.state(a).is_none());
@@ -448,7 +452,7 @@ mod tests {
             1
         ));
         let mut controller = InspectionController::new();
-        controller.ensure_requested(&path);
+        controller.ensure_requested_source(MediaSource::new(&path));
 
         let deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < deadline {

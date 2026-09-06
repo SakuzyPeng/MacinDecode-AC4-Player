@@ -6,7 +6,7 @@
 ## 使用
 
 1. 启动应用，点击添加文件或直接把文件拖入窗口。
-2. 从播放列表中选择要播放的内容。
+2. 在侧栏顶部选择或新建播放列表。单击歌曲查看信息，双击、Enter 或右键 Play 开始播放。
 3. 在 Audio settings 中选择播放模式；使用上一曲、下一曲、播放、暂停、进度跳转、音量和静音控制。
 4. 如需排查文件或播放问题，可打开详情与诊断窗口。
 
@@ -14,7 +14,10 @@
 
 ## 主要功能
 
-- 一次添加多个文件，并在播放列表中选择或移除内容。
+- 多播放列表支持新建、改名、删除与排序；歌曲支持 Ctrl/Cmd、Shift 多选、拖拽重排、跨列表复制或移动。
+- 浏览列表与当前播放独立；切换列表不打断声音，底部歌曲按钮可返回播放来源列表。
+- SQLite 自动保存列表和会话，JSON 保存用户设置；重新打开时恢复当前歌曲及断点并保持暂停。
+- 同一文件可加入多个列表，同列表自动去重；移除正在播放的条目后继续本曲，删除来源列表则本曲结束后停止。
 - 查看容器、节目、对象数量、低频声道和其他 AC-4 信息。
 - 在兼容的 Windows 音频设备上播放 Full A-JOC 空间音频，并记住所选设备。
 - macOS 默认通过 MacinRender 渲染多声道床，再交给系统空间音频；Windows 默认保留原始对象直通。
@@ -127,7 +130,7 @@ cargo test -p macindecode-windows-spatial-audio opens_enumerated_endpoints_by_st
 真实媒体应只放在仓库根目录被忽略的 `.local-test-media/`，不得提交到 Git。
 
 开发者文档：[架构](docs/ARCHITECTURE.md) · [Windows 解码](docs/WINDOWS_DECODE.md) ·
-[Windows Spatial Audio](docs/WINDOWS_SPATIAL_AUDIO.md)
+[Windows Spatial Audio](docs/WINDOWS_SPATIAL_AUDIO.md) · [播放列表与持久化](docs/PLAYLISTS.md)
 
 ## 许可证
 

@@ -22,6 +22,18 @@ struct SourceInner {
 }
 
 impl MediaSource {
+    pub(crate) fn cached_open_failed(&self) -> bool {
+        matches!(self.0.opened.get(), Some(Err(_)))
+    }
+    /// Read an already-opened file's identity without doing IO on the UI thread.
+    pub(crate) fn cached_stamp(&self) -> Option<FileStamp> {
+        self.0
+            .opened
+            .get()?
+            .as_ref()
+            .ok()
+            .map(|opened| opened.stamp.clone())
+    }
     #[must_use]
     pub fn new(path: &Path) -> Self {
         Self(Arc::new(SourceInner {
@@ -52,8 +64,8 @@ impl MediaSource {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct FileStamp {
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct FileStamp {
     length: u64,
     modified: SystemTime,
 }

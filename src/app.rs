@@ -16,8 +16,15 @@ use crate::decoder::{
     DecodeMetrics, DecodePhase, DecoderController, DecoderSnapshot, PREBUFFER_MILLISECONDS,
 };
 use crate::inspection::InspectionController;
+use crate::library::{LibraryController, Mutation};
 use crate::media::MediaSource;
 use crate::model::SelectedSource;
+use crate::playlist::{
+    BrowseState, EntryId, PlaybackCursor, PlaybackMode, PlaylistId, SavedBrowse, SessionState,
+};
+use crate::playlist_ui;
+use crate::preferences::{AppPreferences, DataDirectory};
+mod library_integration;
 use crate::scene3d;
 use crate::theme;
 
@@ -26,8 +33,24 @@ use crate::theme;
     reason = "independent UI toggles and pointer interaction flags are not one state machine"
 )]
 pub struct PlayerApp {
-    playlist: Vec<SelectedSource>,
-    selected_source: Option<usize>,
+    library: LibraryController,
+    browse: BrowseState,
+    cursor: Option<PlaybackCursor>,
+    playlist_ui: playlist_ui::State,
+    file_picker: Option<library_integration::FilePick>,
+    inspection_media: Option<MediaSource>,
+    preferences: AppPreferences,
+    preferences_observed: AppPreferences,
+    preferences_dirty_at: Option<Instant>,
+    browse_observed: SavedBrowse,
+    browse_dirty_at: Option<Instant>,
+    last_session_save: Instant,
+    last_saved_intent: bool,
+    checkpoint: SessionState,
+    resume: Option<SessionState>,
+    automatic_candidate: bool,
+    failed_candidates: std::collections::HashSet<EntryId>,
+    marked_failure_key: Option<(u64, u64)>,
     media_source: Option<MediaSource>,
     inspection: InspectionController,
     decoder: DecoderController,
@@ -41,7 +64,7 @@ pub struct PlayerApp {
     playback_restore_pending: bool,
     playback_intent: bool,
     playback_mode: PlaybackMode,
-    shuffle_history: Vec<usize>,
+    shuffle_history: Vec<EntryId>,
     shuffle_state: u64,
     automatic_reconfigure_guard: Option<(u64, u64)>,
     waiting_for_device: Option<DeviceWait>,
@@ -103,42 +126,6 @@ enum PlaylistStep {
     Next,
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-enum PlaybackMode {
-    #[default]
-    Sequential,
-    RepeatOne,
-    RepeatAll,
-    Shuffle,
-}
-
-impl PlaybackMode {
-    const ALL: [Self; 4] = [
-        Self::Sequential,
-        Self::RepeatOne,
-        Self::RepeatAll,
-        Self::Shuffle,
-    ];
-
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Sequential => "Sequential",
-            Self::RepeatOne => "Repeat one",
-            Self::RepeatAll => "Repeat all",
-            Self::Shuffle => "Shuffle",
-        }
-    }
-
-    const fn description(self) -> &'static str {
-        match self {
-            Self::Sequential => "Play the list once, then stop",
-            Self::RepeatOne => "Repeat the current item",
-            Self::RepeatAll => "Repeat the entire playlist",
-            Self::Shuffle => "Choose a different item at random",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DeviceWait {
     request_id: u64,
@@ -172,36 +159,6 @@ const fn output_sync_action(
 
 fn take_playback_restore(pending: &mut bool, playback_intent: bool) -> Option<bool> {
     std::mem::take(pending).then_some(playback_intent)
-}
-
-fn neighboring_source_index(
-    selected_source: Option<usize>,
-    item_count: usize,
-    step: PlaylistStep,
-) -> Option<usize> {
-    let selected = selected_source.filter(|index| *index < item_count)?;
-    match step {
-        PlaylistStep::Previous => selected.checked_sub(1),
-        PlaylistStep::Next => selected.checked_add(1).filter(|next| *next < item_count),
-    }
-}
-
-fn wrapped_source_index(
-    selected_source: Option<usize>,
-    item_count: usize,
-    step: PlaylistStep,
-) -> Option<usize> {
-    if item_count < 2 {
-        return None;
-    }
-    let selected = selected_source.filter(|index| *index < item_count)?;
-    Some(match step {
-        PlaylistStep::Previous => selected.checked_sub(1).unwrap_or(item_count - 1),
-        PlaylistStep::Next => selected
-            .checked_add(1)
-            .filter(|next| *next < item_count)
-            .unwrap_or(0),
-    })
 }
 
 fn shuffle_seed() -> u64 {
@@ -331,15 +288,34 @@ const fn should_replay_current_on_completion(mode: PlaybackMode, item_count: usi
 }
 
 impl PlayerApp {
-    pub fn new(creation_context: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(
+        creation_context: &eframe::CreationContext<'_>,
+        directory: Arc<DataDirectory>,
+    ) -> Self {
         theme::install(&creation_context.egui_ctx);
-        let preferred_device = creation_context
-            .storage
+        let scene_renderer_ready = creation_context
+            .wgpu_render_state
+            .as_ref()
+            .is_some_and(scene3d::gpu::SceneRenderer::install);
+        Self::from_storage(
+            &creation_context.egui_ctx,
+            creation_context.storage,
+            scene_renderer_ready,
+            directory,
+        )
+    }
+
+    fn from_storage(
+        context: &egui::Context,
+        storage: Option<&dyn eframe::Storage>,
+        scene_renderer_ready: bool,
+        directory: Arc<DataDirectory>,
+    ) -> Self {
+        let preferred_device = storage
             .and_then(|storage| eframe::get_value(storage, OUTPUT_DEVICE_STORAGE_KEY))
             .unwrap_or_default();
-        let mut output = SpatialOutputController::new();
-        let settings = creation_context
-            .storage
+        let output = SpatialOutputController::new();
+        let settings = storage
             .and_then(|storage| {
                 eframe::get_value::<OutputSettings>(storage, OUTPUT_SETTINGS_STORAGE_KEY)
             })
@@ -347,23 +323,39 @@ impl PlayerApp {
                 native_device: preferred_device,
                 ..Default::default()
             });
-        output.install_settings(settings);
         // A view angle is something the user worked to find; losing it on every
         // restart is a small tax on the whole point of a free camera.
-        let camera = creation_context
-            .storage
+        let camera = storage
             .and_then(|storage| eframe::get_value(storage, SCENE_CAMERA_STORAGE_KEY))
             .map_or_else(
                 scene3d::camera::Camera::default,
                 scene3d::camera::Camera::from_state,
             );
-        let scene_renderer_ready = creation_context
-            .wgpu_render_state
-            .as_ref()
-            .is_some_and(scene3d::gpu::SceneRenderer::install);
+        let preferences = AppPreferences {
+            output: settings.validated(),
+            camera: camera.state(),
+            ..Default::default()
+        };
+        let library = LibraryController::new(directory, preferences.clone(), context.clone());
         Self {
-            playlist: Vec::new(),
-            selected_source: None,
+            library,
+            browse: BrowseState::default(),
+            cursor: None,
+            playlist_ui: playlist_ui::State::default(),
+            file_picker: None,
+            inspection_media: None,
+            preferences_observed: preferences.clone(),
+            preferences,
+            preferences_dirty_at: None,
+            browse_observed: SavedBrowse::default(),
+            browse_dirty_at: None,
+            last_session_save: Instant::now(),
+            last_saved_intent: false,
+            checkpoint: SessionState::default(),
+            resume: None,
+            automatic_candidate: false,
+            failed_candidates: std::collections::HashSet::new(),
+            marked_failure_key: None,
             media_source: None,
             inspection: InspectionController::new(),
             decoder: DecoderController::new(),
@@ -400,131 +392,8 @@ impl PlayerApp {
         }
     }
 
-    fn choose_sources(&mut self) {
-        if let Some(paths) = rfd::FileDialog::new()
-            .set_title("Add AC-4 media to playlist")
-            .add_filter("AC-4 media", &["m4a", "mp4", "ac4"])
-            .pick_files()
-        {
-            self.append_sources(paths);
-        }
-    }
-
-    fn append_sources(&mut self, paths: impl IntoIterator<Item = PathBuf>) {
-        let mut added = 0;
-        let mut duplicates = 0;
-        let mut rejected = 0;
-
-        for path in paths {
-            match SelectedSource::from_path(path) {
-                Ok(source) => {
-                    if self
-                        .playlist
-                        .iter()
-                        .any(|item| item.path() == source.path())
-                    {
-                        duplicates += 1;
-                    } else {
-                        self.playlist.push(source);
-                        added += 1;
-                    }
-                }
-                Err(_) => rejected += 1,
-            }
-        }
-
-        if self.selected_source.is_none() && !self.playlist.is_empty() {
-            self.selected_source = Some(0);
-        }
-
-        if added > 0 {
-            let noun = if added == 1 { "file" } else { "files" };
-            self.status = StatusLine::ready(format!("Added {added} {noun} to the playlist"));
-        } else if duplicates > 0 && rejected == 0 {
-            self.status = StatusLine::idle("Selected files are already in the playlist");
-        } else if rejected > 0 {
-            self.status = StatusLine::warning("No supported AC-4 media was added");
-        }
-    }
-
-    fn select_source(&mut self, index: usize) {
-        if self.selected_source == Some(index) {
-            return;
-        }
-        self.shuffle_history.clear();
-        self.select_source_with_playback(index, false);
-    }
-
-    fn select_source_with_playback(&mut self, index: usize, playback_intent: bool) {
-        if self.selected_source == Some(index) {
-            return;
-        }
-        if let Some(source) = self.playlist.get(index) {
-            let name = source.display_name().to_owned();
-            self.output.pause();
-            self.output.reset();
-            self.pending_output_change = None;
-            self.audio_settings_error = None;
-            self.selected_source = Some(index);
-            self.timeline_preview = 0.0;
-            self.playback_intent = playback_intent;
-            self.playback_restore_pending = playback_intent;
-            self.automatic_reconfigure_guard = None;
-            self.waiting_for_device = None;
-            self.status = if playback_intent {
-                StatusLine::ready(format!(
-                    "Advancing to {name}; opening MacinDecode Core for playback"
-                ))
-            } else {
-                StatusLine::ready(format!("Selected {name}; opening MacinDecode Core"))
-            };
-        }
-    }
-
-    fn can_select_neighbor(&self, step: PlaylistStep) -> bool {
-        match (self.playback_mode, step) {
-            (PlaybackMode::RepeatAll, _) => {
-                wrapped_source_index(self.selected_source, self.playlist.len(), step).is_some()
-            }
-            (PlaybackMode::Shuffle, PlaylistStep::Previous) => !self.shuffle_history.is_empty(),
-            (PlaybackMode::Shuffle, PlaylistStep::Next) => {
-                self.playlist.len() > 1 && self.has_selected_source()
-            }
-            (PlaybackMode::Sequential | PlaybackMode::RepeatOne, _) => {
-                neighboring_source_index(self.selected_source, self.playlist.len(), step).is_some()
-            }
-        }
-    }
-
-    fn neighbor_for_playback_mode(&mut self, step: PlaylistStep) -> Option<usize> {
-        match (self.playback_mode, step) {
-            (PlaybackMode::RepeatAll, _) => {
-                wrapped_source_index(self.selected_source, self.playlist.len(), step)
-            }
-            (PlaybackMode::Shuffle, PlaylistStep::Previous) => self.shuffle_history.pop(),
-            (PlaybackMode::Shuffle, PlaylistStep::Next) => {
-                let current = self.selected_source?;
-                let next = shuffled_source_index(
-                    self.selected_source,
-                    self.playlist.len(),
-                    &mut self.shuffle_state,
-                )?;
-                self.shuffle_history.push(current);
-                Some(next)
-            }
-            (PlaybackMode::Sequential | PlaybackMode::RepeatOne, _) => {
-                neighboring_source_index(self.selected_source, self.playlist.len(), step)
-            }
-        }
-    }
-
-    fn select_neighbor(&mut self, step: PlaylistStep) {
-        if let Some(index) = self.neighbor_for_playback_mode(step) {
-            self.select_source_with_playback(index, self.playback_intent);
-        }
-    }
-
     fn replay_current_source(&mut self) {
+        self.resume = None;
         self.playback_intent = true;
         self.automatic_reconfigure_guard = None;
         self.waiting_for_device = None;
@@ -543,114 +412,12 @@ impl PlayerApp {
     }
 
     fn retry_current_source(&mut self) {
-        match self.decoder.retry() {
-            Ok(()) => {
-                self.output.pause();
-                self.output.reset();
-                self.timeline_preview = 0.0;
-                self.timeline_dragging = false;
-                self.playback_intent = true;
-                self.playback_restore_pending = true;
-                self.pending_output_change = None;
-                self.automatic_reconfigure_guard = None;
-                self.waiting_for_device = None;
-                self.status = StatusLine::idle("Retrying playback from the beginning");
-            }
-            Err(error) => self.status = StatusLine::warning(error),
-        }
-    }
-
-    fn handle_completed_playlist_item(
-        &mut self,
-        context: &egui::Context,
-        output_matches_decoder: bool,
-    ) -> bool {
-        if !should_handle_completed_item(
-            self.output.snapshot().phase(),
-            self.playback_intent,
-            output_matches_decoder,
-        ) {
-            return false;
-        }
-        if should_replay_current_on_completion(self.playback_mode, self.playlist.len()) {
-            self.replay_current_source();
-            context.request_repaint();
-            return true;
-        }
-        if let Some(index) = self.neighbor_for_playback_mode(PlaylistStep::Next) {
-            self.select_source_with_playback(index, true);
-            context.request_repaint();
-            return true;
-        }
-
-        self.playback_intent = false;
-        self.playback_restore_pending = false;
-        false
-    }
-
-    fn remove_selected_source(&mut self) {
-        let Some(index) = self.selected_source else {
-            return;
-        };
-        let removed = self.playlist.remove(index);
-
-        if self.playlist.is_empty() {
-            self.selected_source = None;
-            self.status = StatusLine::idle("Add or drop AC-4 media files");
-        } else {
-            self.selected_source = Some(index.min(self.playlist.len() - 1));
-            self.status = StatusLine::idle(format!(
-                "Removed {} from the playlist",
-                removed.display_name()
-            ));
-        }
-        self.timeline_preview = 0.0;
-        self.playback_intent = false;
-        self.playback_restore_pending = false;
-        self.automatic_reconfigure_guard = None;
-        self.waiting_for_device = None;
-        self.output.pause();
-        self.output.reset();
-        self.pending_output_change = None;
-        self.audio_settings_error = None;
-        self.shuffle_history.clear();
-        self.inspection
-            .retain_paths(self.playlist.iter().map(SelectedSource::path));
-        if self.selected_source.is_none() {
-            self.bitstream_details_open = false;
-        }
-    }
-
-    fn has_selected_source(&self) -> bool {
-        self.selected_source
-            .is_some_and(|index| index < self.playlist.len())
-    }
-
-    fn selected_source(&self) -> Option<&SelectedSource> {
-        self.selected_source
-            .and_then(|index| self.playlist.get(index))
-    }
-
-    fn selected_path(&self) -> Option<&Path> {
-        self.selected_source().map(SelectedSource::path)
-    }
-
-    fn selected_media(&mut self) -> Option<MediaSource> {
-        let path = self.selected_path();
-        // The inspection-only shell has no consumer that needs to replay the
-        // source. Let the inspection worker release its bytes with the report.
-        if !cfg!(feature = "decode") {
-            return path.map(MediaSource::new);
-        }
-        if self.media_source.as_ref().map(MediaSource::path) != path {
-            self.media_source = path.map(MediaSource::new);
-        }
-        self.media_source.clone()
+        self.retry_playback();
     }
 
     fn sync_inspection(&mut self, context: &egui::Context) {
         self.inspection.poll();
-        if let Some(source) = self.selected_media() {
+        if let Some(source) = self.browsed_media() {
             self.inspection.ensure_requested_source(source);
         } else {
             self.bitstream_details_open = false;
@@ -661,7 +428,7 @@ impl PlayerApp {
     }
 
     fn sync_decoder(&mut self, context: &egui::Context) {
-        if let Some(source) = self.selected_media() {
+        if let Some(source) = self.playback_media() {
             self.decoder.ensure_open_source(&source);
         } else {
             self.decoder.close();
@@ -681,7 +448,6 @@ impl PlayerApp {
         reason = "output synchronization keeps decode, device, renderer, and UI revisions atomic"
     )]
     fn sync_output(&mut self, context: &egui::Context, showing: bool) {
-        self.poll_sofa_picker(context);
         let request_id = self.decoder.request_id();
         let playback_epoch = self.decoder.playback_epoch();
         let master_gain = if self.muted { 0.0 } else { self.volume };
@@ -698,6 +464,9 @@ impl PlayerApp {
                     "The audio settings change was cancelled after a decode failure; previous settings were retained.".into(),
                 );
             }
+            if self.handle_media_failure(context) {
+                return;
+            }
             self.playback_intent = false;
             self.playback_restore_pending = false;
             self.automatic_reconfigure_guard = None;
@@ -710,6 +479,7 @@ impl PlayerApp {
             return;
         }
         self.output.poll();
+        self.clear_successful_media_error();
         #[cfg(macinrender_output)]
         if self.finish_output_preparation(context) {
             return;
@@ -1523,9 +1293,11 @@ impl PlayerApp {
         self.change_output_settings(settings, context);
         if let Some(angles) = manual {
             self.output.manual_head(angles);
+            self.preferences.manual_head = angles;
         }
         if recenter {
             self.output.recenter_head();
+            self.preferences.manual_head = [0.0; 3];
         }
     }
 
@@ -1559,8 +1331,7 @@ impl PlayerApp {
                         .layout(Layout::top_down(Align::Min)),
                     |ui| {
                         section_title(ui, "SOURCE");
-                        let playlist_height = (ui.available_height() - 124.0).max(72.0);
-                        card(ui, |ui| self.draw_source_card(ui, playlist_height));
+                        card(ui, |ui| self.draw_source_card(ui));
                     },
                 );
                 ui.scope_builder(
@@ -1580,34 +1351,114 @@ impl PlayerApp {
         self.handle_bitstream_action(action);
     }
 
-    fn draw_source_card(&mut self, ui: &mut egui::Ui, playlist_height: f32) {
-        playlist_header(ui, self.playlist.len());
-        ui.separator();
-
-        let content_width = ui.available_width();
-        let action_height = 36.0;
-        let action_gap = 11.0;
-        let (body_rect, _) = ui.allocate_exact_size(
-            egui::vec2(content_width, playlist_height + action_gap + action_height),
-            egui::Sense::hover(),
-        );
-        let actions_rect = egui::Rect::from_min_max(
-            egui::pos2(body_rect.left(), body_rect.bottom() - action_height),
-            body_rect.right_bottom(),
-        );
-        let list_rect = egui::Rect::from_min_max(
-            body_rect.min,
-            egui::pos2(body_rect.right(), actions_rect.top() - action_gap),
-        );
-        if let Some(index) = playlist_contents(ui, list_rect, &self.playlist, self.selected_source)
-        {
-            self.select_source(index);
+    fn draw_source_card(&mut self, ui: &mut egui::Ui) {
+        // Allocate the entire card once. The footer has its own fixed slot,
+        // so extra controls or virtual rows cannot push it into BITSTREAM INFO.
+        let bounds = ui.available_rect_before_wrap();
+        ui.set_min_size(bounds.size());
+        if let Some(action) = playlist_ui::header(
+            ui,
+            &self.library.summaries,
+            self.library.desired_browse,
+            &mut self.playlist_ui,
+        ) {
+            self.handle_playlist_action(action);
         }
+        ui.separator();
+        let status_text = self
+            .library
+            .error
+            .as_deref()
+            .unwrap_or(&self.library.message)
+            .lines()
+            .next()
+            .unwrap_or_default();
+        let status_height = ui
+            .painter()
+            .layout_no_wrap(
+                status_text.to_owned(),
+                egui::FontId::proportional(10.0),
+                theme::MUTED,
+            )
+            .size()
+            .y
+            + if self.library.error.is_some() {
+                4.0
+            } else {
+                0.0
+            };
+        let footer_height =
+            ui.spacing().interact_size.y + ui.spacing().item_spacing.y + status_height + 2.0;
+        let footer = egui::Rect::from_min_max(
+            egui::pos2(
+                bounds.left(),
+                (bounds.bottom() - footer_height).max(ui.cursor().top()),
+            ),
+            bounds.right_bottom(),
+        );
+        let rows = egui::Rect::from_min_max(
+            ui.cursor().min,
+            egui::pos2(
+                bounds.right(),
+                (footer.top() - ui.spacing().item_spacing.y).max(ui.cursor().top()),
+            ),
+        );
+        if let Some(list) = self.library.browse.clone() {
+            for action in playlist_ui::contents(
+                ui,
+                rows,
+                &list,
+                &mut self.browse,
+                self.cursor.as_ref(),
+                &self.library.media_errors,
+            ) {
+                self.handle_playlist_action(action);
+            }
+        } else {
+            ui.put(rows, egui::Label::new("Loading playlist…"));
+        }
+        let mut footer_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(footer)
+                .layout(Layout::top_down(Align::Min)),
+        );
+        footer_ui.set_clip_rect(footer.intersect(ui.clip_rect()));
+        footer_ui.add_enabled_ui(self.library.ready, |ui| {
+            for action in playlist_ui::actions(ui, &self.library.summaries, &self.browse) {
+                self.handle_playlist_action(action);
+            }
+        });
+        self.draw_library_status(&mut footer_ui, status_height);
+    }
 
-        match playlist_actions(ui, actions_rect, self.has_selected_source()) {
-            Some(PlaylistAction::Add) => self.choose_sources(),
-            Some(PlaylistAction::Remove) => self.remove_selected_source(),
-            None => {}
+    fn draw_library_status(&mut self, ui: &mut egui::Ui, status_height: f32) {
+        if let Some(error) = self.library.error.clone() {
+            ui.spacing_mut().interact_size.y = status_height;
+            ui.spacing_mut().button_padding.y = 2.0;
+            ui.horizontal(|ui| {
+                if ui.button(RichText::new("Retry").size(10.0)).clicked() {
+                    self.library.retry();
+                }
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(error.lines().next().unwrap_or_default())
+                            .size(10.0)
+                            .color(theme::WARNING),
+                    )
+                    .truncate(),
+                )
+                .on_hover_text(error);
+            });
+        } else {
+            ui.add(
+                egui::Label::new(
+                    RichText::new(&self.library.message)
+                        .size(10.0)
+                        .color(theme::MUTED),
+                )
+                .truncate(),
+            )
+            .on_hover_text(&self.library.message);
         }
     }
 
@@ -1948,14 +1799,16 @@ impl PlayerApp {
     fn draw_transport(&mut self, root: &mut egui::Ui) {
         let output_phase = self.output.snapshot().phase();
         let retry_failed_decode =
-            self.decoder.snapshot().phase() == DecodePhase::Failed && self.has_selected_source();
-        let can_toggle = self.output.snapshot().can_play()
-            || (output_phase == OutputPhase::Ended && self.has_selected_source())
+            self.decoder.snapshot().phase() == DecodePhase::Failed && self.cursor.is_some();
+        let can_toggle = (self.cursor.is_none() && self.selected_source().is_some())
+            || self.resume.is_some()
+            || self.output.snapshot().can_play()
+            || (output_phase == OutputPhase::Ended && self.cursor.is_some())
             || retry_failed_decode;
         let playing = self.output.snapshot().is_playing();
         let can_previous = self.can_select_neighbor(PlaylistStep::Previous);
         let can_next = self.can_select_neighbor(PlaylistStep::Next);
-        let mut selected_mode = self.playback_mode;
+        let mut selected_mode = self.effective_playback_mode();
         let (duration_frames, sample_rate, seekable) =
             self.decoder
                 .snapshot()
@@ -2037,22 +1890,35 @@ impl PlayerApp {
                     ),
                     egui::vec2(volume_width, 28.0),
                 );
-                playback_mode_control(ui, mode_rect, &mut selected_mode);
+                ui.add_enabled_ui(
+                    self.cursor
+                        .as_ref()
+                        .is_none_or(|cursor| cursor.playlist.is_some()),
+                    |ui| {
+                        playback_mode_control(ui, mode_rect, &mut selected_mode);
+                    },
+                );
                 (action, timeline)
             })
             .inner;
 
-        if self.playback_mode != selected_mode {
-            self.playback_mode = selected_mode;
+        if self.effective_playback_mode() != selected_mode {
+            if let Some(id) = self
+                .cursor
+                .as_ref()
+                .and_then(|c| c.playlist)
+                .or(self.browse.playlist)
+            {
+                self.library.mutate(Mutation::Mode(id, selected_mode));
+            }
             self.shuffle_history.clear();
-            self.status = StatusLine::idle(format!(
-                "Playback mode: {}",
-                self.playback_mode.description()
-            ));
+            self.status =
+                StatusLine::idle(format!("Playback mode: {}", selected_mode.description()));
         }
 
         self.timeline_dragging = timeline.dragging;
         if let Some(target_frame) = timeline.seek_target {
+            self.resume = None;
             self.output.pause();
             match self.decoder.seek(target_frame) {
                 Ok(()) => {
@@ -2076,6 +1942,14 @@ impl PlayerApp {
             Some(TransportAction::Previous) => {
                 self.select_neighbor(PlaylistStep::Previous);
             }
+            Some(TransportAction::Toggle) if self.cursor.is_none() => {
+                if let Some(id) = self.browse.saved.focus {
+                    self.play_browsed_entry(id);
+                }
+            }
+            Some(TransportAction::Toggle) if self.resume.is_some() => {
+                self.playback_intent = !self.playback_intent;
+            }
             Some(TransportAction::Toggle) if retry_failed_decode => {
                 self.retry_current_source();
             }
@@ -2096,119 +1970,6 @@ impl PlayerApp {
             None => {}
         }
     }
-}
-
-enum PlaylistAction {
-    Add,
-    Remove,
-}
-
-fn playlist_header(ui: &mut egui::Ui, item_count: usize) {
-    ui.horizontal(|ui| {
-        ui.label(
-            RichText::new("PLAYLIST")
-                .size(10.0)
-                .strong()
-                .color(theme::MUTED),
-        );
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let noun = if item_count == 1 { "ITEM" } else { "ITEMS" };
-            ui.label(
-                RichText::new(format!("{item_count} {noun}"))
-                    .size(10.0)
-                    .color(theme::MUTED),
-            );
-        });
-    });
-}
-
-fn playlist_contents(
-    ui: &mut egui::Ui,
-    rect: egui::Rect,
-    playlist: &[SelectedSource],
-    selected_source: Option<usize>,
-) -> Option<usize> {
-    let mut requested_selection = None;
-    ui.scope_builder(
-        egui::UiBuilder::new()
-            .max_rect(rect)
-            .layout(Layout::top_down(Align::Min)),
-        |ui| {
-            if playlist.is_empty() {
-                ui.vertical_centered(|ui| {
-                    ui.add_space(((rect.height() - 48.0) / 2.0).max(16.0));
-                    ui.label(RichText::new("Playlist is empty").color(theme::TEXT));
-                    ui.label(
-                        RichText::new("Drop .m4a, .mp4, or .ac4 files here")
-                            .size(11.0)
-                            .color(theme::MUTED),
-                    );
-                });
-                return;
-            }
-
-            egui::ScrollArea::vertical()
-                .id_salt("source-playlist")
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    for (index, source) in playlist.iter().enumerate() {
-                        let label = format!("{:02}  {}", index + 1, source.display_name());
-                        let selected = selected_source == Some(index);
-                        if ui
-                            .add_sized(
-                                [ui.available_width(), 34.0],
-                                egui::Button::selectable(selected, ())
-                                    .left_text(RichText::new(label).size(12.0))
-                                    .truncate(),
-                            )
-                            .on_hover_text(source.path().display().to_string())
-                            .clicked()
-                        {
-                            requested_selection = Some(index);
-                        }
-                    }
-                });
-        },
-    );
-    requested_selection
-}
-
-fn playlist_actions(
-    ui: &mut egui::Ui,
-    rect: egui::Rect,
-    can_remove: bool,
-) -> Option<PlaylistAction> {
-    let remove_width = 76.0;
-    let add_width = (rect.width() - remove_width - ui.spacing().item_spacing.x).max(100.0);
-    let mut action = None;
-    ui.scope_builder(
-        egui::UiBuilder::new()
-            .max_rect(rect)
-            .layout(Layout::left_to_right(Align::Center)),
-        |ui| {
-            if ui
-                .add_sized(
-                    [add_width, rect.height()],
-                    egui::Button::new(RichText::new("Add files").strong().color(Color32::WHITE))
-                        .fill(theme::ACCENT)
-                        .stroke(Stroke::NONE),
-                )
-                .clicked()
-            {
-                action = Some(PlaylistAction::Add);
-            }
-            if ui
-                .add_enabled(
-                    can_remove,
-                    egui::Button::new("Remove").min_size(egui::vec2(remove_width, rect.height())),
-                )
-                .clicked()
-            {
-                action = Some(PlaylistAction::Remove);
-            }
-        },
-    );
-    action
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2551,9 +2312,7 @@ impl eframe::App for PlayerApp {
         // decides whether a pass runs is eframe's own, and copying it here would
         // leave two versions to drift apart.
         let showing = std::mem::take(&mut self.stage_drawn);
-        self.sync_inspection(context);
-        self.sync_decoder(context);
-        self.sync_output(context, showing);
+        self.tick(context, showing);
     }
 
     fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -2580,20 +2339,31 @@ impl eframe::App for PlayerApp {
         self.draw_bitstream_details_window(&context);
         self.draw_diagnostics_window(&context);
         self.draw_output_settings(&context);
+        for action in
+            playlist_ui::management(&context, &self.library.summaries, &mut self.playlist_ui)
+        {
+            self.handle_playlist_action(action);
+        }
 
         if context.input(|input| !input.raw.hovered_files.is_empty()) {
             draw_drop_overlay(&context);
         }
     }
 
-    fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        eframe::set_value(storage, OUTPUT_SETTINGS_STORAGE_KEY, self.output.settings());
-        eframe::set_value(
-            storage,
-            OUTPUT_DEVICE_STORAGE_KEY,
-            self.output.preferred_device(),
-        );
-        eframe::set_value(storage, SCENE_CAMERA_STORAGE_KEY, &self.camera.state());
+    fn save(&mut self, _storage: &mut dyn eframe::Storage) {
+        self.flush_persistence();
+    }
+
+    fn on_exit(&mut self) {
+        self.flush_persistence();
+        self.library.shutdown();
+        if let Some(error) = &self.library.error {
+            rfd::MessageDialog::new()
+                .set_title("MacinDecode AC-4 Player")
+                .set_description(format!("Some changes could not be saved.\n{error}"))
+                .set_level(rfd::MessageLevel::Error)
+                .show();
+        }
     }
 }
 
@@ -3327,39 +3097,6 @@ mod tests {
 
         let mut pending = true;
         assert_eq!(take_playback_restore(&mut pending, false), Some(false));
-    }
-
-    #[test]
-    fn playlist_neighbors_stop_at_the_list_boundaries() {
-        assert_eq!(
-            neighboring_source_index(Some(1), 3, PlaylistStep::Previous),
-            Some(0)
-        );
-        assert_eq!(
-            neighboring_source_index(Some(1), 3, PlaylistStep::Next),
-            Some(2)
-        );
-        assert_eq!(
-            neighboring_source_index(Some(0), 3, PlaylistStep::Previous),
-            None
-        );
-        assert_eq!(
-            neighboring_source_index(Some(2), 3, PlaylistStep::Next),
-            None
-        );
-    }
-
-    #[test]
-    fn repeat_all_neighbors_wrap_at_both_boundaries() {
-        assert_eq!(
-            wrapped_source_index(Some(0), 3, PlaylistStep::Previous),
-            Some(2)
-        );
-        assert_eq!(
-            wrapped_source_index(Some(2), 3, PlaylistStep::Next),
-            Some(0)
-        );
-        assert_eq!(wrapped_source_index(Some(0), 1, PlaylistStep::Next), None);
     }
 
     #[test]
