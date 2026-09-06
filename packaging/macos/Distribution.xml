@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="2">
+  <title>MacinDecode AC-4 Player</title>
+  <options customize="never" require-scripts="false" hostArchitectures="arm64" />
+  <domains enable_anywhere="false" enable_currentUserHome="true" enable_localSystem="false" />
+  <allowed-os-versions><os-version min="14.0" /></allowed-os-versions>
+  <choices-outline><line choice="player" /></choices-outline>
+  <choice id="player" visible="false" title="MacinDecode AC-4 Player">
+    <pkg-ref id="com.macinrender.macindecode-ac4-player.pkg" />
+  </choice>
+  <pkg-ref id="com.macinrender.macindecode-ac4-player.pkg" version="@VERSION@">player-component.pkg</pkg-ref>
+</installer-gui-script>

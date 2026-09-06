@@ -33,6 +33,9 @@ use crate::theme;
     reason = "independent UI toggles and pointer interaction flags are not one state machine"
 )]
 pub struct PlayerApp {
+    pub smoke: Option<crate::install_check::WindowSmoke>,
+    about: crate::licenses::Window,
+    sofa: crate::sofa_catalog::Catalog,
     library: LibraryController,
     browse: BrowseState,
     cursor: Option<PlaybackCursor>,
@@ -336,9 +339,13 @@ impl PlayerApp {
             camera: camera.state(),
             ..Default::default()
         };
+        let sofa = crate::sofa_catalog::Catalog::new(directory.path.join("sofa"));
         let library = LibraryController::new(directory, preferences.clone(), context.clone());
         Self {
             library,
+            smoke: None,
+            about: crate::licenses::Window::default(),
+            sofa,
             browse: BrowseState::default(),
             cursor: None,
             playlist_ui: playlist_ui::State::default(),
@@ -886,6 +893,7 @@ impl PlayerApp {
                         );
                     });
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.button("About").clicked() { self.about.open = true; }
                         if ui.button("Audio settings").clicked() { show_settings = true; }
                         ui.add_enabled_ui(!system_output, |ui| {
                         egui::ComboBox::from_id_salt("output-device")
@@ -1064,9 +1072,7 @@ impl PlayerApp {
         };
         self.sofa_picker = None;
         if let Some(path) = path {
-            let mut settings = self.output.settings().clone();
-            settings.sofa = path.path().to_string_lossy().into_owned();
-            self.change_output_settings(settings, context);
+            self.sofa.refresh(Some(path.path().to_path_buf()), context);
         }
     }
 
@@ -1136,7 +1142,7 @@ impl PlayerApp {
                 ui.add_enabled_ui(
                     !self.output.settings_pending()
                         && self.pending_output_change.is_none()
-                        && self.sofa_picker.is_none(),
+                        && self.sofa_picker.is_none() && !self.sofa.busy(),
                     |ui| {
                         ui.horizontal(|ui| {
                             ui.label("Playback mode");
@@ -1207,6 +1213,7 @@ impl PlayerApp {
                                 if ui.button("Choose SOFA…").clicked() {
                                     self.sofa_picker = Some(Box::pin(
                                         rfd::AsyncFileDialog::new()
+                                            .set_directory(&self.sofa.root)
                                             .add_filter("SOFA HRIR", &["sofa"])
                                             .pick_file(),
                                     ));
@@ -1215,7 +1222,18 @@ impl PlayerApp {
                                 if ui.button("Use KEMAR").clicked() {
                                     settings.sofa.clear();
                                 }
+                                if ui.button("Refresh SOFA folder").clicked() { self.sofa.refresh(None, context); }
                             });
+                            ui.label(self.sofa.root.display().to_string());
+                            ui.label(&self.sofa.message);
+                            for file in &self.sofa.files {
+                                let full_path = self.sofa.root.join(&file.path);
+                                let selected = Path::new(&settings.sofa) == full_path;
+                                if ui.add_enabled(file.status == "unverified", egui::Button::selectable(selected, format!("{} · {}", file.path.display(), file.status))).clicked() {
+                                    if let Some(path) = full_path.to_str() { path.clone_into(&mut settings.sofa); }
+                                    else { self.audio_settings_error = Some("This renderer requires a Unicode SOFA path".into()); }
+                                }
+                            }
                         }
                         ui.separator();
                         if matches!(
@@ -2313,6 +2331,23 @@ impl eframe::App for PlayerApp {
         // leave two versions to drift apart.
         let showing = std::mem::take(&mut self.stage_drawn);
         self.tick(context, showing);
+        if self.library.ready && !self.sofa.started {
+            self.sofa.files = self.library.sofa_index.take().unwrap_or_default();
+            self.sofa.refresh(None, context);
+        }
+        if let Some((files, imported)) = self.sofa.poll() {
+            self.library.save_sofa_index(files);
+            if let Some(path) = imported {
+                if let Some(path) = path.to_str() {
+                    let mut settings = self.output.settings().clone();
+                    path.clone_into(&mut settings.sofa);
+                    self.change_output_settings(settings, context);
+                } else {
+                    self.audio_settings_error =
+                        Some("This renderer requires a Unicode SOFA path".into());
+                }
+            }
+        }
     }
 
     fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -2339,6 +2374,15 @@ impl eframe::App for PlayerApp {
         self.draw_bitstream_details_window(&context);
         self.draw_diagnostics_window(&context);
         self.draw_output_settings(&context);
+        self.about.draw(&context);
+        if let Some(smoke) = &mut self.smoke {
+            smoke.frame(
+                &context,
+                self.library.ready,
+                self.library.error.as_deref(),
+                self.scene_renderer_ready,
+            );
+        }
         for action in
             playlist_ui::management(&context, &self.library.summaries, &mut self.playlist_ui)
         {
@@ -2355,6 +2399,7 @@ impl eframe::App for PlayerApp {
     }
 
     fn on_exit(&mut self) {
+        self.sofa.shutdown();
         self.flush_persistence();
         self.library.shutdown();
         if let Some(error) = &self.library.error {

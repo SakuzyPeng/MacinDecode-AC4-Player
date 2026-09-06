@@ -1,0 +1,10 @@
+# Runtime dependencies for the two distributed targets, including font licenses.
+accepted = [
+    "MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Zlib",
+    "BSL-1.0", "Unicode-3.0", "OFL-1.1", "Ubuntu-font-1.0",
+]
+targets = ["x86_64-pc-windows-msvc", "aarch64-apple-darwin"]
+ignore-dev-dependencies = true
+ignore-build-dependencies = true
+# Workspace notices are embedded separately together with native dependencies.
+private = { ignore = true }

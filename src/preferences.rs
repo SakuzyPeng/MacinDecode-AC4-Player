@@ -40,6 +40,8 @@ impl DataDirectory {
                 path.display()
             )
         })?;
+        fs::create_dir_all(path.join("sofa"))
+            .map_err(|e| format!("Cannot create SOFA directory: {e}"))?;
         Ok(Arc::new(Self { path, _lock: lock }))
     }
 }

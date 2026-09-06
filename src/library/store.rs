@@ -22,6 +22,21 @@ pub(super) struct Change {
 }
 
 impl Store {
+    pub fn sofa_index(&self) -> Result<Vec<crate::sofa_catalog::Entry>> {
+        let value: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT value FROM metadata WHERE key='sofa-index-v1'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        value.map_or_else(|| Ok(Vec::new()), |value| Ok(serde_json::from_str(&value)?))
+    }
+    pub fn save_sofa_index(&self, files: &[crate::sofa_catalog::Entry]) -> Result<()> {
+        self.connection.execute("INSERT INTO metadata(key,value) VALUES ('sofa-index-v1',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [serde_json::to_string(files)?])?;
+        Ok(())
+    }
     pub fn open(path: &Path) -> Result<Self> {
         let connection = Connection::open(path)?;
         connection.busy_timeout(std::time::Duration::from_secs(2))?;

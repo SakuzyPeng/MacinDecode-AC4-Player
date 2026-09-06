@@ -44,6 +44,7 @@ enum Command {
     Browse(PlaylistId, SavedBrowse),
     Session(SessionState),
     Preferences(Box<AppPreferences>),
+    SofaIndex(Vec<crate::sofa_catalog::Entry>),
     Retry,
     Shutdown,
 }
@@ -65,6 +66,7 @@ enum Event {
         error: Option<String>,
     },
     Recovered,
+    SofaIndex(Vec<crate::sofa_catalog::Entry>),
     Done,
 }
 pub enum Notice {
@@ -91,6 +93,7 @@ pub struct LibraryController {
     pub ready: bool,
     pub error: Option<String>,
     pub message: String,
+    pub sofa_index: Option<Vec<crate::sofa_catalog::Entry>>,
 }
 impl LibraryController {
     pub fn new(
@@ -125,6 +128,7 @@ impl LibraryController {
             ready: false,
             error,
             message: "Loading library…".into(),
+            sofa_index: None,
         }
     }
     fn send(&mut self, command: Command) {
@@ -149,6 +153,9 @@ impl LibraryController {
     }
     pub fn save_preferences(&mut self, prefs: AppPreferences) {
         self.send(Command::Preferences(Box::new(prefs)));
+    }
+    pub fn save_sofa_index(&mut self, files: Vec<crate::sofa_catalog::Entry>) {
+        self.send(Command::SofaIndex(files));
     }
     pub fn retry(&mut self) {
         self.send(Command::Retry);
@@ -218,6 +225,7 @@ impl LibraryController {
                         self.message = message;
                     }
                 }
+                Event::SofaIndex(files) => self.sofa_index = Some(files),
                 Event::Error(error) => self.error = Some(error),
                 Event::MediaError {
                     revision,
@@ -327,6 +335,12 @@ fn run(
     let mut requested_preferences = prefs.clone();
     let mut requested_session = session.clone();
     emit(Event::Boot(Box::new(prefs), session));
+    emit(Event::SofaIndex(
+        store
+            .as_ref()
+            .and_then(|store| store.sofa_index().ok())
+            .unwrap_or_default(),
+    ));
     if let Some(store) = &store {
         match watch.snapshot(store) {
             Ok(s) => emit(Event::Snapshot(s)),
@@ -339,6 +353,13 @@ fn run(
         }
         let result = (|| -> store::Result<bool> {
             match command {
+                Command::SofaIndex(files) => {
+                    store
+                        .as_ref()
+                        .ok_or("Library is unavailable")?
+                        .save_sofa_index(&files)?;
+                    Ok(false)
+                }
                 Command::Preferences(prefs) => {
                     requested_preferences = *prefs;
                     preferences.save(&requested_preferences)?;
@@ -410,7 +431,10 @@ fn run(
                             store.save_session(&requested_session)?;
                             Ok(false)
                         }
-                        Command::Preferences(_) | Command::Retry | Command::Shutdown => {
+                        Command::Preferences(_)
+                        | Command::SofaIndex(_)
+                        | Command::Retry
+                        | Command::Shutdown => {
                             unreachable!()
                         }
                     }

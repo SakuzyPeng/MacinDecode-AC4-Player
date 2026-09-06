@@ -1,0 +1,90 @@
+name: Desktop build
+
+on:
+  workflow_call:
+    inputs:
+      release-tag:
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  desktop:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+          - os: macos-15
+            target: aarch64-apple-darwin
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_BUILD_JOBS: '2'
+      MACOSX_DEPLOYMENT_TARGET: '14.0'
+      TARGET: ${{ matrix.target }}
+      RELEASE_TAG: ${{ inputs.release-tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12' # Windows MSI inspection uses the stdlib msilib module.
+      - name: Install the repository Rust toolchain
+        run: |
+          rustup show
+          rustup target add "$TARGET"
+      - name: Prepare pinned native build tools and full decoder inputs
+        run: |
+          python -m pip install cmake==3.31.6 ninja==1.11.1.4
+          python scripts/prepare_inputs.py
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: ${{ matrix.target }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-workspace-crates: true
+          cache-directories: |
+            target/package-tools
+            .ci-inputs/native-dependencies
+            .ci-inputs/macinrender
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Storage, SOFA and application tests
+        run: cargo test --locked --workspace --all-targets --target "$TARGET"
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets --target "$TARGET" -- -D warnings
+      - name: Packaging regression tests
+        run: python -m unittest discover -s scripts -p 'test_*.py'
+      - name: Build and verify installer, relocated executable and window
+        run: python scripts/package.py --target "$TARGET" --release-tag "$RELEASE_TAG"
+      - name: Install, repair, upgrade, downgrade, uninstall and reinstall
+        run: python scripts/check_lifecycle.py --target "$TARGET"
+      - name: Upload verified installers
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: installer-${{ matrix.target }}
+          path: |
+            dist/*.msi
+            dist/*.pkg
+            dist/*.sha256
+            dist/*.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: diagnostics-${{ matrix.target }}
+          path: target/packaging-failures
+          if-no-files-found: ignore
+          retention-days: 7

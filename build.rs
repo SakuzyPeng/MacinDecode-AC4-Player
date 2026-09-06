@@ -17,15 +17,30 @@ fn main() {
 
     declare_spatial_output();
     embed_windows_icon();
+    embed_licenses();
 
     if let Err(error) = prepare_ui_font() {
         panic!("failed to prepare the UI font: {error}");
     }
 }
 
+fn embed_licenses() {
+    println!("cargo:rerun-if-env-changed=MACINDECODE_LICENSES_JSON");
+    let destination = PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("licenses.json");
+    if let Some(source) = env::var_os("MACINDECODE_LICENSES_JSON").map(PathBuf::from) {
+        println!("cargo:rerun-if-changed={}", source.display());
+        fs::copy(source, destination).expect("Cannot embed third-party notices");
+        println!("cargo:rustc-env=MACINDECODE_HAS_LICENSES=true");
+    } else {
+        fs::write(destination, r#"{"licenses":[]}"#).unwrap();
+        println!("cargo:rustc-env=MACINDECODE_HAS_LICENSES=false");
+    }
+}
+
 fn embed_windows_icon() {
     println!("cargo:rerun-if-changed=assets/icons/windows.rc");
     println!("cargo:rerun-if-changed=assets/icons/app-windows.ico");
+    println!("cargo:rerun-if-changed=assets/icons/app.manifest");
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         embed_resource::compile_for(
             "assets/icons/windows.rc",

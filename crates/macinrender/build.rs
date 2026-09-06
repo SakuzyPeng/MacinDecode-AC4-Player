@@ -61,6 +61,7 @@ fn main() {
         ("LAPACKE_LIBRARY", "LAPACKE_LIBRARY"),
         ("OPENBLAS_HEADER_PATH", "OPENBLAS_HEADER_PATH"),
         ("LAPACKE_HEADER_PATH", "LAPACKE_HEADER_PATH"),
+        ("BOOST_ROOT", "BOOST_ROOT"),
     ] {
         println!("cargo:rerun-if-env-changed={variable}");
         if let Some(value) = env::var_os(variable) {

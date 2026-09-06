@@ -1,0 +1,36 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="MacinDecode AC-4 Player" Manufacturer="MacinDecode"
+           Version="$(var.Version)" ProductCode="$(var.ProductCode)" UpgradeCode="$(var.UpgradeCode)"
+           Scope="perUser" InstallerVersion="500" Compressed="yes">
+    <MajorUpgrade DowngradeErrorMessage="A newer MacinDecode AC-4 Player is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/SakuzyPeng/MacinDecode-AC4-Player" />
+    <Property Id="ARPPRODUCTICON" Value="PlayerIcon" />
+    <Property Id="WINDOWS_BUILD">
+      <RegistrySearch Id="FindWindowsBuild" Root="HKLM" Key="SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+                      Name="CurrentBuildNumber" Type="raw" Bitness="always64" />
+    </Property>
+    <Launch Condition="Installed OR (VersionNT64 AND WINDOWS_BUILD &gt;= 19045)"
+            Message="MacinDecode AC-4 Player requires Windows 10 22H2 or later (x64)." />
+    <Icon Id="PlayerIcon" SourceFile="$(var.Icon)" />
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="UserPrograms" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="MacinDecode AC-4 Player">
+          <Component Id="PlayerExecutable" Guid="$(var.ComponentCode)">
+            <File Id="PlayerExe" Source="$(var.Executable)" Name="macindecode-ac4-player.exe" />
+            <RegistryValue Root="HKCU" Key="Software\MacinDecode\AC4Player\Installer"
+                           Name="Version" Type="string" Value="[ProductVersion]" KeyPath="yes" />
+            <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuFolder" Name="MacinDecode AC-4 Player"
+                      Target="[#PlayerExe]" WorkingDirectory="INSTALLFOLDER" Icon="PlayerIcon" />
+            <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
+          </Component>
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+    <Feature Id="Player" Title="MacinDecode AC-4 Player" Level="1">
+      <ComponentRef Id="PlayerExecutable" />
+      <ComponentGroupRef Id="NativeRuntime" />
+    </Feature>
+  </Package>
+</Wix>

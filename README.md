@@ -132,6 +132,20 @@ cargo test -p macindecode-windows-spatial-audio opens_enumerated_endpoints_by_st
 开发者文档：[架构](docs/ARCHITECTURE.md) · [Windows 解码](docs/WINDOWS_DECODE.md) ·
 [Windows Spatial Audio](docs/WINDOWS_SPATIAL_AUDIO.md) · [播放列表与持久化](docs/PLAYLISTS.md)
 
+## 安装包与 CI
+
+Windows x64 提供当前用户 MSI，macOS Apple Silicon 提供当前用户 PKG。本轮保留完整解码、
+多播放列表、MacinRender 与头追能力，并将必需的原生 DLL/dylib 随包分发。macOS 最低版本为 14.0。
+详见 [安装包与 CI](docs/PACKAGING.md) 和 [SOFA 目录](docs/STORAGE.md)。
+
+```sh
+python scripts/package.py --target x86_64-pc-windows-msvc
+python3 scripts/package.py --target aarch64-apple-darwin
+```
+
+PR、main 推送和手动 CI 运行完整默认功能的两平台构建和安装检查。版本标签通过检查后只创建
+预发布 Release 草稿；首次安装包未正式签名。About 页面显示内嵌第三方许可。
+
 ## 许可证
 
 本项目采用 [MIT License](LICENSE)。

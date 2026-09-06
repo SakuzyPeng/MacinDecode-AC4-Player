@@ -1,4 +1,7 @@
 /target/
+/dist/
+/.ci-inputs/
+__pycache__/
 /.local-test-media/
 /assets/fonts/NotoSansCJKsc-Regular.otf
 .DS_Store

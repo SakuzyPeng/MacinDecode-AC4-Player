@@ -23,9 +23,7 @@ cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
 ```
 
-`rust-toolchain.toml` pins 1.98.0 with `profile = "minimal"`, so a fresh rustup has **no rustfmt or
-clippy**. Run `rustup component add rustfmt clippy` first, or both lint commands fail with a rustup
-recursion backtrace rather than a useful error.
+`rust-toolchain.toml` pins 1.98.0 with `profile = "minimal"` and explicitly installs rustfmt and clippy.
 
 Single test / workspace member:
 
