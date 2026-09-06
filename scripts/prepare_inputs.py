@@ -43,6 +43,8 @@ def download(url, destination, expected):
 
 
 def prepare():
+    os.environ.setdefault("PYTHONUTF8", "1")
+    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
     INPUTS.mkdir(exist_ok=True)
     settings = {}
     cmake = (ROOT / "crates/macinrender/native/CMakeLists.txt").read_text()
