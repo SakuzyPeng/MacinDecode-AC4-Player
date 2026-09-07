@@ -30,6 +30,16 @@ def pe_fixture(direct="kernel32.dll", delayed=None):
 
 
 class RuntimeAuditTests(unittest.TestCase):
+    def test_system_dxil_converter_is_distinct_from_the_dxc_runtime(self):
+        with tempfile.TemporaryDirectory() as folder:
+            binary = Path(folder) / "player.exe"
+            system = Path(folder) / "System32"
+            modules = {str(binary), str(system / "kernel32.dll"), str(system / "dxilconv.dll")}
+            verify_modules(modules, binary, {"SYSTEMROOT":str(system)}, True)
+            for name in ("dxil.dll", "dxcompiler.dll"):
+                with self.subTest(name=name), self.assertRaisesRegex(RuntimeError, "non-system dependency"):
+                    verify_modules(modules | {str(system / name)}, binary, {"SYSTEMROOT":str(system)}, True)
+
     def test_msi_authoring_rejects_extra_payload_before_invoking_wix(self):
         with tempfile.TemporaryDirectory() as folder:
             binary = Path(folder) / (BINARY + ".exe")

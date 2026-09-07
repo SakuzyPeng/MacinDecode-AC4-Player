@@ -166,13 +166,17 @@ def clean_environment(original, windows):
 
 
 def verify_modules(modules, binary, env, windows):
+    binary = Path(binary).resolve()
     require(len(modules) > 1, "No runtime library evidence was collected")
     for module in modules:
         if Path(module).resolve() == binary:
             continue
         if windows:
             name = ntpath.basename(module).lower()
-            redistributable = re.match(r"(?:vcruntime[0-9]|msvcp[0-9]|concrt[0-9]|libopenblas|mradm_capi|mr_headtrack|libgcc|libgfortran|libwinpthread|dxcompiler|dxil)", name)
+            redistributable = re.match(r"(?:vcruntime[0-9]|msvcp[0-9]|concrt[0-9]|libopenblas|mradm_capi|mr_headtrack|libgcc|libgfortran|libwinpthread)", name)
+            # dxilconv.dll is the Windows DXBC-to-DXIL converter used by the
+            # system driver even with FXC. It is not the redistributable DXC.
+            redistributable = redistributable or name in {"dxcompiler.dll", "dxil.dll"}
             require(not redistributable and within(module, env["SYSTEMROOT"]), f"Runtime loaded a non-system dependency: {module}")
         else:
             require(module.startswith(MAC_SYSTEM_ROOTS), f"Runtime loaded a non-system library: {module}")
