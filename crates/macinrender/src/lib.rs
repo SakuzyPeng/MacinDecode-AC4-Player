@@ -6,6 +6,13 @@ mod api;
 #[cfg(target_os = "macos")]
 pub mod atmos;
 pub mod motion;
+#[cfg(test)]
+#[path = "../native_link.rs"]
+#[allow(
+    dead_code,
+    reason = "Exercise the build script link parser in workspace tests"
+)]
+mod native_link;
 mod raw;
 
 use std::ffi::{CStr, CString, c_char, c_void};

@@ -1714,7 +1714,7 @@ dependencies = [
 
 [[package]]
 name = "macindecode-ac4-player"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytemuck",
  "eframe",
@@ -1748,8 +1748,8 @@ name = "macindecode-macinrender"
 version = "0.1.0"
 dependencies = [
  "cc",
- "libloading",
  "serde_json",
+ "shlex",
 ]
 
 [[package]]

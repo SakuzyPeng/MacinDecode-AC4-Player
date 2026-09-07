@@ -14,7 +14,7 @@ jobs:
   desktop:
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -48,7 +48,7 @@ jobs:
           rustup target add "$TARGET"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          key: ${{ matrix.target }}-native-v2-xcode26.3-${{ hashFiles('crates/macinrender/native/CMakeLists.txt') }}
+          key: ${{ matrix.target }}-static-v1-xcode26.3-${{ hashFiles('crates/macinrender/native/CMakeLists.txt', 'scripts/prepare_openblas.py') }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-workspace-crates: true
           cache-on-failure: true
@@ -56,6 +56,7 @@ jobs:
             .ci-tools
             .ci-inputs/native-dependencies
             .ci-inputs/macinrender
+            .ci-inputs/openblas-static
       - name: Prepare pinned native build tools and full decoder inputs
         run: |
           python -m pip install cmake==3.31.6 ninja==1.11.1.4

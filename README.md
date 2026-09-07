@@ -135,7 +135,7 @@ cargo test -p macindecode-windows-spatial-audio opens_enumerated_endpoints_by_st
 ## 安装包与 CI
 
 Windows x64 提供当前用户 MSI，macOS Apple Silicon 提供当前用户 PKG。本轮保留完整解码、
-多播放列表、MacinRender 与头追能力，并将必需的原生 DLL/dylib 随包分发。macOS 最低版本为 14.0。
+多播放列表、MacinRender 与头追能力。Windows 载荷只有一个 EXE；macOS 保留标准 `.app`，渲染和头追代码静态编入主程序，最低版本为 14.0。
 详见 [安装包与 CI](docs/PACKAGING.md) 和 [SOFA 目录](docs/STORAGE.md)。
 
 ```sh

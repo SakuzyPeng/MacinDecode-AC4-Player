@@ -3,6 +3,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
+mod native_link;
+
 fn run(command: &mut Command) {
     let status = command
         .status()
@@ -16,6 +18,7 @@ fn run(command: &mut Command) {
 fn main() {
     println!("cargo:rerun-if-changed=native");
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=native_link.rs");
     println!("cargo:rustc-check-cfg=cfg(native_macinrender)");
     let os = env::var("CARGO_CFG_TARGET_OS").unwrap();
     if os != "macos" && os != "windows" {
@@ -26,6 +29,9 @@ fn main() {
     }
     println!("cargo:rustc-cfg=native_macinrender");
     let out = PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("native");
+    let query = out.join(".cmake/api/v1/query");
+    fs::create_dir_all(&query).unwrap();
+    fs::write(query.join("codemodel-v2"), "").unwrap();
     let mut configure = Command::new("cmake");
     configure.arg("-DMACINRENDER_SOURCE_DIR=");
     // cc locates MSVC and the Windows SDK even outside a developer shell. Keep
@@ -84,22 +90,26 @@ fn main() {
     build
         .arg("--build")
         .arg(&out)
-        .args(["--target", "mradm_capi_bundle"]);
-    if os == "macos" {
-        build.arg("mr_headtrack");
-    }
+        .args(["--target", "macinrender_link_probe"]);
     build
         .arg("--parallel")
         .arg(env::var("NUM_JOBS").unwrap_or_else(|_| "4".into()));
     run(&mut build);
     let source = fs::read_to_string(out.join("macinrender-source.txt")).unwrap();
     let binary = fs::read_to_string(out.join("macinrender-binary.txt")).unwrap();
-    if os == "windows" {
-        stage_openblas_runtime(&PathBuf::from(&binary));
-    }
-    println!("cargo:rustc-env=MACINRENDER_BUILT_LIBRARY_DIR={binary}");
+    native_link::emit(&out, os == "windows");
+    run(&mut Command::new(out.join(if os == "windows" {
+        "macinrender_link_probe.exe"
+    } else {
+        "macinrender_link_probe"
+    })));
     println!("cargo:lib_dir={binary}");
     println!("cargo:source_dir={source}");
+    println!("cargo:linkage=static");
+    println!(
+        "cargo:link_manifest={}",
+        out.join("native-link.json").display()
+    );
     cc::Build::new()
         .file("native/abi_probe.c")
         .include(PathBuf::from(&source).join("include"))
@@ -126,34 +136,5 @@ fn compile_atmos_assist() {
         "CoreAudio",
     ] {
         println!("cargo:rustc-link-lib=framework={framework}");
-    }
-}
-
-fn stage_openblas_runtime(destination: &std::path::Path) {
-    let Some(library) = env::var_os("OPENBLAS_LIBRARY").map(PathBuf::from) else {
-        return;
-    };
-    let Some(root) = library.parent().and_then(|path| path.parent()) else {
-        return;
-    };
-    let Ok(entries) = fs::read_dir(root.join("bin")) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path
-            .extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("dll"))
-        {
-            let target = destination.join(path.file_name().unwrap());
-            // Windows refuses to replace a loaded DLL. Cargo check/Clippy can
-            // share this dependency cache with a running player or test, so do
-            // not rewrite a runtime that already has the required contents.
-            let source = fs::read(&path).expect("cannot read OpenBLAS runtime");
-            if fs::read(&target).is_ok_and(|existing| existing == source) {
-                continue;
-            }
-            fs::copy(&path, target).expect("cannot stage OpenBLAS runtime");
-        }
     }
 }

@@ -81,23 +81,11 @@ pub fn check(directory: &Arc<DataDirectory>) -> Result<(), String> {
         return Err(error);
     }
     #[cfg(macinrender_output)]
-    {
-        use macindecode_macinrender::{Config, OutputKind, RendererSettings, Session};
-        let config = Config {
-            renderer: RendererSettings {
-                binaural: false,
-                layout: "4+7+0".into(),
-                sofa: String::new(),
-                split_lfe: true,
-            },
-            output: OutputKind::Null,
-            device_id: String::new(),
-            input_rate: 48_000,
-        };
-        let _session = Session::new(&config)?;
-    }
+    let native_renderers = check_renderers()?;
+    #[cfg(not(macinrender_output))]
+    let native_renderers: Vec<serde_json::Value> = Vec::new();
     let report = serde_json::json!({"ok":true, "version":env!("CARGO_PKG_VERSION"), "embedded_licenses":crate::licenses::EMBEDDED,
-        "decode":cfg!(feature="decode"), "macinrender":cfg!(macinrender_output), "sqlite":rusqlite::version()});
+        "decode":cfg!(feature="decode"), "macinrender":cfg!(macinrender_output), "sqlite":rusqlite::version(), "native_renderers":native_renderers});
     std::fs::write(
         directory.path.join("install-check.json"),
         report.to_string(),
@@ -105,6 +93,71 @@ pub fn check(directory: &Arc<DataDirectory>) -> Result<(), String> {
     .map_err(|e| e.to_string())?;
     println!("{report}");
     Ok(())
+}
+
+#[cfg(macinrender_output)]
+fn check_renderers() -> Result<Vec<serde_json::Value>, String> {
+    use macindecode_macinrender::{
+        Config, Frame, ObjectState, OutputKind, Phase, Plane, RendererSettings, Session,
+    };
+    let mut reports = Vec::new();
+    for (name, binaural) in [("vbap", false), ("binaural", true)] {
+        let started = Instant::now();
+        let mut session = Session::new(&Config {
+            renderer: RendererSettings {
+                binaural,
+                layout: "4+7+0".into(),
+                sofa: String::new(),
+                split_lfe: true,
+            },
+            output: OutputKind::Null,
+            device_id: String::new(),
+            input_rate: 48_000,
+        })?;
+        session.reset(1, 0)?;
+        session.configure(1, 1, &[7], None)?;
+        let control = session.control();
+        control.orientation([15.0, 0.0, 0.0])?;
+        let samples = vec![0.01; 4800];
+        let accepted = session.submit(&Frame {
+            epoch: 1,
+            generation: 1,
+            start: 0,
+            duration: 4800,
+            complete: true,
+            planes: &[Plane {
+                element: 7,
+                samples: &samples,
+            }],
+            initial: &[(
+                7,
+                ObjectState {
+                    active: true,
+                    gain: 1.0,
+                    position: Some([0.0, 1.0, 0.0]),
+                },
+            )],
+            updates: &[],
+        })?;
+        if !accepted {
+            return Err(format!("{name} rejected its initial Scene"));
+        }
+        session.end(1, 4800)?;
+        control.play(true)?;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let status = control.status()?;
+            if status.phase == Phase::Ended && status.presented == 4800 {
+                reports.push(serde_json::json!({"name":name, "presented_frames":status.presented, "elapsed_ms":started.elapsed().as_millis()}));
+                break;
+            }
+            if status.phase == Phase::Failed || Instant::now() > deadline {
+                return Err(format!("{name} did not finish rendering: {status:?}"));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    Ok(reports)
 }
 
 pub struct WindowSmoke {

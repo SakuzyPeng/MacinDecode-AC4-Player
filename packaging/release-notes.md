@@ -2,8 +2,8 @@ MacinDecode AC-4 Player: native AC-4 decoding and playback, persistent multi-pla
 
 Install for the current user:
 
-- Windows x64: current-user MSI including the EXE and required native runtime DLLs.
-- macOS Apple Silicon: PKG installing to `~/Applications`; the app uses ad-hoc signing. The installer is not Developer ID signed or notarized.
+- Windows x64: current-user MSI containing a single self-contained EXE.
+- macOS Apple Silicon: PKG installing to `~/Applications`; the app statically includes rendering and head tracking, and uses ad-hoc signing. The installer is not Developer ID signed or notarized.
 
 User databases and custom SOFA files are kept separately and survive application upgrades and removal. Each installer includes a SHA-256 checksum and a build manifest. Third-party notices are available in **About → Third-party licenses**.
 

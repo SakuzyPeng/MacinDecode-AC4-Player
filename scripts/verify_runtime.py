@@ -77,15 +77,17 @@ def pe_imports(binary, executable=True):
     return result
 
 
-def verify_binary(binary, target, bundle=None):
+def verify_windows_imports(imports):
+    for dependency in imports["direct"] + imports["delay"]:
+        allowed = dependency in WINDOWS_SYSTEM_DLLS or dependency.startswith(("api-ms-win-core-", "ext-ms-win-"))
+        require(allowed, f"Unexpected DLL dependency: {dependency}")
+
+
+def verify_binary(binary, target):
     binary = Path(binary)
     if target == "x86_64-pc-windows-msvc":
         imports = pe_imports(binary, binary.suffix.lower() == ".exe")
-        for dependency in imports["direct"] + imports["delay"]:
-            allowed = dependency in WINDOWS_SYSTEM_DLLS or dependency.startswith(("api-ms-win-core-", "ext-ms-win-"))
-            if bundle is not None:
-                allowed = allowed or dependency.startswith("api-ms-win-crt-") or any(file.name.lower() == dependency for file in Path(bundle).glob("*.dll"))
-            require(allowed, f"Unexpected DLL dependency: {dependency}")
+        verify_windows_imports(imports)
         return imports
     require(target == "aarch64-apple-darwin", f"Unsupported target: {target}")
     data = binary.read_bytes()
@@ -163,48 +165,59 @@ def clean_environment(original, windows):
     return env
 
 
-def run_smoke(binary, data_root):
-    binary, data_root = Path(binary).resolve(), Path(data_root).resolve()
-    data_root.mkdir(parents=True, exist_ok=True)
-    env = clean_environment(os.environ, os.name == "nt")
-    subprocess.run([str(binary), "--check-install", "--data-dir", str(data_root)],
-                   cwd=data_root, env=env, check=True, timeout=30, capture_output=True)
-    check = json.loads((data_root / "install-check.json").read_text())
-    require(check["ok"] and check["embedded_licenses"], "Installed executable lacks storage or embedded notices")
-    require(check.get("decode") and check.get("macinrender"), "Installer must contain the full decoder and renderer")
-    if sys.platform == "darwin":
-        env["DYLD_PRINT_LIBRARIES"] = "1"
-    modules = set()
-    log = data_root / "window.log"
-    with log.open("w", encoding="utf-8") as output:
-        process = subprocess.Popen([str(binary), "--smoke-test", "--data-dir", str(data_root)],
-                                   cwd=data_root, env=env, stdout=output, stderr=output)
-        deadline = time.monotonic() + 30
-        try:
-            while process.poll() is None:
-                if os.name == "nt":
-                    modules.update(windows_modules(process.pid))
-                require(time.monotonic() < deadline, f"Window smoke test timed out; see {log}")
-                time.sleep(0.05)
-            require(process.returncode == 0, f"Window failed ({process.returncode}); see {log}")
-        finally:
-            if process.poll() is None:
-                process.kill()
-                process.wait()
-    report = json.loads((data_root / "smoke-report.json").read_text())
-    require(report["ok"] and report["rendered_frames"] >= 2, f"Window did not initialize: {report}")
-    if sys.platform == "darwin":
-        modules.update(re.findall(r"^dyld\[\d+\]:\s+(?:<[^>]+>\s+)?(/.+)$", log.read_text(), re.M))
+def verify_modules(modules, binary, env, windows):
     require(len(modules) > 1, "No runtime library evidence was collected")
     for module in modules:
         if Path(module).resolve() == binary:
             continue
-        if os.name == "nt":
-            bundled = Path(module).parent.resolve() == binary.parent and Path(module).suffix.lower() == ".dll"
-            require(within(module, env["SYSTEMROOT"]) or bundled, f"Runtime loaded an unpackaged module: {module}")
+        if windows:
+            name = ntpath.basename(module).lower()
+            redistributable = re.match(r"(?:vcruntime[0-9]|msvcp[0-9]|concrt[0-9]|libopenblas|mradm_capi|mr_headtrack|libgcc|libgfortran|libwinpthread|dxcompiler|dxil)", name)
+            require(not redistributable and within(module, env["SYSTEMROOT"]), f"Runtime loaded a non-system dependency: {module}")
         else:
-            bundled = within(module, binary.parents[2] / "Contents/Frameworks")
-            require(module.startswith(MAC_SYSTEM_ROOTS) or bundled, f"Runtime loaded an unpackaged library: {module}")
-    report["loaded_modules"] = sorted(modules)
+            require(module.startswith(MAC_SYSTEM_ROOTS), f"Runtime loaded a non-system library: {module}")
+
+
+def observe(binary, option, data_root, env, log):
+    modules = set()
+    with log.open("w", encoding="utf-8") as output:
+        process = subprocess.Popen([str(binary), option, "--data-dir", str(data_root)],
+                                   cwd=data_root, env=env, stdout=output, stderr=output)
+        deadline = time.monotonic() + 90
+        try:
+            while process.poll() is None:
+                if os.name == "nt":
+                    modules.update(windows_modules(process.pid))
+                require(time.monotonic() < deadline, f"{option} timed out; see {log}")
+                time.sleep(0.025)
+            require(process.returncode == 0, f"{option} failed ({process.returncode}); see {log}")
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+    if sys.platform == "darwin":
+        modules.update(re.findall(r"^dyld\[\d+\]:\s+(?:<[^>]+>\s+)?(/.+)$", log.read_text(), re.M))
+    verify_modules(modules, binary, env, os.name == "nt")
+    return modules
+
+
+def run_smoke(binary, data_root):
+    binary, data_root = Path(binary).resolve(), Path(data_root).resolve()
+    data_root.mkdir(parents=True, exist_ok=True)
+    env = clean_environment(os.environ, os.name == "nt")
+    if sys.platform == "darwin":
+        env["DYLD_PRINT_LIBRARIES"] = "1"
+    native_modules = observe(binary, "--check-install", data_root, env, data_root / "native.log")
+    check = json.loads((data_root / "install-check.json").read_text())
+    require(check["ok"] and check["embedded_licenses"], "Installed executable lacks storage or embedded notices")
+    require(check.get("decode") and check.get("macinrender"), "Installer must contain the full decoder and renderer")
+    renderers = check.get("native_renderers", [])
+    require({renderer["name"] for renderer in renderers} == {"vbap", "binaural"}
+            and all(renderer["presented_frames"] == 4800 for renderer in renderers), "Native rendering did not consume the test scene")
+    graphics_modules = observe(binary, "--smoke-test", data_root, env, data_root / "window.log")
+    report = json.loads((data_root / "smoke-report.json").read_text())
+    require(report["ok"] and report["rendered_frames"] >= 2, f"Window did not initialize: {report}")
+    report.update(native_renderers=renderers, native_module_count=len(native_modules),
+                  graphics_module_count=len(graphics_modules), loaded_modules=sorted(native_modules | graphics_modules))
     (data_root / "runtime-report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     return report

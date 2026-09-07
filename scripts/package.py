@@ -169,7 +169,6 @@ def build_pkg(app, work, version, destination):
 def verify_app(app, version):
     expected = {"Contents/Info.plist", "Contents/MacOS/" + BINARY, "Contents/Resources/app.icns", "Contents/_CodeSignature/CodeResources"}
     actual = {str(file.relative_to(app)) for file in app.rglob("*") if file.is_file()}
-    expected |= {"Contents/Frameworks/libmradm_capi.dylib", "Contents/Frameworks/libmr_headtrack.dylib"}
     require(actual == expected, f"Unexpected app payload: {actual ^ expected}")
     require(not any(file.is_symlink() for file in app.rglob("*")), "Unexpected symlink in app")
     with (app / "Contents/Info.plist").open("rb") as source:
@@ -215,17 +214,8 @@ def wix_tool():
 
 
 def build_msi(binary, version, destination):
-    namespace = "http://wixtoolset.org/schemas/v4/wxs"
-    extra = ET.Element("Wix", xmlns=namespace)
-    fragment = ET.SubElement(extra, "Fragment")
-    group = ET.SubElement(fragment, "ComponentGroup", Id="NativeRuntime", Directory="INSTALLFOLDER")
-    for index, library in enumerate(sorted(binary.parent.glob("*.dll"))):
-        component = ET.SubElement(group, "Component", Id=f"Native{index}", Guid=guid("runtime." + library.name.lower()))
-        ET.SubElement(component, "File", Id=f"NativeFile{index}", Source=str(library), Name=library.name)
-        ET.SubElement(component, "RegistryValue", Root="HKCU", Key="Software\\MacinDecode\\AC4Player\\Installer", Name=library.name, Type="string", Value="[ProductVersion]", KeyPath="yes")
-    harvest = destination.with_suffix(".runtime.wxs")
-    ET.ElementTree(extra).write(harvest, encoding="utf-8", xml_declaration=True)
-    run([wix_tool(), "build", ROOT / "packaging/windows/player.wxs", harvest, "-arch", "x64",
+    require({path.name for path in binary.parent.iterdir()} == {binary.name}, "MSI payload must contain only the executable")
+    run([wix_tool(), "build", ROOT / "packaging/windows/player.wxs", "-arch", "x64",
          "-d", f"Version={version}", "-d", f"ProductCode={guid('product.' + version)}",
          "-d", f"UpgradeCode={guid('upgrade')}", "-d", f"ComponentCode={guid('executable')}",
          "-d", f"Executable={binary}", "-d", f"Icon={ROOT / 'assets/icons/app-windows.ico'}", "-o", destination])
@@ -286,6 +276,7 @@ def build(target, tag):
         legacy = importlib.util.module_from_spec(legacy_spec)
         legacy_spec.loader.exec_module(legacy)
         native = legacy.cargo_native(Path(metadata["target_directory"]) / target)
+        require(native.get("linkage") == "static", "Packaging requires static native linkage")
         extension = ".msi" if os.name == "nt" else ".pkg"
         artifact_stem = f"MacinDecode-AC4-Player-{artifact_version}-{target}"
         installer = work / (artifact_stem + extension)
@@ -295,28 +286,16 @@ def build(target, tag):
             payload = work / "windows-payload"
             payload.mkdir()
             shutil.copy2(binary, payload / binary.name)
-            for library in native["binary"].glob("*.dll"): shutil.copy2(library, payload / library.name)
-            dumpbin = shutil.which("dumpbin") or str(native["compiler"] / "dumpbin.exe")
-            legacy.windows_dependencies(payload, native, dumpbin)
-            expected_names = {file.name for file in payload.iterdir()}
+            verify_binary(payload / binary.name, target)
+            expected_names = {binary.name}
             build_msi(payload / binary.name, version, installer)
             extracted = verify_msi(installer, work, version, expected_names)
             require(sha256(extracted) == sha256(binary), "MSI changed executable bytes")
             executable = relocated / binary.name
             shutil.copy2(extracted, executable)
-            for library in (work / "expanded-msi").rglob("*.dll"):
-                require(library.name in expected_names, "Unlisted runtime in MSI")
-                require(sha256(library) == sha256(payload / library.name), "MSI changed runtime bytes")
-                shutil.copy2(library, relocated / library.name)
-            dependencies = {file.name:verify_binary(file, target, relocated) for file in relocated.iterdir()}
+            dependencies = {executable.name:verify_binary(executable, target)}
         else:
             app = make_app(binary, work / "app-root", version)
-            frameworks = app / "Contents/Frameworks"
-            frameworks.mkdir()
-            for name in ("libmradm_capi.dylib", "libmr_headtrack.dylib"):
-                shutil.copy2(native["binary"] / name, frameworks / name, follow_symlinks=True)
-                run(["codesign", "--force", "--sign", "-", "--timestamp=none", frameworks / name])
-            run(["codesign", "--force", "--sign", "-", "--timestamp=none", app])
             build_pkg(app, work, version, installer)
             extracted = verify_pkg(installer, work, version)
             require(sha256(extracted / "Contents/MacOS" / BINARY) == sha256(app / "Contents/MacOS" / BINARY), "PKG changed executable bytes")
@@ -324,7 +303,7 @@ def build(target, tag):
             shutil.copytree(extracted, relocated_app)
             verify_app(relocated_app, version)
             executable = relocated_app / "Contents/MacOS" / BINARY
-            dependencies = {file.name:verify_binary(file, target, relocated_app) for file in [executable, *(relocated_app / "Contents/Frameworks").glob("*.dylib")]}
+            dependencies = {executable.name:verify_binary(executable, target)}
         runtime = run_smoke(executable, work / "isolated profile")
         # Local paths used during verification are not distributed in manifests.
         runtime.pop("loaded_modules", None)
@@ -335,6 +314,8 @@ def build(target, tag):
                     "signing": "unsigned-msi" if os.name == "nt" else "ad-hoc-app/unsigned-pkg",
                     "minimum_os": "Windows 10 22H2" if os.name == "nt" else "macOS " + MAC_MINIMUM,
                     "native_commit":output(["git", "-C", native["source"], "rev-parse", "HEAD"]),
+                    "native_linkage": "static",
+                    "openblas": json.loads(Path(os.environ["OPENBLAS_BUILD_MANIFEST"]).read_text()) if os.name == "nt" else None,
                     "dependencies": dependencies, "smoke_test": runtime}
         shutil.copy2(installer, dist / installer.name)
         (dist / (installer.name + ".sha256")).write_text(f"{manifest['installer_sha256']}  {installer.name}\n", encoding="utf-8")

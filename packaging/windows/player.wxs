@@ -30,7 +30,6 @@
     </StandardDirectory>
     <Feature Id="Player" Title="MacinDecode AC-4 Player" Level="1">
       <ComponentRef Id="PlayerExecutable" />
-      <ComponentGroupRef Id="NativeRuntime" />
     </Feature>
   </Package>
 </Wix>

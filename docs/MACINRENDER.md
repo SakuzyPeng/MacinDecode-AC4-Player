@@ -95,8 +95,9 @@ cargo build --release
 python3 scripts/package-player.py
 ```
 
-打包脚本复制实际 Cargo 构建的库、许可证和构建信息。Mac `.app` 包含运动权限声明及本地签名；
-Windows 包包含 MacinRender、OpenBLAS 及所需的 MSVC 运行库，并逐个检查可执行文件和 DLL 的依赖。
+播放器直接静态链接 MacinRender C API 与头追桥接源码；完整传递依赖由 CMake File API 提供。
+Mac `.app` 包含运动权限声明及本地签名，Windows 载荷只有 EXE，许可内嵌于 About。
+安装包检查实际载荷、系统依赖、原生渲染及图形窗口，详见 [安装包与 CI](PACKAGING.md)。
 macOS 包使用圆角像素图标，Windows 可执行文件嵌入直角方块图标；窗口图标直接编译进程序。
 图标源文件和再生成方式见 [应用图标](../assets/icons/README.md)。Windows 构建还需要 SDK 的资源编译器，
 MSVC 构建会自动查找 `rc.exe`。

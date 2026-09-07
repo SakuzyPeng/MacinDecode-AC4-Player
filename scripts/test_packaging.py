@@ -3,7 +3,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from verify_runtime import clean_environment, pe_imports, verify_binary
+from verify_runtime import clean_environment, pe_imports, verify_binary, verify_modules
+from package import BINARY, build_msi, verify_app
 
 
 def pe_fixture(direct="kernel32.dll", delayed=None):
@@ -29,6 +30,26 @@ def pe_fixture(direct="kernel32.dll", delayed=None):
 
 
 class RuntimeAuditTests(unittest.TestCase):
+    def test_msi_authoring_rejects_extra_payload_before_invoking_wix(self):
+        with tempfile.TemporaryDirectory() as folder:
+            binary = Path(folder) / (BINARY + ".exe")
+            binary.write_bytes(b"executable")
+            (binary.parent / "libopenblas.dll").write_bytes(b"unwanted runtime")
+            with self.assertRaisesRegex(RuntimeError, "only the executable"):
+                build_msi(binary, "0.1.0", binary.parent / "player.msi")
+
+    def test_app_payload_rejects_native_libraries(self):
+        with tempfile.TemporaryDirectory() as folder:
+            app = Path(folder) / "Player.app"
+            for name in ["Contents/Info.plist", "Contents/MacOS/" + BINARY,
+                         "Contents/Resources/app.icns", "Contents/_CodeSignature/CodeResources",
+                         "Contents/Frameworks/libmradm_capi.dylib"]:
+                path = app / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"fixture")
+            with self.assertRaisesRegex(RuntimeError, "Unexpected app payload"):
+                verify_app(app, "0.1.0")
+
     def test_windows_environment_preserves_system_root_and_removes_developer_paths(self):
         for spelling in ["SystemRoot", "SYSTEMROOT", "systemroot"]:
             env = clean_environment({spelling:r"C:\Windows", "Path":r"D:\developer-tools", "WGPU_BACKEND":"vulkan", "DYLD_LIBRARY_PATH":"/custom"}, True)
@@ -48,7 +69,7 @@ class RuntimeAuditTests(unittest.TestCase):
         self.assertEqual(result["direct"], ["kernel32.dll"])
 
     def test_rejects_dynamic_crt_and_sqlite(self):
-        for library in ["VCRUNTIME140.dll", "MSVCP140.dll", "sqlite3.dll", "api-ms-win-crt-runtime-l1-1-0.dll"]:
+        for library in ["VCRUNTIME140.dll", "MSVCP140.dll", "sqlite3.dll", "api-ms-win-crt-runtime-l1-1-0.dll", "mradm_capi.dll", "libopenblas.dll", "libgfortran-5.dll", "dxcompiler.dll"]:
             with self.subTest(library=library), self.assertRaisesRegex(RuntimeError, "Unexpected DLL"):
                 self.check_image(pe_fixture(direct=library), lambda binary: verify_binary(binary, "x86_64-pc-windows-msvc"))
 
@@ -57,6 +78,17 @@ class RuntimeAuditTests(unittest.TestCase):
         self.assertEqual(self.check_image(image, pe_imports)["delay"], ["custom-renderer.dll"])
         with self.assertRaisesRegex(RuntimeError, "custom-renderer"):
             self.check_image(image, lambda binary: verify_binary(binary, "x86_64-pc-windows-msvc"))
+
+    def test_runtime_does_not_allow_adjacent_or_framework_libraries(self):
+        with tempfile.TemporaryDirectory() as folder:
+            binary = Path(folder) / "player.exe"
+            system = Path(folder) / "System32"
+            modules = {str(binary), str(system / "kernel32.dll"), str(Path(folder) / "libopenblas.dll")}
+            with self.assertRaisesRegex(RuntimeError, "non-system dependency"):
+                verify_modules(modules, binary, {"SYSTEMROOT":str(system)}, True)
+            modules = {str(binary), "/usr/lib/libSystem.B.dylib", str(Path(folder) / "Contents/Frameworks/libmradm_capi.dylib")}
+            with self.assertRaisesRegex(RuntimeError, "non-system library"):
+                verify_modules(modules, binary, {}, False)
 
     def test_rejects_wrong_architecture_and_console_executable(self):
         for offset, value in [(0x84, 0xAA64), (0x98 + 68, 3)]:

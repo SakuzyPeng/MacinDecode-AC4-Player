@@ -1,82 +1,38 @@
 use std::ffi::{c_char, c_void};
-use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
-
-use libloading::Library;
+#[cfg(native_macinrender)]
+use std::sync::OnceLock;
 
 use crate::raw;
-
-pub fn library_paths(stem: &str) -> Vec<PathBuf> {
-    let name = if cfg!(target_os = "windows") {
-        format!("{stem}.dll")
-    } else {
-        format!("lib{stem}.dylib")
-    };
-    let mut paths = Vec::new();
-    if let Ok(executable) = std::env::current_exe()
-        && let Some(parent) = executable.parent()
-    {
-        paths.push(parent.join(&name));
-        paths.push(parent.join("../Frameworks").join(&name));
-    }
-    if let Some(directory) = option_env!("MACINRENDER_BUILT_LIBRARY_DIR") {
-        paths.push(PathBuf::from(directory).join(name));
-    }
-    paths
-}
-
-pub fn load_library(stem: &str) -> Result<Library, String> {
-    let mut failures = Vec::new();
-    for path in library_paths(stem) {
-        if !path.is_file() {
-            continue;
-        }
-        // SAFETY: these are the app's packaged or Cargo-built native libraries.
-        // Every function pointer is validated and kept alive by its owning Library.
-        #[cfg(target_os = "windows")]
-        let loaded = unsafe {
-            libloading::os::windows::Library::load_with_flags(&path, 0x100 | 0x1000)
-                .map(Library::from)
-        };
-        #[cfg(not(target_os = "windows"))]
-        let loaded = unsafe { Library::new(&path) };
-        match loaded {
-            Ok(library) => return Ok(library),
-            Err(error) => failures.push(format!("{}: {error}", path.display())),
-        }
-    }
-    Err(format!(
-        "Cannot load {stem}; rebuild or reinstall the complete player. {}",
-        failures.join("; ")
-    ))
-}
 
 macro_rules! api {
     ($($name:ident ($($arg:ty),*) -> $result:ty;)*) => {
         #[derive(Clone)]
         pub struct Api {
-            _library: Arc<Library>,
             $(pub $name: unsafe extern "C" fn($($arg),*) -> $result,)*
+        }
+        #[cfg(native_macinrender)]
+        unsafe extern "C" {
+            $(fn $name($(_: $arg),*) -> $result;)*
         }
         impl Api {
             pub fn load() -> Result<Self, String> {
-                // Keep the native HRTF cache alive across output-mode changes.
-                // Failures are not cached, so a missing library can be retried.
-                static CACHED: OnceLock<Api> = OnceLock::new();
-                if let Some(api) = CACHED.get() {
-                    return Ok(api.clone());
+                #[cfg(not(native_macinrender))]
+                return Err("MacinRender is available on macOS and Windows".into());
+                #[cfg(native_macinrender)]
+                {
+                    // The statically linked native cache lives for the process lifetime.
+                    static CACHED: OnceLock<Api> = OnceLock::new();
+                    if let Some(api) = CACHED.get() {
+                        return Ok(api.clone());
                 }
-                let library = Arc::new(load_library("mradm_capi")?);
-                // SAFETY: signatures match the pinned C header; ABI tests check POD layouts.
-                $(let $name = *unsafe { library.get::<unsafe extern "C" fn($($arg),*) -> $result>(
-                    concat!(stringify!($name), "\0").as_bytes()) }.map_err(|e| e.to_string())?;)*
-                let api = Self { _library: library, $($name,)* };
+                let api = Self { $($name,)* };
                 // SAFETY: validated version entrypoints take no pointers.
                 if unsafe { (api.adm_api_version_major)() } != 1 || unsafe { (api.adm_api_version_minor)() } < 36 {
                     return Err("MacinRender C ABI v1.36 or later is required".into());
                 }
                 let _ = CACHED.set(api.clone());
                 Ok(api)
+                }
             }
         }
     };

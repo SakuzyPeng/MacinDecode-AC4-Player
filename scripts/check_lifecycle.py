@@ -73,10 +73,6 @@ def lifecycle(target):
             payload_copy.mkdir()
             copy = payload_copy / binary.name
             shutil.copy2(binary, copy)
-            if windows:
-                for library in location.glob("*.dll"): shutil.copy2(library, payload_copy / library.name)
-            else:
-                shutil.copytree(location / "Contents/Frameworks", work / "frameworks")
             binary.unlink()
             install(original, work / "repair.log", repair=True)
             require(binary.is_file(), "Repair did not restore the executable")
@@ -86,7 +82,6 @@ def lifecycle(target):
                 build_msi(copy, upgrade_version, upgrade)
             else:
                 app = make_app(copy, work / "upgrade-app", upgrade_version)
-                shutil.copytree(work / "frameworks", app / "Contents/Frameworks")
                 subprocess.run(["codesign", "--force", "--sign", "-", "--timestamp=none", str(app)], check=True)
                 build_pkg(app, work, upgrade_version, upgrade)
             install(upgrade, work / "upgrade.log")

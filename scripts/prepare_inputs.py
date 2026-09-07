@@ -6,12 +6,9 @@ import re
 import subprocess
 import sys
 import tarfile
-import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 INPUTS = ROOT / ".ci-inputs"
-OPENBLAS_VERSION = "0.3.34"
-OPENBLAS_SHA = "e9cb6134541f36c27346d5fc5995652f060fba227cebbbabcbda5a5a44d7c76b"
 BOOST_SHA = "85a33fa22621b4f314f8e85e1a5e2a9363d22e4f4992925d4bb3bc631b5a0c7a"
 
 
@@ -61,13 +58,8 @@ def prepare():
         run([sys.executable, core / "scripts/generate_spec_tables.py"])
         settings["MACINDECODE_AC4_SPEC_DIR"] = str(core / "spec")
     if os.name == "nt":
-        archive = INPUTS / "openblas.zip"
-        download(f"https://github.com/OpenMathLib/OpenBLAS/releases/download/v{OPENBLAS_VERSION}/OpenBLAS-{OPENBLAS_VERSION}-x64.zip", archive, OPENBLAS_SHA)
-        blas = INPUTS / "openblas"
-        with zipfile.ZipFile(archive) as source:
-            source.extractall(blas)
-        settings.update(OPENBLAS_LIBRARY=str(blas / "lib/libopenblas.lib"), LAPACKE_LIBRARY=str(blas / "lib/libopenblas.lib"),
-                        OPENBLAS_HEADER_PATH=str(blas / "include"), LAPACKE_HEADER_PATH=str(blas / "include"))
+        from prepare_openblas import prepare as prepare_openblas
+        settings.update(prepare_openblas(ROOT, download))
     if not os.getenv("BOOST_ROOT"):
         boost_archive = INPUTS / "boost.tar.bz2"
         download("https://archives.boost.io/release/1.89.0/source/boost_1_89_0.tar.bz2", boost_archive, BOOST_SHA)
