@@ -32,6 +32,7 @@ jobs:
       PYTHONUTF8: '1'
       PYTHONIOENCODING: utf-8
       MACOSX_DEPLOYMENT_TARGET: '14.0'
+      DEVELOPER_DIR: ${{ matrix.os == 'macos-15' && '/Applications/Xcode_26.3.app/Contents/Developer' || '' }}
       TARGET: ${{ matrix.target }}
       RELEASE_TAG: ${{ inputs.release-tag }}
     steps:
@@ -45,19 +46,19 @@ jobs:
         run: |
           rustup show
           rustup target add "$TARGET"
-      - name: Prepare pinned native build tools and full decoder inputs
-        run: |
-          python -m pip install cmake==3.31.6 ninja==1.11.1.4
-          python scripts/prepare_inputs.py
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          key: ${{ matrix.target }}
+          key: ${{ matrix.target }}-native-v2-xcode26.3-${{ hashFiles('crates/macinrender/native/CMakeLists.txt') }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-workspace-crates: true
           cache-directories: |
             target/package-tools
             .ci-inputs/native-dependencies
             .ci-inputs/macinrender
+      - name: Prepare pinned native build tools and full decoder inputs
+        run: |
+          python -m pip install cmake==3.31.6 ninja==1.11.1.4
+          python scripts/prepare_inputs.py
       - name: Format
         run: cargo fmt --all -- --check
       - name: Storage, SOFA and application tests

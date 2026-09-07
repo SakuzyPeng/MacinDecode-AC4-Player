@@ -6,7 +6,7 @@ Windows 程序安装到 `%LOCALAPPDATA%\Programs\MacinDecode AC-4 Player`；Rust
 
 ## 构建
 
-Windows 使用 Python 3.12、MSVC、.NET SDK；macOS 使用 Python 3.11+、Xcode Command Line Tools。CI 固定 CMake 3.31.6、Ninja 1.11.1.4、cargo-about 0.9.2 和 WiX 5.0.2。
+Windows 使用 Python 3.12、MSVC、.NET SDK；macOS 使用 Python 3.11+ 和支持 C++20 stop_token 的 Apple 工具链。CI 固定 Xcode 26.3、CMake 3.31.6、Ninja 1.11.1.4、cargo-about 0.9.2 和 WiX 5.0.2。
 
 ```sh
 python scripts/package.py --target x86_64-pc-windows-msvc
