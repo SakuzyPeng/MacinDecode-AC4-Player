@@ -45,13 +45,23 @@ them.
 
 ## Getting the app
 
-There is **no published installer yet**. The repository already carries the full packaging and
-install-check pipeline: tagging a commit `vX.Y.Z` makes CI build a per-user Windows x64 MSI and an
-Apple Silicon macOS PKG and open a pre-release draft; those installers are not formally signed yet.
-Until a release is published, [build from source](#building-from-source).
+Check [GitHub Releases](https://github.com/SakuzyPeng/MacinDecode-AC4-Player/releases) for downloadable
+versions and their usage notes. Under **Assets** at the bottom of a version's page, choose an installer
+for your computer:
 
-Where a released build installs: `%LOCALAPPDATA%\Programs\MacinDecode AC-4 Player` on Windows and
-`~/Applications` on macOS. Neither needs administrator rights.
+| Your computer | Installer |
+| --- | --- |
+| Windows 11, 64-bit Intel / AMD PC (keep Windows up to date) | `.msi` |
+| macOS 14 or later, Apple silicon Mac (M1 or newer) | `.pkg` |
+
+Double-click the installer and follow its steps. On Windows, the app installs to
+`%LOCALAPPDATA%\Programs\MacinDecode AC-4 Player`. On Mac, find it in **Applications** inside your
+home folder (`~/Applications`). Neither installer requires administrator rights.
+
+Preview installers are not formally signed, so your system may say it cannot verify the developer.
+Make sure you downloaded them from this repository's release page. You only need the `.msi` or `.pkg`;
+the checksum and build information attachments do not need to be installed. You can also
+[build from source](#building-from-source).
 
 ## Five steps to your first playback
 
@@ -99,13 +109,16 @@ live and do not interrupt decoding of the current track.
 
 ## Platform support
 
-| | Windows 10+ (x64) | macOS 14+ (Apple Silicon) | Linux |
+| | Windows 11 (x64, recommended) | macOS 14+ (Apple Silicon) | Linux |
 | --- | --- | --- | --- |
 | Inspect files | ✅ | ✅ | ✅ |
 | Decode | ✅ | ✅ | ✅ |
 | Playback | passthrough / system spatial / binaural | system spatial / binaural | ❌ |
 | 3D scene | ✅ | ✅ | ✅ (silent preview on the real timeline) |
 | Head tracking | manual | AirPods (in a proper `.app`) or manual | — |
+
+Keep Windows 11 up to date for fuller spatial audio support. Windows 10's spatial audio limits are
+described in the next section.
 
 Decoding works on all three platforms; audio output does not exist outside Windows and macOS, so
 Linux gives you a silent build you can inspect, decode and watch. Installers cover Windows x64 and

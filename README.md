@@ -37,12 +37,20 @@
 
 ## 获取应用
 
-目前**还没有公开发布的安装包**。仓库已经带有完整的打包与安装检查流程：给提交打 `vX.Y.Z` 标签后，
-CI 会构建 Windows x64 的当前用户 MSI 和 macOS Apple Silicon 的 PKG，并创建预发布草稿；这些安装包
-暂未正式签名。在正式发布之前，请按 [从源码构建](#从源码构建) 自己编译运行。
+请到 [GitHub Releases](https://github.com/SakuzyPeng/MacinDecode-AC4-Player/releases) 查看可下载的版本和使用说明。
+在对应版本页面下方的 **Assets** 中，按电脑选择安装包：
 
-安装位置（发布后）：Windows 装到 `%LOCALAPPDATA%\Programs\MacinDecode AC-4 Player`，
-macOS 装到 `~/Applications`，都不需要管理员权限。
+| 你的电脑 | 安装包 |
+| --- | --- |
+| Windows 11，Intel / AMD 64 位电脑（建议保持系统更新） | `.msi` |
+| macOS 14 或更新版本，Apple 芯片 Mac（M1 及更新机型） | `.pkg` |
+
+双击安装包，按提示完成安装。Windows 装到 `%LOCALAPPDATA%\Programs\MacinDecode AC-4 Player`，
+Mac 上的应用位于个人文件夹中的 **Applications（应用程序）**，即 `~/Applications`；都不需要管理员权限。
+
+预览版安装包尚未正式签名，系统可能提示无法验证开发者。请确认下载来源是本仓库的发布页面。
+普通使用只需下载 `.msi` 或 `.pkg`，其余校验和、构建信息附件无需安装。也可以按
+[从源码构建](#从源码构建) 自行编译。
 
 ## 上手五步
 
@@ -80,13 +88,15 @@ macOS 装到 `~/Applications`，都不需要管理员权限。
 
 ## 平台支持
 
-| | Windows 10+ (x64) | macOS 14+（Apple Silicon） | Linux |
+| | Windows 11（x64，推荐） | macOS 14+（Apple Silicon） | Linux |
 | --- | --- | --- | --- |
 | 查看文件信息 | ✅ | ✅ | ✅ |
 | 解码 | ✅ | ✅ | ✅ |
 | 播放 | 对象直通 / 系统空间音频 / 软件双耳 | 系统空间音频 / 软件双耳 | ❌ |
 | 三维场景 | ✅ | ✅ | ✅（按真实时间轴推进的静音预览） |
 | 头部追踪 | 手动 | AirPods（正式 `.app`）或手动 | — |
+
+建议保持 Windows 11 更新，以获得更完整的空间音频支持。Windows 10 的空间音频限制见下一节。
 
 解码在三个平台上都可用；Windows 与 macOS 之外没有播放输出，Linux 上得到的是可以看、可以检查、
 可以看场景推进的静音预览。安装包只覆盖 Windows x64 与 Apple Silicon；Intel Mac 可以从源码构建，但未经验证。
