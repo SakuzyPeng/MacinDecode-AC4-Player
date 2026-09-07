@@ -278,8 +278,8 @@ def build(target, tag):
         legacy_spec.loader.exec_module(legacy)
         native = legacy.cargo_native(Path(metadata["target_directory"]) / target)
         extension = ".msi" if os.name == "nt" else ".pkg"
-        name = f"MacinDecode-AC4-Player-{artifact_version}-{target}"
-        installer = work / (name + extension)
+        artifact_stem = f"MacinDecode-AC4-Player-{artifact_version}-{target}"
+        installer = work / (artifact_stem + extension)
         relocated = work / "relocated application"
         relocated.mkdir()
         if os.name == "nt":
@@ -329,7 +329,7 @@ def build(target, tag):
                     "dependencies": dependencies, "smoke_test": runtime}
         shutil.copy2(installer, dist / installer.name)
         (dist / (installer.name + ".sha256")).write_text(f"{manifest['installer_sha256']}  {installer.name}\n", encoding="utf-8")
-        (dist / (name + ".json")).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        (dist / (installer.stem + ".json")).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         print(f"Verified installer: {dist / installer.name}", flush=True)
 
 
