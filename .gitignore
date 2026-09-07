@@ -1,6 +1,7 @@
 /target/
 /dist/
 /.ci-inputs/
+/.ci-tools/
 __pycache__/
 /.local-test-media/
 /assets/fonts/NotoSansCJKsc-Regular.otf

@@ -19,7 +19,7 @@ python3 scripts/package.py --target aarch64-apple-darwin
 
 许可报告包括 Rust 依赖、播放器 MIT 许可、Noto CJK 字体及 MacinRender 原生第三方许可，并内嵌于 About 页面。图标沿用 `assets/icons/`，不另建一套品牌资源。
 
-打包后解包核对文件和哈希，再搬移完整程序载荷运行 SQLite/设置检查、原生空输出会话及实际图形窗口。运行时允许系统库和包内已检查的库，拒绝从构建目录或 Homebrew 加载未打包依赖。检查通过才输出 `dist/` 的安装包、校验和和构建清单。失败日志保存在 `target/packaging-failures/`。
+打包工具与稳定许可输入放在 `.ci-tools/`，避免 Cargo 缓存清理破坏 .NET 工具结构。打包后解包核对文件和哈希，再搬移完整程序载荷运行 SQLite/设置检查、原生空输出会话及实际图形窗口。运行时允许系统库和包内已检查的库，拒绝从构建目录或 Homebrew 加载未打包依赖。检查通过才输出 `dist/` 的安装包、校验和和构建清单。失败日志保存在 `target/packaging-failures/`。
 
 ## CI 与发布
 

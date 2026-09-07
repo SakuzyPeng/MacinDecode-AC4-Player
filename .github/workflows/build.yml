@@ -53,7 +53,7 @@ jobs:
           cache-workspace-crates: true
           cache-on-failure: true
           cache-directories: |
-            target/package-tools
+            .ci-tools
             .ci-inputs/native-dependencies
             .ci-inputs/macinrender
       - name: Prepare pinned native build tools and full decoder inputs

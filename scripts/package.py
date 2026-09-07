@@ -26,7 +26,7 @@ TARGETS = ("x86_64-pc-windows-msvc", "aarch64-apple-darwin")
 ABOUT_VERSION = "0.9.2"
 WIX_VERSION = "5.0.2"
 MAC_MINIMUM = "14.0"
-TOOLS = ROOT / "target/package-tools"
+TOOLS = ROOT / ".ci-tools"
 
 
 @contextmanager
@@ -125,7 +125,9 @@ def license_report(destination):
     for index, path in enumerate(legal_files):
         cleaned.append({"id":f"native-{index}", "name":path.name, "text":path.read_text(encoding="utf-8", errors="replace"),
                         "used_by":[{"crate":{"name":"MacinDecode / MacinRender native dependencies", "version":"", "repository":"https://github.com/SakuzyPeng/MacinRender-ADM-Core"}}]})
-    destination.write_text(json.dumps({"licenses": cleaned}, ensure_ascii=False, indent=2), encoding="utf-8")
+    serialized = json.dumps({"licenses": cleaned}, ensure_ascii=False, indent=2)
+    if not destination.exists() or destination.read_text(encoding="utf-8") != serialized:
+        destination.write_text(serialized, encoding="utf-8")
     raw.unlink()
 
 
@@ -199,8 +201,14 @@ def verify_pkg(package, work, version):
 
 def wix_tool():
     tool = TOOLS / "wix/wix.exe"
-    if not tool.exists():
-        run(["dotnet", "tool", "install", "wix", "--version", WIX_VERSION, "--tool-path", tool.parent])
+    if tool.is_file():
+        probe = subprocess.run([str(tool), "--version"], text=True, capture_output=True)
+        if probe.returncode == 0 and (probe.stdout.strip() == WIX_VERSION or probe.stdout.strip().startswith((WIX_VERSION + ".", WIX_VERSION + "+"))):
+            return tool
+    # The directory is owned by this script. A partially pruned .NET tool store
+    # cannot be repaired by `dotnet tool install` in place.
+    if tool.parent.exists(): shutil.rmtree(tool.parent)
+    run(["dotnet", "tool", "install", "wix", "--version", WIX_VERSION, "--tool-path", tool.parent])
     reported = output([tool, "--version"])
     require(reported == WIX_VERSION or reported.startswith((WIX_VERSION + ".", WIX_VERSION + "+")), "WiX version mismatch")
     return tool
@@ -268,7 +276,8 @@ def build(target, tag):
     dist = ROOT / "dist"
     dist.mkdir(exist_ok=True)
     with diagnostic_workspace("package-") as work:
-        notices = work / "licenses.json"
+        notices = TOOLS / "licenses/licenses.json"
+        notices.parent.mkdir(parents=True, exist_ok=True)
         license_report(notices)
         env = dict(os.environ, MACINDECODE_LICENSES_JSON=str(notices), MACOSX_DEPLOYMENT_TARGET=MAC_MINIMUM)
         run(["cargo", "build", "--locked", "--release", "--target", target], env=env)
