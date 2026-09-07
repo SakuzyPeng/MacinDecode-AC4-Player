@@ -1,151 +1,246 @@
 # MacinDecode AC-4 Player
 
-一个用于打开、检查和播放 AC-4 空间音频文件的原生桌面应用。解码在 Windows、macOS 和 Linux 上
-都可用；Windows 与 macOS 支持播放，Linux 提供实时场景预览。
+**简体中文** · [English](README.en.md)
 
-## 使用
+一个用来**打开、查看和播放 Dolby AC-4 空间音频文件**的桌面应用。它自带 AC-4 解码器，
+不调用系统或第三方媒体解码器；解码出的音频对象既可以送到系统空间音频或耳机双耳渲染，
+也会实时画在窗口中央的三维场景里。
 
-1. 启动应用，点击添加文件或直接把文件拖入窗口。
-2. 在侧栏顶部选择或新建播放列表。单击歌曲查看信息，双击、Enter 或右键 Play 开始播放。
-3. 在 Audio settings 中选择播放模式；使用上一曲、下一曲、播放、暂停、进度跳转、音量和静音控制。
-4. 如需排查文件或播放问题，可打开详情与诊断窗口。
+> 它不是通用音乐播放器：只处理**含 AC-4 音轨**的 `.m4a`、`.mp4` 和 `.ac4`，不播放 MP3、AAC、FLAC。
 
-支持 `.m4a`、`.mp4` 和 `.ac4` 文件；文件本身需要包含 AC-4 音频。
+## 目录
 
-## 主要功能
+- [能用它做什么](#能用它做什么)
+- [获取应用](#获取应用)
+- [上手五步](#上手五步)
+- [播放模式怎么选](#播放模式怎么选)
+- [平台支持](#平台支持)
+- [Windows 空间音频的前提](#windows-空间音频的前提)
+- [常见问题](#常见问题)
+- [已知限制](#已知限制)
+- [从源码构建](#从源码构建)
+- [开发者文档](#开发者文档)
+- [许可证](#许可证)
 
-- 多播放列表支持新建、改名、删除与排序；歌曲支持 Ctrl/Cmd、Shift 多选、拖拽重排、跨列表复制或移动。
-- 浏览列表与当前播放独立；切换列表不打断声音，底部歌曲按钮可返回播放来源列表。
-- SQLite 自动保存列表和会话，JSON 保存用户设置；重新打开时恢复当前歌曲及断点并保持暂停。
-- 同一文件可加入多个列表，同列表自动去重；移除正在播放的条目后继续本曲，删除来源列表则本曲结束后停止。
-- 查看容器、节目、对象数量、低频声道和其他 AC-4 信息。
-- 在兼容的 Windows 音频设备上播放 Full A-JOC 空间音频，并记住所选设备。
-- macOS 默认通过 MacinRender 渲染多声道床，再交给系统空间音频；Windows 默认保留原始对象直通。
-- 系统床固定 Apple 几何，开放 7.1.4／9.1.6／22.2，默认 7.1.4；22.2 默认等功率复制 LFE。
-- macOS 7.1.4／9.1.6 默认开启可关闭的控制中心 Atmos 标识辅助；22.2 跳过辅助链，详见 [播放集成](docs/MACINRENDER.md)。
-- 支持 SAF 软件双耳、内置 KEMAR／用户 SOFA，以及独立的手动朝向和 macOS AirPods 采集。
-- 支持上一曲、下一曲切换，以及顺序播放、单曲循环、列表循环和随机播放；默认顺序播放且不循环。
-- MP4/M4A 支持安全精确跳转；包含完整随机访问点的裸 `.ac4` 也可跳转。
-- 播放结束后可复用已打开的文件从头重播；设备断开或 Scene 拓扑变化时自动恢复。
-- 解码失败后设置仍可操作，并可点击播放从头重试，无需重启应用。
-- 显示缓冲、解码和输出状态，便于判断文件是否可播放。
+## 能用它做什么
 
-## Windows 播放要求
+- **播放 AC-4 沉浸声**：Windows 走空间音频对象直通，macOS 走系统空间音频，两个平台都可以改用软件双耳（普通耳机即可）。
+- **看清文件里有什么**：容器、节目、对象数量、低频声道、码率等信息，不播放也能看。
+- **管理多个播放列表**：新建、改名、排序、拖拽、跨列表复制或移动；关掉再打开会回到上次那首歌和断点，并保持暂停。
+- **实时三维场景**：每个音频对象在空间中的位置随播放推进移动，可以任意角度观察。
+- **出问题时能查**：诊断窗口显示缓冲、解码和输出状态，帮你判断是文件的问题还是设备的问题。
 
-- 对象直通能力取决于当前 Windows 空间声音格式可提供的动态音频对象数量。
-- AC-4 L3 最多包含 16 个对象，可在 Windows 10 的 Dolby Atmos 耳机或内置扬声器路径上回放。
-- AC-4 L4 需要 20 个对象；上述 Dolby Atmos 路径需要更新后的 Windows 11，较早版本只提供 16 个对象。
-  Dolby Atmos 家庭影院（HDMI）路径在较早的 Windows 版本上也可提供 20 个对象。
-- 使用 Dolby Atmos 时需要安装 Dolby Access，并在 Windows 中启用对应的空间声音格式；
-  Windows Spatial Audio API 本身不强制使用 Dolby Atmos。
+支持的文件：`.m4a`、`.mp4`、`.ac4`，内部必须是 AC-4 音轨。目前主要面向 **Full A-JOC** 沉浸声内容，
+其他 AC-4 形式可能无法播放——但仍然可以查看它们的信息。
+
+## 获取应用
+
+目前**还没有公开发布的安装包**。仓库已经带有完整的打包与安装检查流程：给提交打 `vX.Y.Z` 标签后，
+CI 会构建 Windows x64 的当前用户 MSI 和 macOS Apple Silicon 的 PKG，并创建预发布草稿；这些安装包
+暂未正式签名。在正式发布之前，请按 [从源码构建](#从源码构建) 自己编译运行。
+
+安装位置（发布后）：Windows 装到 `%LOCALAPPDATA%\Programs\MacinDecode AC-4 Player`，
+macOS 装到 `~/Applications`，都不需要管理员权限。
+
+## 上手五步
+
+1. 启动应用。
+2. 点击侧栏的 **Add files**，或者直接把文件拖进窗口。
+3. 侧栏顶部选择播放列表（`+` 新建，`⋯` 管理）。**单击**条目查看信息，**双击**（或按 Enter、右键 → Play）开始播放。
+4. 右上角 **Audio settings** 选择播放模式，旁边的下拉框选择输出设备。
+5. 底部是播放控制：上一曲 / 播放 / 下一曲、进度条、音量、静音，以及顺序、单曲循环、列表循环和随机。
+
+**三维场景**（窗口中央）：拖动旋转视角，`Shift` + 拖动平移，滚轮缩放；右上角 `ISO` / `TOP` / `BACK` /
+`SIDE` / `RESET` 可以直接跳到固定视角，另有按钮切换透视/正交投影和元素编号显示。场景一次最多画 20 个
+对象，超出时左下角会说明还有多少没画出来。
+
+**想看更多细节**：文件卡片上的 **Details…** 打开比特流详情窗口，场景标题右侧的 **`...`** 打开诊断窗口。
+
+## 播放模式怎么选
+
+在 **Audio settings** 里切换。选错了也不要紧——切换是热生效的，不会中断当前这首歌的解码。
+
+| 模式 | 可用平台 | 说明 |
+| --- | --- | --- |
+| **Automatic**（默认） | 全部 | Windows 用对象直通，macOS 用系统空间音频 |
+| **Windows object passthrough** | Windows | 把 AC-4 的动态对象原样交给 Windows 空间声音，需要先在系统里启用空间声音格式 |
+| **System spatial audio** | macOS / Windows | 先渲染成 7.1.4 / 9.1.6 / 22.2 多声道床（Apple 几何），再交给系统的空间音频。默认 7.1.4 |
+| **SAF binaural** | macOS / Windows | 软件双耳渲染，任何普通立体声耳机都能用；内置 KEMAR，也可以选自己的 SOFA 文件 |
+
+- **22.2** 默认把单路 LFE 以等功率复制到两路 LFE，也可以选择直通。
+- **macOS 的 7.1.4 / 9.1.6** 默认开启“控制中心 Atmos 标识辅助”，可以关闭；它只影响系统对内容的标识，
+  不改变 AC-4 的渲染方式，详见 [播放集成](docs/MACINRENDER.md)。
+- **听者朝向**：在 SAF binaural 和 Windows object passthrough 下可调——macOS 可用 AirPods 头部追踪
+  （需要带运动权限声明的正式 `.app`），其他情况使用手动朝向（在设置窗口里拖动方块或直接输入角度）。
+  系统空间音频模式下由系统负责头部追踪。
+- **自定义 HRTF**：选择 SOFA 文件后会复制到数据目录的 `sofa/` 中统一管理，下次可直接从列表选择。
+
+## 平台支持
+
+| | Windows 10+ (x64) | macOS 14+（Apple Silicon） | Linux |
+| --- | --- | --- | --- |
+| 查看文件信息 | ✅ | ✅ | ✅ |
+| 解码 | ✅ | ✅ | ✅ |
+| 播放 | 对象直通 / 系统空间音频 / 软件双耳 | 系统空间音频 / 软件双耳 | ❌ |
+| 三维场景 | ✅ | ✅ | ✅（按真实时间轴推进的静音预览） |
+| 头部追踪 | 手动 | AirPods（正式 `.app`）或手动 | — |
+
+解码在三个平台上都可用；Windows 与 macOS 之外没有播放输出，Linux 上得到的是可以看、可以检查、
+可以看场景推进的静音预览。安装包只覆盖 Windows x64 与 Apple Silicon；Intel Mac 可以从源码构建，但未经验证。
+应用使用 GPU 绘制场景（Windows 走 DX12），需要可用的显卡驱动。
+
+## Windows 空间音频的前提
+
+对象直通能播多少对象，取决于当前 Windows 空间声音格式能提供的**动态对象数量**：
+
+- **AC-4 L3** 最多 16 个对象：Windows 10 的 Dolby Atmos 耳机或内置扬声器路径即可回放。
+- **AC-4 L4** 需要 20 个对象：上述路径需要更新后的 Windows 11，较早版本只提供 16 个；
+  Dolby Atmos 家庭影院（HDMI）路径在较早版本上也能提供 20 个。
+- 使用 Dolby Atmos 需要安装 **Dolby Access** 并在 Windows 设置里启用对应的空间声音格式。
+  Windows Spatial Audio API 本身并不强制使用 Dolby Atmos。
 
 对象数量限制见 Microsoft 的
 [Spatial Sound runtime resource limits](https://github.com/MicrosoftDocs/win32/blob/docs/desktop-src/CoreAudio/spatial-sound.md#microsoft-spatial-sound-runtime-resource-implications)。
+输出设备下拉框里灰掉的设备就是槽位不够的设备，把鼠标停在上面会说明还差多少。
 
-在 Windows 体验手动头部追踪时，建议先确认回放链路本身延迟正常。虚拟声卡、虚拟混音软件及无线耳机
-可能引入额外的缓冲或传输延迟，让声音方向的变化落后于操作。可先选择声卡直接输出到有线耳机作为对照，
-再逐一接入虚拟声卡或无线耳机，便于区分回放链路延迟与头部追踪本身的响应。
+## 常见问题
 
-## 平台与限制
+**为什么没有声音？**
+先看状态栏和诊断窗口：如果显示解码失败，说明这个文件的 AC-4 形式暂不支持；如果显示输出不可用，
+多半是播放模式与设备不匹配。Windows 对象直通要求设备提供足够的动态对象槽位（见上一节）；
+想先确认文件本身能播，可以切到 **SAF binaural**，它只需要一副普通耳机。
 
-- Windows：支持文件检查、解码和空间音频播放。
-- macOS：支持系统空间音频和 SAF 双耳；AirPods 采集需要包含运动权限声明的 `.app`。
-- Linux：支持文件检查、解码和按实际时间轴推进的 3D 场景预览。
-  用 `--no-default-features` 构建可以关掉解码，得到一个只做检查的外壳（也是唯一不需要规范表的配置）；
-  这个外壳在**所有平台**上都能构建，Windows 上也一样——那里它同样不提供播放，因为没有可播的东西。
-- 当前聚焦 Full A-JOC 内容，其他 AC-4 编码形式可能无法播放。
-- 进度条会在后台 seek 索引完成后启用。拖动只预览，松开时执行一次跳转，并保持原来的播放/暂停状态。
-- MP4 seek 同时要求容器同步样本和 AC-4 Full random access；裸流要求 Core 报告 Full random access。
-  目标之前没有安全点时会拒绝跳转，当前播放不受影响。
-- 裸 `.ac4` 中途改变采样率会安全停止并报错，不跨采样率推测时间线。
-- 压缩音频按帧读取，不把长媒体完整读入内存。检查、索引和解码复用打开的文件与 MP4 元数据，
-  各自使用 256 KiB 读缓冲；定位索引最多保存 8192 个安全起点，精确 seek 从安全点向前解码。
-- seek、重播和恢复沿用打开的文件句柄；文件改名或删除后仍可继续访问原文件。
-  Windows 打开期间拒绝就地写入；读取时检测到文件大小或修改时间改变会停止，移除并重新添加文件可重新载入。
-- MP4 `moov` 元数据上限为 64 MiB，单个 packet 上限约 16 MiB。超限会明确报错，不按文件总长度分配内存。
-- 不自动应用响度调整、动态范围控制、对白增强或额外降混。
+**进度条为什么是灰的？**
+打开文件后，后台会并行建立跳转索引，索引完成之前不能拖动——这不影响播放，第一次播放不用等它。
+状态栏会显示正在建立索引。少数文件本身没有安全的跳转点，那么进度条会一直不可用。
 
-系统空间音频效果取决于文件内容、操作系统设置和输出设备能力。软件双耳支持普通立体声输出设备。
+**拖动进度条为什么没反应？**
+拖动过程只是预览，松手才真正跳转，并保持你原来的播放/暂停状态。如果目标位置之前没有安全跳转点，
+应用会拒绝这次跳转，当前播放不受影响。
 
-## 后续计划
+**转头之后声音方向跟不上？**
+先排除回放链路的延迟。虚拟声卡、虚拟混音软件和无线耳机都会引入额外缓冲。建议先用声卡直连有线耳机
+作为对照，再逐一接入其他设备，就能区分是链路延迟还是头部追踪本身的响应。
 
-- 增加直接面向物理多声道扬声器设备的输出。
-- 扩展实时 Scene 渲染器到 EAR、HOA 与 Apple AUSpatialMixer。
+**播放列表和设置存在哪里？**
 
-## 构建与开发
+- macOS：`~/Library/Application Support/com.macinrender.macindecode-ac4-player/`
+- Windows：`%APPDATA%\com.macinrender.macindecode-ac4-player\data\`
+- Linux：`${XDG_DATA_HOME:-~/.local/share}/com.macinrender.macindecode-ac4-player/`
 
-默认构建还会从锁定源码编译 MacinRender，需 CMake/Ninja 与 C++20 工具链。原生依赖、平台设置、
-源代码覆盖及应用打包见 [MacinRender 集成](docs/MACINRENDER.md)。
-`--no-default-features --features decode` 可关闭 MacinRender，保留原有 Windows 对象直通和其他平台预览。
+里面是播放列表数据库（`library.sqlite3`）、设置（`settings.json`）、窗口状态（`app.ron`）和你的 SOFA 文件（`sofa/`）。
+删掉整个目录就能恢复初始状态。加 `--data-dir <路径>` 启动可以使用独立的数据目录。
+
+**文件改名或移动之后怎么办？**
+右键条目 → **Locate file…** 重新指向新位置，该文件在所有播放列表里的引用都会一起更新。
+无法读取的条目不会被自动删除，可以随时重试。
+
+**播放中改动了文件会怎样？**
+播放期间检测到文件大小或修改时间变化会安全停止；把条目移除再重新添加即可继续。
+播放过程中改名或删除文件不影响当前这首——应用使用已经打开的文件句柄。
+
+## 已知限制
+
+- **不做任何自动响度处理**：不应用响度调整、动态范围控制（DRC）、对白增强或额外降混。
+- 当前聚焦 **Full A-JOC** 内容，其他 AC-4 编码形式可能无法播放。
+- **跳转有前提**：MP4/M4A 需要容器同步样本加上解码器报告的 Full random access；裸 `.ac4` 需要同步帧范围
+  加上 Full random access。
+- 裸 `.ac4` 在中途改变采样率会安全停止并报错，不跨采样率推测时间线。
+- MP4 `moov` 元数据上限 64 MiB，单个 packet 上限约 16 MiB，超出会明确报错。
+- 三维场景一次最多绘制 20 个对象。
+- 空间效果最终取决于文件内容、系统设置和输出设备能力；软件双耳则支持任何普通立体声设备。
+
+## 从源码构建
+
+### 需要准备
+
+- **Rust 1.98**——`rust-toolchain.toml` 已锁定版本，rustup 会自动安装。
+- **Python 3.11+**——用于准备构建输入（Windows 上的 MSI 检查需要 3.12）。
+- **CMake、Ninja 和 C++20 工具链**——仅 macOS/Windows 需要，用于编译 MacinRender 原生渲染库；Linux 不需要。
+- **网络**——构建脚本会下载校验过的 Noto Sans CJK 字体用于显示中日韩文件名；可用
+  `MACINDECODE_UI_FONT_PATH` 指定本地字体文件跳过下载。
+
+### 三种构建规模
+
+| 构建 | 命令 | 需要规范表 | 需要 C++ 工具链 |
+| --- | --- | --- | --- |
+| 只做检查 | `cargo run --no-default-features` | ❌ | ❌ |
+| 解码 + 场景预览 + Windows 对象直通 | `cargo run --no-default-features --features decode` | ✅ | ❌ |
+| 完整功能（默认） | `cargo run` | ✅ | ✅（macOS/Windows） |
+
+“规范表”指从官方 ETSI TS 103 190 规范在本地生成的三份表格。**所有平台都需要**——这是构建输入，
+不是平台限制；本仓库不会提交或分发这些文件。
+
+### 准备构建输入（做一次即可）
+
+```sh
+python scripts/prepare_inputs.py
+```
+
+它按 `Cargo.toml` 和 `crates/macinrender/native/CMakeLists.txt` 里锁定的提交检出
+[MacinDecode-AC4-Core](https://github.com/SakuzyPeng/MacinDecode-AC4-Core) 与 MacinRender，
+生成规范表，并在 Windows 上准备 OpenBLAS 和 Boost，全部放进被忽略的 `.ci-inputs/`。
+然后在你的 shell 里指向它们：
+
+```bash
+export MACINDECODE_AC4_SPEC_DIR="$PWD/.ci-inputs/ac4-core/spec"
+export MACINRENDER_SOURCE_DIR="$PWD/.ci-inputs/macinrender"
+export BOOST_ROOT="$PWD/.ci-inputs/boost_1_89_0"
+```
+
+```bat
+set "MACINDECODE_AC4_SPEC_DIR=%CD%\.ci-inputs\ac4-core\spec"
+set "MACINRENDER_SOURCE_DIR=%CD%\.ci-inputs\macinrender"
+set "BOOST_ROOT=%CD%\.ci-inputs\boost_1_89_0"
+```
+
+`MACINDECODE_AC4_SPEC_DIR` 指向的目录里必须有 `generated/ts103190_pdf_tables.rs`、
+`ts_103190_tables.c` 和 `ts_103190_tables_part2.c`。Windows 的完整构建还需要 OpenBLAS 相关的
+CMake 变量，`scripts/prepare_inputs.py` 会一并准备；如果不想自己拼这些变量，直接用下面的打包脚本，
+它会在同一个进程里准备输入再构建。
+
+### 日常命令
 
 ```bash
 cargo run
+cargo test
 cargo fmt --all -- --check
-cargo test
 cargo clippy --all-targets -- -D warnings
 ```
 
-完整解码功能需要从官方 ETSI 规范在本地生成三份锁定表——**所有平台都一样**，这是构建输入而不是
-平台限制。本仓库不会提交或分发这些文件。在与 `Cargo.lock` 锁定版本一致的 `MacinDecode-AC4-Core`
-检出中运行：
+普通 `cargo test` 不需要音频设备，也不需要真实媒体。涉及硬件和真实媒体的回归测试是 ignored 的，
+需要设置 `MACINDECODE_AC4_TEST_MEDIA` 后单独运行：
 
-```text
-python -m pip install -r scripts/requirements-spec.txt
-python scripts/fetch_specs.py
-python scripts/generate_spec_tables.py
-```
-
-随后设置构建环境并运行项目：
-
-```bat
-set "PATH=<Rust-1.98-bin>;%PATH%"
-set "MACINDECODE_AC4_SPEC_DIR=<MacinDecode-AC4-Core>\spec"
-cargo test
-cargo clippy --all-targets -- -D warnings
-cargo run
-```
-
-```bash
-export MACINDECODE_AC4_SPEC_DIR=<MacinDecode-AC4-Core>/spec
-cargo test
-cargo clippy --all-targets -- -D warnings
-cargo run
-```
-
-`MACINDECODE_AC4_SPEC_DIR` 中必须存在：
-
-- `generated/ts103190_pdf_tables.rs`
-- `ts_103190_tables.c`
-- `ts_103190_tables_part2.c`
-
-本地端到端回归可额外设置 `MACINDECODE_AC4_TEST_MEDIA`，再运行：
-
-```bat
+```sh
 cargo test decoder::worker::tests::decodes_local_media_into_a_bounded_scene_buffer -- --ignored
+cargo test decoder::worker::tests::seeks_real_media_across_epochs_on_the_open_file -- --ignored
 cargo test backend::windows::tests::submits_decoded_scene_to_windows_spatial_audio -- --ignored
 cargo test -p macindecode-windows-spatial-audio ended_renderer_releases_objects_without_entering_failed_state -- --ignored
-cargo test -p macindecode-windows-spatial-audio opens_enumerated_endpoints_by_stable_id -- --ignored
 ```
 
-真实媒体应只放在仓库根目录被忽略的 `.local-test-media/`，不得提交到 Git。
+真实媒体只放在仓库根目录被忽略的 `.local-test-media/`，不要提交到 Git。
 
-开发者文档：[架构](docs/ARCHITECTURE.md) · [Windows 解码](docs/WINDOWS_DECODE.md) ·
-[Windows Spatial Audio](docs/WINDOWS_SPATIAL_AUDIO.md) · [播放列表与持久化](docs/PLAYLISTS.md)
-
-## 安装包与 CI
-
-Windows x64 提供当前用户 MSI，macOS Apple Silicon 提供当前用户 PKG。本轮保留完整解码、
-多播放列表、MacinRender 与头追能力。Windows 载荷只有一个 EXE；macOS 保留标准 `.app`，渲染和头追代码静态编入主程序，最低版本为 14.0。
-详见 [安装包与 CI](docs/PACKAGING.md) 和 [SOFA 目录](docs/STORAGE.md)。
+### 打包
 
 ```sh
 python scripts/package.py --target x86_64-pc-windows-msvc
 python3 scripts/package.py --target aarch64-apple-darwin
 ```
 
-PR、main 推送和手动 CI 运行完整默认功能的两平台构建和安装检查。版本标签通过检查后只创建
-预发布 Release 草稿；首次安装包未正式签名。About 页面显示内嵌第三方许可。
+脚本自己准备锁定的构建输入，构建 release，检查实际载荷、系统依赖、原生渲染和图形窗口，通过后才在
+`dist/` 输出安装包、校验和与构建清单。PR、`main` 推送和手动触发都会在两个平台跑同一套流程，
+详见 [安装包与 CI](docs/PACKAGING.md)。
+
+## 开发者文档
+
+[架构](docs/ARCHITECTURE.md) ·
+[播放集成（MacinRender）](docs/MACINRENDER.md) ·
+[Windows 解码](docs/WINDOWS_DECODE.md) ·
+[Windows Spatial Audio](docs/WINDOWS_SPATIAL_AUDIO.md) ·
+[播放列表与持久化](docs/PLAYLISTS.md) ·
+[数据目录与 SOFA](docs/STORAGE.md) ·
+[安装包与 CI](docs/PACKAGING.md)
 
 ## 许可证
 
-本项目采用 [MIT License](LICENSE)。
+本项目采用 [MIT License](LICENSE)。应用的 About 页面内嵌了全部第三方依赖的许可声明。
