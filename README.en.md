@@ -7,6 +7,8 @@ own AC-4 decoder — no system or third-party media decoder is involved — and 
 objects to system spatial audio or to a software binaural renderer, while drawing those objects live
 in a 3D scene in the middle of the window.
 
+![Illustrative spatial scene: orange audio objects orbit the listener, leaving fading position trails.](assets/readme/spatial-orbit.svg)
+
 > This is not a general-purpose music player: it handles `.m4a`, `.mp4` and `.ac4` files that
 > **contain an AC-4 track**, and does not play MP3, AAC or FLAC.
 
