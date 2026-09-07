@@ -1,6 +1,7 @@
 """Inspect the actual executable and run it without developer library paths."""
 import ctypes
 import json
+import ntpath
 import os
 from pathlib import Path
 import re
@@ -148,18 +149,24 @@ def within(path, root):
         return False
 
 
-def run_smoke(binary, data_root):
-    binary, data_root = Path(binary).resolve(), Path(data_root).resolve()
-    data_root.mkdir(parents=True, exist_ok=True)
-    env = dict(os.environ)
+def clean_environment(original, windows):
+    # os.environ is case-insensitive on Windows, a plain copied dict is not.
+    env = {key.upper() if windows else key: value for key, value in original.items()}
     for key in list(env):
         if key.startswith(("DYLD_", "WGPU_", "VK_")) or key in ("LD_LIBRARY_PATH", "LD_PRELOAD"):
             env.pop(key)
-    if os.name == "nt":
-        system = Path(env["SystemRoot"])
-        env["PATH"] = os.pathsep.join(map(str, [system / "System32", system]))
+    if windows:
+        system = env["SYSTEMROOT"]
+        env["PATH"] = ";".join([ntpath.join(system, "System32"), system])
     else:
         env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
+    return env
+
+
+def run_smoke(binary, data_root):
+    binary, data_root = Path(binary).resolve(), Path(data_root).resolve()
+    data_root.mkdir(parents=True, exist_ok=True)
+    env = clean_environment(os.environ, os.name == "nt")
     subprocess.run([str(binary), "--check-install", "--data-dir", str(data_root)],
                    cwd=data_root, env=env, check=True, timeout=30, capture_output=True)
     check = json.loads((data_root / "install-check.json").read_text())
@@ -194,7 +201,7 @@ def run_smoke(binary, data_root):
             continue
         if os.name == "nt":
             bundled = Path(module).parent.resolve() == binary.parent and Path(module).suffix.lower() == ".dll"
-            require(within(module, env["SystemRoot"]) or bundled, f"Runtime loaded an unpackaged module: {module}")
+            require(within(module, env["SYSTEMROOT"]) or bundled, f"Runtime loaded an unpackaged module: {module}")
         else:
             bundled = within(module, binary.parents[2] / "Contents/Frameworks")
             require(module.startswith(MAC_SYSTEM_ROOTS) or bundled, f"Runtime loaded an unpackaged library: {module}")

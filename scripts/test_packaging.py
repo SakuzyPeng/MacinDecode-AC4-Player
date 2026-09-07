@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from verify_runtime import pe_imports, verify_binary
+from verify_runtime import clean_environment, pe_imports, verify_binary
 
 
 def pe_fixture(direct="kernel32.dll", delayed=None):
@@ -29,6 +29,14 @@ def pe_fixture(direct="kernel32.dll", delayed=None):
 
 
 class RuntimeAuditTests(unittest.TestCase):
+    def test_windows_environment_preserves_system_root_and_removes_developer_paths(self):
+        for spelling in ["SystemRoot", "SYSTEMROOT", "systemroot"]:
+            env = clean_environment({spelling:r"C:\Windows", "Path":r"D:\developer-tools", "WGPU_BACKEND":"vulkan", "DYLD_LIBRARY_PATH":"/custom"}, True)
+            self.assertEqual(env["SYSTEMROOT"], r"C:\Windows")
+            self.assertEqual(env["PATH"], r"C:\Windows\System32;C:\Windows")
+            self.assertNotIn("WGPU_BACKEND", env)
+            self.assertNotIn("DYLD_LIBRARY_PATH", env)
+
     def check_image(self, image, operation):
         with tempfile.TemporaryDirectory() as folder:
             binary = Path(folder) / "player.exe"
