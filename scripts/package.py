@@ -87,7 +87,7 @@ def cargo_about():
     executable = "cargo-about.exe" if os.name == "nt" else "cargo-about"
     candidate = os.environ.get("CARGO_ABOUT") or shutil.which(executable) or str(TOOLS / "bin" / executable)
     if not Path(candidate).is_file():
-        run(["cargo", "install", "cargo-about", "--version", ABOUT_VERSION, "--locked", "--root", TOOLS,
+        run(["cargo", "install", "cargo-about", "--version", ABOUT_VERSION, "--locked", "--features", "cli", "--bin", "cargo-about", "--root", TOOLS,
              "--target-dir", ROOT / "target/package-tool-build"])
         candidate = str(TOOLS / "bin" / executable)
     require(output([candidate, "--version"]).split()[-1] == ABOUT_VERSION, "cargo-about version mismatch")
