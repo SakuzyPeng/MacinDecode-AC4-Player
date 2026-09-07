@@ -86,9 +86,10 @@ live and do not interrupt decoding of the current track.
 
 - **22.2** copies the single LFE to both LFE channels at equal power by default; direct routing is
   also available.
-- **7.1.4 and 9.1.6 on macOS** enable a Control Center Atmos label assist by default, which you can
-  turn off. It only changes how the system identifies the content — AC-4 rendering is unchanged. See
-  [playback integration](docs/MACINRENDER.md) (in Chinese).
+- **The macOS Control Center Dolby Atmos label only works with 7.1.4 system spatial audio output**;
+  it does not work with 9.1.6 or 22.2. The Control Center Atmos label assist is enabled by default
+  and can be turned off. It only changes how the system identifies the content — AC-4 rendering is
+  unchanged. See [playback integration](docs/MACINRENDER.md) (in Chinese).
 - **Listener orientation** is adjustable in SAF binaural and Windows object passthrough: macOS can
   use AirPods head tracking (which requires a proper `.app` carrying the motion usage description),
   and everything else uses manual orientation — drag the pad in the settings window or type the

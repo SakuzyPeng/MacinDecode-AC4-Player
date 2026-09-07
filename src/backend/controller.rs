@@ -549,6 +549,55 @@ mod tests {
                 .contains("injected tap failure")
         );
     }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn leaving_714_disables_assist_and_returning_waits_for_fresh_pcm() {
+        use super::super::SpeakerLayout;
+
+        for mode in [
+            SpatialBackendKind::Automatic,
+            SpatialBackendKind::SystemSpatial,
+        ] {
+            for layout in [SpeakerLayout::NineOneSix, SpeakerLayout::TwentyTwoTwo] {
+                let mut output = SpatialOutputController::new();
+                output.settings.mode = mode;
+                output.playing = true;
+                output.snapshot.phase = OutputPhase::Playing;
+                output.snapshot.playhead_frames = 48_000;
+                output.atmos =
+                    super::super::atmos::AtmosController::failed_for_test("injected tap failure");
+                output.poll_atmos();
+                assert!(
+                    output
+                        .snapshot
+                        .atmos_assist_status()
+                        .unwrap()
+                        .contains("injected tap failure")
+                );
+
+                let mut settings = output.settings().clone();
+                settings.layout = layout;
+                output.install_settings(settings.clone());
+                assert_eq!(
+                    output.snapshot.atmos_assist_status(),
+                    Some("Inactive for current settings")
+                );
+                assert!(output.settings().atmos_label_assist);
+
+                settings.layout = SpeakerLayout::SevenOneFour;
+                output.install_settings(settings);
+                assert_eq!(
+                    output.snapshot.atmos_assist_status(),
+                    Some("Waiting for PCM presentation")
+                );
+                assert!(output.settings().atmos_label_assist);
+                assert_eq!(output.snapshot.phase, OutputPhase::Playing);
+                assert_eq!(output.snapshot.playhead_frames, 48_000);
+                assert!(output.snapshot.error.is_none());
+            }
+        }
+    }
     use crate::decoder::{
         DecodedSceneBlock, PlaybackKey, SceneObjectPcm, SceneSignature, SpatialObjectState,
         SpatialPosition, scene_queue_pair,

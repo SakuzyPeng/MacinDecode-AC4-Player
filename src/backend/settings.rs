@@ -77,10 +77,7 @@ impl OutputSettings {
             return false;
         }
         self.mode.resolved() == SpatialBackendKind::SystemSpatial
-            && matches!(
-                self.layout,
-                SpeakerLayout::SevenOneFour | SpeakerLayout::NineOneSix
-            )
+            && self.layout == SpeakerLayout::SevenOneFour
     }
     pub fn validated(mut self) -> Self {
         if !self.mode.supported() {
@@ -155,6 +152,8 @@ mod tests {
         after.layout = SpeakerLayout::TwentyTwoTwo;
         assert!(!after.atmos_label_applicable());
         after.layout = SpeakerLayout::NineOneSix;
+        assert!(!after.atmos_label_applicable());
+        after.layout = SpeakerLayout::SevenOneFour;
         assert!(after.atmos_label_applicable());
         assert!(!after.atmos_label_assist);
     }

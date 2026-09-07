@@ -1182,7 +1182,7 @@ impl PlayerApp {
                                 let applicable = settings.atmos_label_applicable();
                                 ui.add_enabled(applicable, egui::Checkbox::new(
                                     &mut settings.atmos_label_assist, "Control Center Atmos label"
-                                )).on_hover_text("Available for 7.1.4 and 9.1.6 system spatial output. Changes system content identification; AC-4 audio rendering stays the same.");
+                                )).on_hover_text("Available only for 7.1.4 system spatial output. Changes system content identification; AC-4 audio rendering stays the same.");
                             }
                             if settings.layout == SpeakerLayout::TwentyTwoTwo {
                                 ui.horizontal(|ui| {
