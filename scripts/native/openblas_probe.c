@@ -1,5 +1,4 @@
 /* Exercise the numerical/complex ABI before accepting a static OpenBLAS SDK. */
-#define LAPACK_COMPLEX_STRUCTURE
 #define HAVE_LAPACK_CONFIG_H
 #include <cblas.h>
 #include <lapacke.h>
@@ -13,7 +12,9 @@ static void check(int ok, const char* label) {
 }
 static double real(lapack_complex_double z) { return lapack_complex_double_real(z); }
 static double imag(lapack_complex_double z) { return lapack_complex_double_imag(z); }
-static lapack_complex_double z(double r, double i) { return lapack_make_complex_double(r, i); }
+/* MSVC selects LAPACK_COMPLEX_CUSTOM. Its LAPACKE constructor helpers are
+ * stubs; use the UCRT complex value ABI also consumed by the renderer. */
+static lapack_complex_double z(double r, double i) { return _Cbuild(r, i); }
 static lapack_complex_double add(lapack_complex_double a, lapack_complex_double b) {
     return z(real(a) + real(b), imag(a) + imag(b));
 }
@@ -25,6 +26,7 @@ static double error(lapack_complex_double a, lapack_complex_double b) {
 }
 
 int main(void) {
+    check(real(z(1,2)) == 1 && imag(z(1,2)) == 2, "complex value ABI");
     check(sizeof(blasint) == 4 && sizeof(lapack_int) == 4, "LP64 integer ABI");
     check(openblas_get_parallel() == 1, "native thread backend");
     const float a[9] = {3, 1, 2, -1, 4, 1, 2, -2, 5};
@@ -86,13 +88,13 @@ int main(void) {
         check(error(sum,complex[r*3+c])<1e-10, "complex SVD residual");
     }
     lapack_complex_float cf[9], cfu[9], cfvt[9];
-    for(int i=0;i<9;i++) cf[i]=lapack_make_complex_float((float)real(complex[i]),(float)imag(complex[i]));
+    for(int i=0;i<9;i++) cf[i]=_FCbuild((float)real(complex[i]),(float)imag(complex[i]));
     check(LAPACKE_cgesvd(LAPACK_ROW_MAJOR,'A','A',3,3,cf,3,singular,cfu,3,cfvt,3,superb)==0, "float complex SVD");
     for(int r=0;r<3;r++) for(int c=0;c<3;c++) {
         lapack_complex_double sum=z(0,0);
         for(int k=0;k<3;k++) {
-            lapack_complex_double left=z(lapack_complex_float_real(cfu[r*3+k]),lapack_complex_float_imag(cfu[r*3+k]));
-            lapack_complex_double right=z(lapack_complex_float_real(cfvt[k*3+c]),lapack_complex_float_imag(cfvt[k*3+c]));
+            lapack_complex_double left=z(crealf(cfu[r*3+k]),cimagf(cfu[r*3+k]));
+            lapack_complex_double right=z(crealf(cfvt[k*3+c]),cimagf(cfvt[k*3+c]));
             sum=add(sum,mul(mul(left,z(singular[k],0)),right));
         }
         check(error(sum,complex[r*3+c])<1e-4, "float complex SVD residual");

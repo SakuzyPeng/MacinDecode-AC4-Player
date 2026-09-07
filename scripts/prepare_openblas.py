@@ -62,7 +62,7 @@ def prepare(root, download):
         seven = shutil.which("7z") or str(Path(os.environ["ProgramFiles"]) / "7-Zip/7z.exe")
         run([seven, "x", "-y", f"-o{llvm}", llvm_archive], stdout=subprocess.DEVNULL)
     reported = run([llvm / "bin/clang-cl.exe", "--version"], capture_output=True, text=True).stdout.splitlines()[0]
-    require(f"clang version {LLVM_VERSION} " in reported, "LLVM version mismatch")
+    require(reported == f"clang version {LLVM_VERSION}" or reported.startswith(f"clang version {LLVM_VERSION} "), "LLVM version mismatch")
     archive = cache / f"OpenBLAS-{VERSION}.tar.gz"
     download(f"https://github.com/OpenMathLib/OpenBLAS/releases/download/v{VERSION}/{archive.name}", archive, SOURCE_SHA)
     source = cache / f"OpenBLAS-{VERSION}"
@@ -72,8 +72,8 @@ def prepare(root, download):
     env, compiler = toolchain(llvm)
     # Keep ambient MSVC flags out of the pinned build. In particular, _CL_
     # cannot append flags to OpenBLAS assembly commands after their '--'.
-    env.pop("CL", None)
-    env.pop("_CL_", None)
+    for variable in ("CL", "_CL_", "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "LIBRARY_PATH", "CFLAGS", "CXXFLAGS", "LDFLAGS"):
+        env.pop(variable, None)
     cmake = shutil.which("cmake")
     require(cmake is not None, "Install CMake 3.31.6")
     require("cmake version 3.31.6" in run([cmake, "--version"], capture_output=True, text=True).stdout, "CMake 3.31.6 is required")
@@ -99,8 +99,8 @@ def prepare(root, download):
             run([cmake, "--build", build, "--target", "openblas_static", "--parallel", os.getenv("OPENBLAS_BUILD_JOBS", "4")], env=env, stdout=output, stderr=subprocess.STDOUT)
             run([cmake, "--install", build], env=env, stdout=output, stderr=subprocess.STDOUT)
             probe = build / "openblas-probe.exe"
-            run([llvm / "bin/clang-cl.exe", "/nologo", "/MT", "/O2", probe_source, f"/I{install / 'include'}", library,
-                 f"/Fe:{probe}", f"/Fo:{build / 'probe.obj'}"], env=env, stdout=output, stderr=subprocess.STDOUT)
+            run([llvm / "bin/clang-cl.exe", "/nologo", "/MT", "/O2", probe_source, f"/I{install / 'include/openblas'}",
+                 f"/Fe:{probe}", f"/Fo:{build / 'probe.obj'}", "/link", library], env=env, stdout=output, stderr=subprocess.STDOUT)
         verify_windows_imports(pe_imports(probe, executable=False))
         # Keep CI's numerical check cheap while exercising OpenBLAS worker startup.
         result = run([probe], env=dict(env, OPENBLAS_NUM_THREADS="2"), text=True, capture_output=True, timeout=60)
@@ -124,6 +124,6 @@ def prepare(root, download):
 def settings(install):
     return {"OPENBLAS_LIBRARY": str(install / "lib/openblas.lib"),
             "LAPACKE_LIBRARY": str(install / "lib/openblas.lib"),
-            "OPENBLAS_HEADER_PATH": str(install / "include"),
-            "LAPACKE_HEADER_PATH": str(install / "include"),
+            "OPENBLAS_HEADER_PATH": str(install / "include/openblas"),
+            "LAPACKE_HEADER_PATH": str(install / "include/openblas"),
             "OPENBLAS_BUILD_MANIFEST": str(install / "build.json")}
