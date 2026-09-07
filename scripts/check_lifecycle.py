@@ -4,6 +4,7 @@ The upgrade fixture reuses the tested executable with a higher installer/bundle
 version. It tests installer replacement and data retention, not new application code.
 """
 import argparse
+from contextlib import closing
 import json
 import os
 from pathlib import Path
@@ -35,7 +36,7 @@ def check_state(data, expected_hash):
     require(sha256(data / "sofa/keep.sofa") == expected_hash, "Installer changed user SOFA")
     preferences = json.loads((data / "settings.json").read_text())["preferences"]
     require((preferences["volume"], preferences["muted"]) == (0.125, True), "Installer changed user settings")
-    with sqlite3.connect(data / "library.sqlite3") as connection:
+    with closing(sqlite3.connect(data / "library.sqlite3")) as connection:
         require(connection.execute("SELECT name FROM playlists ORDER BY position LIMIT 1").fetchone()[0] == "Retained playlist", "Installer changed playlists")
 
 
@@ -65,8 +66,9 @@ def lifecycle(target):
             preferences = json.loads(preferences_path.read_text())
             preferences["preferences"].update(volume=0.125, muted=True)
             preferences_path.write_text(json.dumps(preferences))
-            with sqlite3.connect(data / "library.sqlite3") as connection:
+            with closing(sqlite3.connect(data / "library.sqlite3")) as connection:
                 connection.execute("UPDATE playlists SET name='Retained playlist'")
+                connection.commit()
             payload_copy = work / "payload"
             payload_copy.mkdir()
             copy = payload_copy / binary.name
