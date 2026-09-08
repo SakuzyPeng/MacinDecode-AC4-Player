@@ -98,8 +98,10 @@ live and do not interrupt decoding of the current track.
   also available.
 - **The macOS Control Center Dolby Atmos label only works with 7.1.4 system spatial audio output**;
   it does not work with 9.1.6 or 22.2. The Control Center Atmos label assist is enabled by default
-  and can be turned off. It only changes how the system identifies the content — AC-4 rendering is
-  unchanged. See [playback integration](docs/MACINRENDER.md) (in Chinese).
+  and can be turned off while retaining system spatial audio and head tracking. The helper uses a
+  continuous timeline of about 24 hours to avoid the frequent player-item transitions that could
+  interrupt AirPods playback with the former 30-second loop. AC-4 rendering is unchanged.
+  See [playback integration](docs/MACINRENDER.md) (in Chinese).
 - **Listener orientation** is adjustable in SAF binaural and Windows object passthrough: macOS can
   use AirPods head tracking (which requires a proper `.app` carrying the motion usage description),
   and everything else uses manual orientation — drag the pad in the settings window or type the

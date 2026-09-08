@@ -156,6 +156,9 @@ struct Session : std::enable_shared_from_this<Session> {
         item->generation_ = generation;
         metrics->items++;
         item.allowedAudioSpatializationFormats = AVAudioSpatializationFormatMonoStereoAndMultichannel;
+        // The production asset has a continuous 24-hour packet timeline. Keep
+        // short item boundaries available only for lifecycle/fault regression.
+        if (faults & 8) item.forwardPlaybackEndTime = CMTimeMake(1, 1);
         AVMutableAudioMixInputParameters* input = [AVMutableAudioMixInputParameters audioMixInputParametersWithTrack:track];
         input.audioTapProcessor = tap;
         CFRelease(tap);

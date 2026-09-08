@@ -21,7 +21,8 @@ typedef struct {
 } mr_atmos_snapshot;
 
 // bytes are copied before returning. flags are fault injection for native tests:
-// 1 = cache read/write failure, 2 = tap creation failure, 4 = delayed preparation.
+// 1 = cache read/write failure, 2 = tap creation failure, 4 = delayed preparation,
+// 8 = one-second items to exercise end-of-item lifecycle without a 24-hour wait.
 void* mr_atmos_create(const uint8_t* bytes, size_t length, uint32_t flags);
 void mr_atmos_set_mode(void* handle, uint32_t mode); // 0 stop/release, 1 pause, 2 play
 int mr_atmos_poll(void* handle, mr_atmos_snapshot* result);

@@ -1,14 +1,19 @@
 {
   "asset": "atmos-assist.m4a",
-  "sha256": "b4a655f657abecc1568c5e03ff6607fe5d28e19474d99adf04e13aed9904f9d0",
-  "bytes": 1441513,
+  "sha256": "c228351ea947a33bc820f86158e1aad64eeed01c0b9d7cef0082c680412109b7",
+  "bytes": 1453013,
   "source": "Procedurally generated 997 Hz sine at -30 dBFS, one moving ADM object; no third-party audio",
   "source_duration_seconds": 30,
-  "encoded_duration_seconds": 30.016,
+  "encoded_duration_seconds": 86446.08,
   "sample_rate": 48000,
   "bit_rate": 384000,
   "codec": "E-AC-3/JOC",
   "source_generator": "scripts/generate-atmos-assist.py",
-  "processing": "ADM -> MacinRender Release SAF/Apple geometry 7.1.4 i24 WAVE -> DME 5.7.2 cbi_wav 384 kbps -> FFmpeg stream copy MP4",
-  "license": "MIT"
+  "processing": "ADM -> MacinRender Release SAF/Apple geometry 7.1.4 i24 WAVE -> DME 5.7.2 cbi_wav 384 kbps -> FFmpeg stream copy MP4 seed -> continuous MP4 sample tables referencing the same JOC packets 2880 times",
+  "license": "MIT",
+  "encoded_cycle_duration_seconds": 30.016,
+  "repeat_count": 2880,
+  "seed_asset": "atmos-assist-source.m4a",
+  "seed_sha256": "b4a655f657abecc1568c5e03ff6607fe5d28e19474d99adf04e13aed9904f9d0",
+  "timeline_generator": "scripts/extend-atmos-assist.py"
 }
