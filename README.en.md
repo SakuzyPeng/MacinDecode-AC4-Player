@@ -58,6 +58,10 @@ Double-click the installer and follow its steps. On Windows, the app installs to
 `%LOCALAPPDATA%\Programs\MacinDecode AC-4 Player`. On Mac, find it in **Applications** inside your
 home folder (`~/Applications`). Neither installer requires administrator rights.
 
+On Windows, run the new MSI to update without uninstalling first; a different build of the same
+version can also replace the installed build. Reopening the same MSI offers repair and uninstall.
+Updates preserve playlists, settings, and imported SOFA files.
+
 Preview installers are not formally signed, so your system may say it cannot verify the developer.
 Make sure you downloaded them from this repository's release page. You only need the `.msi` or `.pkg`;
 the checksum and build information attachments do not need to be installed. You can also

@@ -215,8 +215,16 @@ def wix_tool():
 
 def build_msi(binary, version, destination):
     require({path.name for path in binary.parent.iterdir()} == {binary.name}, "MSI payload must contain only the executable")
-    run([wix_tool(), "build", ROOT / "packaging/windows/player.wxs", "-arch", "x64",
-         "-d", f"Version={version}", "-d", f"ProductCode={guid('product.' + version)}",
+    wix = wix_tool()
+    # Keep both the tool and its pinned extension out of Cargo's cache. Only
+    # native MSI dialogs/text are linked; no executable custom action is used.
+    extension = TOOLS / ".wix/extensions/WixToolset.UI.wixext" / WIX_VERSION / "wixext5/WixToolset.UI.wixext.dll"
+    if not extension.is_file():
+        subprocess.run([str(wix), "extension", "add", f"WixToolset.UI.wixext/{WIX_VERSION}"], cwd=TOOLS, check=True)
+    require(extension.is_file(), "Missing pinned WiX UI extension")
+    run([wix, "build", ROOT / "packaging/windows/player.wxs", ROOT / "packaging/windows/ui.wxs",
+         "-ext", extension, "-culture", "en-us", "-arch", "x64",
+         "-d", f"Version={version}",
          "-d", f"UpgradeCode={guid('upgrade')}", "-d", f"ComponentCode={guid('executable')}",
          "-d", f"Executable={binary}", "-d", f"Icon={ROOT / 'assets/icons/app-windows.ico'}", "-o", destination])
 
@@ -248,6 +256,20 @@ def verify_msi(package, work, version, expected_names):
     require(directories["INSTALLFOLDER"][0] == "UserPrograms" and directories["UserPrograms"][0] == "LocalAppDataFolder", "MSI install path is not per-user Programs")
     require(all(row[0] == "1" for row in msi_rows(database, "SELECT `Root` FROM `Registry`", 1)), "MSI writes outside HKCU")
     require(not msi_rows(database, "SELECT `Name` FROM `_Tables` WHERE `Name`='CustomAction'", 1), "MSI must not execute custom actions")
+    upgrades = msi_rows(database, "SELECT `VersionMax`, `Attributes`, `ActionProperty` FROM `Upgrade`", 3)
+    require(any(maximum == version and int(attributes) & 512 and action == "WIX_UPGRADE_DETECTED"
+                for maximum, attributes, action in upgrades), "MSI cannot replace same-version builds")
+    sequence = {action: int(order) for action, order in msi_rows(database, "SELECT `Action`, `Sequence` FROM `InstallExecuteSequence`", 2)}
+    require(sequence["InstallInitialize"] < sequence["RemoveExistingProducts"] < sequence["InstallFiles"],
+            "MSI replacement must remove old files inside the rollback transaction")
+    dialogs = {row[0] for row in msi_rows(database, "SELECT `Dialog` FROM `Dialog`", 1)}
+    require({"MaintenanceTypeDlg", "PrepareDlg", "ProgressDlg", "ExitDialog"} <= dialogs, "Missing MSI maintenance/progress dialogs")
+    progress = set(msi_rows(database, "SELECT `Dialog_`, `Control_`, `Event`, `Attribute` FROM `EventMapping`", 4))
+    require(("ProgressDlg", "ProgressBar", "SetProgress", "Progress") in progress
+            and ("ProgressDlg", "ActionText", "ActionText", "Text") in progress, "MSI progress is not connected to installer events")
+    action_text = {row[0] for row in msi_rows(database, "SELECT `Action` FROM `ActionText`", 1)}
+    require({"RemoveFiles", "RemoveShortcuts", "RemoveRegistryValues", "InstallFiles"} <= action_text,
+            "Missing installation/uninstallation status descriptions")
     del summary, database
     extracted = work / "expanded-msi"
     extracted.mkdir()

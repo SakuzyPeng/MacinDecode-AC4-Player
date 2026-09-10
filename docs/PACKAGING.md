@@ -4,9 +4,13 @@ Windows 发布当前用户 MSI，程序载荷只有一个自包含 EXE。macOS �
 
 Windows 程序安装到 `%LOCALAPPDATA%\Programs\MacinDecode AC-4 Player`。Rust 与全部自建 C/C++ 库使用静态 CRT；MacinRender、OpenBLAS 和 SQLite 编入主程序。macOS 渲染和头追代码同样静态链接，Accelerate、CoreMotion 等系统框架继续动态链接。用户数据库、播放列表、设置及自定义 SOFA 的存储格式和位置不变。
 
+Windows 每次构建生成新的 ProductCode，保留固定 UpgradeCode 和组件身份；即使版本号相同，新 MSI 也能在事务内替换之前的预览构建，不要求先手动卸载。相同版本之间不区分构建先后，较低的 X.Y.Z 仍禁止覆盖较高版本；正式发布仍应递增版本号。再次打开同一份 MSI 会提供修复／卸载入口。安装界面包含准备、执行进度和完成页面，执行进度订阅 Windows Installer 的实际事件，并显示删除文件、快捷方式、注册信息等阶段；单文件载荷的进度可能跳跃，不代表剩余时间。
+
 ## 构建
 
 Windows 使用 Python 3.12、MSVC、.NET SDK；macOS 使用 Python 3.11+ 和支持 C++20 stop_token 的 Apple 工具链。CI 固定 Xcode 26.3、CMake 3.31.6、Ninja 1.11.1.4、cargo-about 0.9.2 和 WiX 5.0.2。
+
+WiX UI 扩展同样锁定为 5.0.2，缓存于 `.ci-tools/`。仅引用标准 MSI 对话框和错误／进度文本，不引入可执行的 CustomAction。
 
 ```sh
 python scripts/package.py --target x86_64-pc-windows-msvc
@@ -24,6 +28,8 @@ python3 scripts/package.py --target aarch64-apple-darwin
 ## CI 与发布
 
 PR、main 推送和手动执行使用同一 Windows x64 / macOS ARM64 矩阵，运行 workspace 测试、Clippy、打包回归、完整构建、窗口与安装生命周期检查。硬件和真实媒体测试仍按原文档单独运行，不用空输出测试替代实际听验。
+
+Windows 打包回归还使用独立产品 GUID、注册表键和临时安装目录复现同版本重打包的 1638 错误，并验证旧标识迁移、同版本内容替换、同包重开、修复、跨版本升级、禁止降级和卸载。实际应用的 CI 生命周期检查另外覆盖同版本替换后的用户数据保留。静默安装测试不能替代交互界面的人工验收。
 
 应用在 macOS 使用 ad-hoc 签名，MSI/PKG 本轮未正式签名。PKG 只启用当前用户安装域，无安装脚本；MSI 只写当前用户安装记录。安装器不修改业务数据。
 

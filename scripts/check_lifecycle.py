@@ -77,6 +77,15 @@ def lifecycle(target):
             install(original, work / "repair.log", repair=True)
             require(binary.is_file(), "Repair did not restore the executable")
             check_state(data, retained_hash)
+            if windows:
+                rebuilt = work / "same-version.msi"
+                build_msi(copy, manifest["version"], rebuilt)
+                install(rebuilt, work / "same-version.log")
+                installed_package = rebuilt
+                require(sha256(binary) == sha256(copy), "Same-version replacement changed the executable")
+                check_state(data, retained_hash)
+                install(rebuilt, work / "same-package-reopen.log")
+                check_state(data, retained_hash)
             upgrade = work / ("upgrade.msi" if windows else "upgrade.pkg")
             if windows:
                 build_msi(copy, upgrade_version, upgrade)
