@@ -1510,10 +1510,48 @@ impl PlayerApp {
                 ui.add_space(10.0);
 
                 metric_strip(ui, &decoder);
+                self.draw_tracking_status(ui);
 
                 ui.add_space(16.0);
                 self.draw_stage(ui, &decoder);
             });
+    }
+
+    fn draw_tracking_status(&mut self, ui: &mut egui::Ui) {
+        let Some(frame) = self.output.scene_view().read(self.decoder.playback_key()) else {
+            return;
+        };
+        let tracking = frame.tracking();
+        if tracking.unsupported > 0 {
+            ui.colored_label(
+                theme::WARNING,
+                format!(
+                    "{} object(s) use fixed-scene fallback · see diagnostics",
+                    tracking.unsupported
+                ),
+            );
+        }
+        if tracking.head_relative > 0
+            && self.output.settings().mode.resolved() == SpatialBackendKind::SystemSpatial
+        {
+            ui.horizontal_wrapped(|ui| {
+                ui.colored_label(
+                    theme::WARNING,
+                    "This output cannot keep individual sounds attached to your head.",
+                );
+                if ui
+                    .add_enabled(
+                        !self.output.settings_pending() && self.pending_output_change.is_none(),
+                        egui::Button::new("Use software binaural"),
+                    )
+                    .clicked()
+                {
+                    let mut settings = self.output.settings().clone();
+                    settings.mode = SpatialBackendKind::SafBinaural;
+                    self.change_output_settings(settings, ui.ctx());
+                }
+            });
+        }
     }
 
     /// The object scene stage.
@@ -1539,7 +1577,11 @@ impl PlayerApp {
         // These are locals because a SceneObject borrows its trail out of the
         // frame, which on `self` would be a self-referential struct. The array
         // is sized to the object budget, so it costs no allocation either way.
-        let mirror_frame = self.output.scene_view().read(self.decoder.playback_key());
+        let mirror_frame = self
+            .output
+            .scene_view()
+            .read(self.decoder.playback_key())
+            .map(|frame| frame.in_world_space(self.output.head_snapshot().pose));
         let mut objects =
             [scene3d::scene::SceneObject::default(); crate::scene_view::MAX_VIEW_OBJECTS];
         let mut hidden_objects = 0usize;
@@ -1767,6 +1809,11 @@ impl PlayerApp {
 
         let decoder = self.decoder.snapshot().clone();
         let output = self.output.snapshot().clone();
+        let tracking = self
+            .output
+            .scene_view()
+            .read(self.decoder.playback_key())
+            .map(|frame| frame.tracking());
         let remains_open = context.show_viewport_immediate(
             egui::ViewportId::from_hash_of("playback-diagnostics"),
             egui::ViewportBuilder::default()
@@ -1776,7 +1823,7 @@ impl PlayerApp {
                 .with_min_inner_size([400.0, 300.0]),
             |root, _class| {
                 let close_requested = root.ctx().input(|input| input.viewport().close_requested());
-                draw_diagnostics_content(root, self.backend, &decoder, &output);
+                draw_diagnostics_content(root, self.backend, &decoder, &output, tracking);
                 !close_requested
             },
         );
@@ -2781,6 +2828,7 @@ fn draw_diagnostics_content(
     backend: SpatialBackendKind,
     decoder: &DecoderSnapshot,
     output: &OutputSnapshot,
+    tracking: Option<crate::decoder::TrackingSummary>,
 ) {
     egui::CentralPanel::default()
         .frame(
@@ -2801,6 +2849,18 @@ fn draw_diagnostics_content(
                         .color(theme::MUTED),
                     );
                     ui.add_space(16.0);
+                    if let Some(tracking) = tracking {
+                        section_title(ui, "CONTENT TRACKING");
+                        card(ui, |ui| {
+                            key_value(ui, "Scene / head relative", &format!("{} / {}", tracking.scene_relative, tracking.head_relative));
+                            key_value(ui, "Unspecified · scene default", &tracking.unspecified.to_string());
+                            key_value(ui, "Unsupported · scene fallback", &tracking.unsupported.to_string());
+                            if let Some((element, issue)) = tracking.first_issue {
+                                ui.colored_label(theme::WARNING, format!("Object {element}: {issue}"));
+                            }
+                        });
+                        ui.add_space(16.0);
+                    }
                     section_title(ui, "SESSION");
                     card(ui, |ui| {
                         let metrics = decoder.metrics();

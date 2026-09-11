@@ -4,7 +4,9 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use super::state::{element_state_at, listener_render_state, state_at_updates, validate_block};
+use super::state::{
+    element_state_at, listener_render_state, remaining_ramps, state_at_updates, validate_block,
+};
 use super::{
     OutputDeviceInfo, OutputDeviceSelection, OutputPhase, OutputSettings, OutputSnapshot,
     OutputStreamConfig, SpatialBackendKind,
@@ -247,17 +249,22 @@ fn own_state(state: Option<SpatialObjectState>) -> native::ObjectState {
             active: false,
             gain: 0.0,
             position: None,
+            head_locked: false,
         },
         |state| native::ObjectState {
             active: state.metadata_active() && state.semantic_complete(),
             gain: state.linear_gain().unwrap_or(1.0),
             position: state.position().map(|p| [p.x(), p.y(), p.z()]),
+            head_locked: state.tracking().head_locked(),
         },
     )
 }
 
 fn renderer_fields(core: u32) -> u64 {
-    u64::from(core & 1 != 0) | (u64::from(core & 2 != 0) << 1) | (u64::from(core & 8 != 0) << 2)
+    u64::from(core & crate::decoder::FIELD_ACTIVE != 0)
+        | (u64::from(core & crate::decoder::FIELD_GAIN != 0) << 1)
+        | (u64::from(core & crate::decoder::FIELD_POSITION != 0) << 2)
+        | (u64::from(core & crate::decoder::FIELD_HEAD_TRACKING != 0) << 8)
 }
 
 fn submit_block(
@@ -308,17 +315,11 @@ fn submit_block(
     // A trimmed block can begin inside a ramp: synthesize its remaining target
     // at offset zero instead of freezing at the interpolated initial state.
     for (id, _) in &initial {
-        if let Some(update) = block
-            .metadata_updates()
-            .iter()
-            .rev()
-            .find(|u| u.element_id() == *id && u.offset_frames() < offset)
-            && update.offset_frames().saturating_add(update.ramp_frames()) > offset
-        {
+        for update in remaining_ramps(block, *id, offset).into_iter().flatten() {
             updates.push(native::Update {
                 element: *id,
                 offset: 0,
-                ramp: update.offset_frames().saturating_add(update.ramp_frames()) - offset,
+                ramp: update.ramp_frames(),
                 changed: renderer_fields(update.changed_fields()),
                 state: own_state(Some(update.state())),
             });
@@ -337,18 +338,7 @@ fn submit_block(
                 state: own_state(Some(u.state())),
             }),
     );
-    // Core can emit importance/zone-only changes, and LFE has no Cartesian
-    // position. The renderer ABI requires a nonempty mask of fields actually
-    // present in the target. End-boundary state is carried by the next block.
-    for update in &mut updates {
-        update.changed &= if update.state.position.is_some() {
-            7
-        } else {
-            3
-        };
-    }
-    updates
-        .retain(|update| update.changed != 0 && update.offset < block.duration_frames() - offset);
+    filter_updates(&initial, &mut updates, block.duration_frames() - offset);
     session.submit(&native::Frame {
         epoch: NATIVE_EPOCH,
         generation: u64::from(block.configuration_generation()),
@@ -359,6 +349,36 @@ fn submit_block(
         initial: &initial,
         updates: &updates,
     })
+}
+
+fn filter_updates(
+    initial: &[(u64, native::ObjectState)],
+    updates: &mut Vec<native::Update>,
+    duration: u32,
+) {
+    let mut tracking: Vec<_> = initial
+        .iter()
+        .map(|(id, state)| (*id, state.head_locked))
+        .collect();
+    // A mode-only or diagnostic-only policy update must not even split an
+    // HRTF interpolation segment. Keep only actual reference-frame changes.
+    for update in updates.iter_mut() {
+        if update.changed & 256 != 0
+            && let Some((_, previous)) = tracking.iter_mut().find(|(id, _)| *id == update.element)
+        {
+            if *previous == update.state.head_locked {
+                update.changed &= !256;
+            } else {
+                *previous = update.state.head_locked;
+            }
+        }
+        update.changed &= if update.state.position.is_some() {
+            7 | 256
+        } else {
+            3 | 256
+        };
+    }
+    updates.retain(|update| update.changed != 0 && update.offset < duration);
 }
 
 fn submit_gap(
@@ -389,6 +409,7 @@ fn submit_gap(
                     active: false,
                     gain: 0.0,
                     position: Some([0.0, 1.0, 0.0]),
+                    head_locked: false,
                 },
             )
         })
@@ -520,19 +541,17 @@ fn run(
             mirror.write(
                 reader.playback_key(),
                 frame.objects.iter().map(|(id, initial)| {
-                    let (active, position, gain) = listener_render_state(state_at_updates(
-                        &frame.updates,
-                        *id,
-                        *initial,
-                        offset,
-                    ));
+                    let state = state_at_updates(&frame.updates, *id, *initial, offset);
+                    let (active, position, gain) = listener_render_state(state);
                     ObjectView {
                         element_id: *id,
                         active: active && frame.complete,
                         position,
                         gain,
+                        tracking: state.map_or_default(SpatialObjectState::tracking),
                         jumped: frame.updates.iter().any(|u| {
                             u.element_id() == *id
+                                && u.changed_fields() & crate::decoder::FIELD_POSITION != 0
                                 && u.ramp_frames() == 0
                                 && u.offset_frames() >= previous
                                 && u.offset_frames() <= offset
@@ -749,6 +768,40 @@ mod tests {
         )
     }
 
+    #[test]
+    fn unchanged_tracking_policies_do_not_split_native_render_segments() {
+        let initial = native::ObjectState {
+            active: true,
+            gain: 1.0,
+            position: Some([0.0, 1.0, 0.0]),
+            head_locked: false,
+        };
+        let update = |offset, head_locked, changed| native::Update {
+            element: 7,
+            offset,
+            ramp: 0,
+            changed,
+            state: native::ObjectState {
+                head_locked,
+                ..initial
+            },
+        };
+        let mut updates = vec![
+            update(1, false, 256), // e.g. Near -> Far, still scene-relative.
+            update(2, true, 256),
+            update(3, true, 256),
+            update(4, true, 256 | 2), // Keep an accompanying gain update.
+            update(5, false, 256),
+        ];
+        filter_updates(&[(7, initial)], &mut updates, 6);
+        assert_eq!(
+            updates
+                .iter()
+                .map(|update| (update.offset, update.changed))
+                .collect::<Vec<_>>(),
+            vec![(2, 256), (4, 2), (5, 256)]
+        );
+    }
     #[test]
     fn native_output_preserves_preroll_overlap_gap_and_short_tail() {
         let key = PlaybackKey::new(1, 1);

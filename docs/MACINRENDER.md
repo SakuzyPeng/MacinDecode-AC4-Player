@@ -14,6 +14,26 @@ Player 将 AC-4 Core 的 Scene 转换为 renderer-native Scene，经 MacinRender
 - 软件朝向在 Mac 优先使用 AirPods，缺失或权限不可用时使用手动朝向；Windows 使用手动朝向。
   系统空间音频模式保持上游中性姿态，macOS 的系统头追由系统负责。
 
+## 内容指定的逐对象头追
+
+Player 消费 Core 的有效 `headphone_policy()`，只使用其中的跟踪参照系。`SceneRelative`
+参与 world-to-head 逆旋转，`HeadRelative` 通过 renderer 的 `head_locked` 跳过补偿。
+`Unspecified` 正常使用场景固定默认值；`Unsupported` 保留原因并按场景固定降级，诊断按当前
+呈现时间显示。两者不启动新的头姿来源，也不自动切换输出。Bypass/Near/Mid/Far 继续不参与
+播放器的声学处理；这些模式本身不会导致静音。
+
+Player 调用 `semantic_complete(SemanticScope::Spatial)` 保留非耳机语义检查；缺少初始状态的
+预热仍然不可播放。Core 的 `All` 检查和完整语义诊断保持严格含义，不被播放器降级改写。
+
+`decoder::metadata` 在进入 FIFO 之前续接跨帧的位置与增益渐变；每个 block 携带当前起点和
+各字段剩余目标。原生引擎保留有效 changed-fields，双耳各字段与 VBAP 的电平/声像分别计时。
+头追字段在事件偏移处离散切换，不重启连续渐变。裁剪从这份统一时间线恢复剩余目标。
+
+场景镜像保留对象参照系及其轨迹，绘制时将跟头对象正向旋转到世界坐标；参照系改变清空该对象
+轨迹，只有瞬时位置事件绘制跳变。Windows 对象直通按输出 quantum 应用相同跟踪策略。
+系统空间音频的固定床不能保留逐对象跟头语义；出现相关内容时提供能力提示及软件双耳切换按钮，
+用户选择的输出保持不变。没有专门的“3DOF 文件”识别或额外开关。
+
 ## macOS 控制中心 Atmos 标识辅助
 
 `atmos_label_assist` 默认开启并随音频设置持久化。**控制中心的「杜比全景声」标签仅在

@@ -16,7 +16,7 @@ use macindecode_ac4_mp4::reader::{
 use macindecode_ac4_mp4::{Ac4Mp4Metadata, Ac4Mp4Timeline};
 use macindecode_ac4_scene::{
     Ac4DecoderConfig, Ac4DecoderSession, Ac4SceneFrame, AccessUnit, AccessUnitContext, DecodeMode,
-    DecodeStatus, PresentationSelection, SceneObjectState,
+    DecodeStatus, PresentationSelection, SceneObjectState, SemanticScope,
 };
 
 use super::{
@@ -768,6 +768,7 @@ impl LoadedMedia {
 
     #[allow(
         clippy::too_many_arguments,
+        clippy::too_many_lines,
         reason = "one decode span shares a key, target, controller channels, queue and optional seek preroll"
     )]
     fn decode_packets(
@@ -781,6 +782,7 @@ impl LoadedMedia {
         queue: &SharedSceneQueue,
         mut preroll: Option<&mut SeekPreroll>,
     ) -> Result<RunControl, String> {
+        let mut continuity = super::metadata::SceneContinuity::default();
         let mut reader = self.source.reader();
         let mut buffer = Vec::new();
         match self.container {
@@ -808,6 +810,7 @@ impl LoadedMedia {
                         key,
                         &self.path,
                         &mut self.session,
+                        &mut continuity,
                         &buffer,
                         context,
                         target,
@@ -852,6 +855,7 @@ impl LoadedMedia {
                         key,
                         &self.path,
                         &mut self.session,
+                        &mut continuity,
                         frame.raw_frame,
                         context,
                         target,
@@ -893,6 +897,7 @@ fn decode_access_unit(
     key: PlaybackKey,
     path: &Path,
     session: &mut Ac4DecoderSession,
+    continuity: &mut super::metadata::SceneContinuity,
     raw_frame: &[u8],
     context: AccessUnitContext,
     target_frame: i64,
@@ -913,7 +918,11 @@ fn decode_access_unit(
     }
 
     for frame in decoded.frames() {
+        if frame.diagnostics().reset().is_some() || frame.diagnostics().discontinuity() {
+            continuity.clear();
+        }
         let mut block = own_scene_frame(frame)?;
+        continuity.normalize(&mut block);
         metrics.decoded_scene_frames = metrics.decoded_scene_frames.saturating_add(1);
         metrics.decoded_frames = metrics
             .decoded_frames
@@ -1164,8 +1173,33 @@ fn own_state(state: SceneObjectState) -> SpatialObjectState {
         state.metadata_active(),
         position,
         state.linear_gain(),
-        state.semantic_complete(),
+        state.semantic_complete(SemanticScope::Spatial),
     )
+    .with_tracking(own_tracking(state.headphone_policy()))
+}
+
+fn own_tracking(policy: macindecode_ac4_scene::HeadphonePolicyState) -> super::ContentHeadTracking {
+    use super::{ContentHeadTracking as Tracking, TrackingIssue as Issue};
+    use macindecode_ac4_scene::{HeadTrackingPolicy, HeadphonePolicyIssue, HeadphonePolicyState};
+    match policy {
+        HeadphonePolicyState::Unspecified => Tracking::Unspecified,
+        HeadphonePolicyState::Resolved(policy) => match policy.head_tracking() {
+            HeadTrackingPolicy::SceneRelative => Tracking::SceneRelative,
+            HeadTrackingPolicy::HeadRelative => Tracking::HeadRelative,
+            _ => Tracking::Unsupported(Issue::Unknown),
+        },
+        HeadphonePolicyState::Unsupported(issue) => Tracking::Unsupported(match issue {
+            HeadphonePolicyIssue::ReservedOperationMode(value) => {
+                Issue::ReservedOperationMode(value)
+            }
+            HeadphonePolicyIssue::ReservedObjectMode(value) => Issue::ReservedObjectMode(value),
+            HeadphonePolicyIssue::MissingGlobalControl => Issue::MissingGlobalControl,
+            HeadphonePolicyIssue::UnboundSource => Issue::UnboundSource,
+            HeadphonePolicyIssue::ConflictingGroups => Issue::ConflictingGroups,
+            _ => Issue::Unknown,
+        }),
+        _ => Tracking::Unsupported(Issue::Unknown),
+    }
 }
 
 fn pending_command(receiver: &Receiver<WorkerCommand>) -> Option<RunControl> {
@@ -1206,6 +1240,51 @@ fn send_failure(key: PlaybackKey, path: &Path, error: String, sender: &Sender<Wo
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn content_tracking_ignores_binaural_modes_and_preserves_unknown_reasons() {
+        use crate::decoder::{ContentHeadTracking, TrackingIssue};
+        use macindecode_ac4_scene::{
+            HeadTrackingPolicy, HeadphonePolicy, HeadphonePolicyIssue, HeadphonePolicyState,
+            HeadphoneRenderMode,
+        };
+        for mode in [
+            HeadphoneRenderMode::Bypass,
+            HeadphoneRenderMode::Near,
+            HeadphoneRenderMode::Mid,
+            HeadphoneRenderMode::Far,
+        ] {
+            for (tracking, expected) in [
+                (
+                    HeadTrackingPolicy::SceneRelative,
+                    ContentHeadTracking::SceneRelative,
+                ),
+                (
+                    HeadTrackingPolicy::HeadRelative,
+                    ContentHeadTracking::HeadRelative,
+                ),
+            ] {
+                assert_eq!(
+                    super::own_tracking(HeadphonePolicyState::Resolved(HeadphonePolicy::new(
+                        mode, tracking
+                    ))),
+                    expected
+                );
+            }
+        }
+        assert_eq!(
+            super::own_tracking(HeadphonePolicyState::Unspecified),
+            ContentHeadTracking::Unspecified
+        );
+        let unsupported = super::own_tracking(HeadphonePolicyState::Unsupported(
+            HeadphonePolicyIssue::ConflictingGroups,
+        ));
+        assert_eq!(
+            unsupported,
+            ContentHeadTracking::Unsupported(TrackingIssue::ConflictingGroups)
+        );
+        assert!(!unsupported.head_locked());
+    }
     use std::path::PathBuf;
     use std::sync::atomic::AtomicBool;
     use std::thread;

@@ -13,8 +13,19 @@ use std::time::Duration;
 
 use crate::media::MediaSource;
 
+#[cfg_attr(not(feature = "decode"), allow(dead_code))]
+pub(crate) mod metadata;
+mod tracking;
 #[cfg(feature = "decode")]
 mod worker;
+pub use tracking::{ContentHeadTracking, TrackingIssue, TrackingSummary};
+
+// Player metadata mask. These four retained bits have the same values as Core's
+// published fields; neither the renderer nor the native crate depends on Core.
+pub const FIELD_ACTIVE: u32 = 1;
+pub const FIELD_GAIN: u32 = 1 << 1;
+pub const FIELD_POSITION: u32 = 1 << 3;
+pub const FIELD_HEAD_TRACKING: u32 = 1 << 12;
 
 pub const PREBUFFER_MILLISECONDS: u64 = 300;
 pub const MAX_BUFFER_SECONDS: u64 = 2;
@@ -360,6 +371,7 @@ pub struct SpatialObjectState {
     position: Option<SpatialPosition>,
     linear_gain: Option<f32>,
     semantic_complete: bool,
+    tracking: ContentHeadTracking,
 }
 
 impl SpatialObjectState {
@@ -374,6 +386,7 @@ impl SpatialObjectState {
             position,
             linear_gain,
             semantic_complete,
+            tracking: ContentHeadTracking::Unspecified,
         }
     }
 
@@ -391,6 +404,15 @@ impl SpatialObjectState {
 
     pub const fn semantic_complete(self) -> bool {
         self.semantic_complete
+    }
+
+    pub(super) const fn with_tracking(mut self, tracking: ContentHeadTracking) -> Self {
+        self.tracking = tracking;
+        self
+    }
+
+    pub const fn tracking(self) -> ContentHeadTracking {
+        self.tracking
     }
 }
 

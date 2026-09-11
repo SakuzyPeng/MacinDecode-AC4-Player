@@ -106,6 +106,9 @@ live and do not interrupt decoding of the current track.
   continuous timeline of about 24 hours to avoid the frequent player-item transitions that could
   interrupt AirPods playback with the former 30-second loop. AC-4 rendering is unchanged.
   See [playback integration](docs/MACINRENDER.md) (in Chinese).
+- **Per-object head tracking:** software binaural and Windows object passthrough follow content-declared scene-relative
+  and head-relative behavior, including live changes. System spatial output keeps your selected mode and shows its
+  limitation for head-relative objects. Uninterpretable policies use a scene-relative fallback with diagnostics.
 - **Listener orientation** is adjustable in SAF binaural and Windows object passthrough: macOS can
   use AirPods head tracking (which requires a proper `.app` carrying the motion usage description),
   and everything else uses manual orientation — drag the pad in the settings window or type the

@@ -163,6 +163,11 @@ impl Default for HeadSnapshot {
 #[derive(Default)]
 pub struct PoseMirror(Mutex<HeadSnapshot>);
 impl PoseMirror {
+    #[cfg(all(test, windows_spatial_output))]
+    pub(crate) fn set_test_pose(&self, pose: Quaternion) {
+        self.0.lock().unwrap().pose = pose;
+    }
+
     pub fn snapshot(&self) -> HeadSnapshot {
         *self
             .0

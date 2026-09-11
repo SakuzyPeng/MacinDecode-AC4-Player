@@ -74,18 +74,20 @@ pub struct ObjectState {
     pub active: bool,
     pub gain: f32,
     pub position: Option<[f32; 3]>,
+    pub head_locked: bool,
 }
 impl ObjectState {
     fn raw(self) -> raw::State {
         let [x, y, z] = self.position.unwrap_or([0.0; 3]);
         raw::State {
             size: size::<raw::State>(),
-            valid: 3 | if self.position.is_some() { 4 } else { 0 },
+            valid: 3 | 256 | if self.position.is_some() { 4 } else { 0 },
             active: i32::from(self.active),
             gain: self.gain,
             x,
             y,
             z,
+            head_locked: i32::from(self.head_locked),
             ..Default::default()
         }
     }
@@ -95,7 +97,7 @@ pub struct Update {
     pub element: u64,
     pub offset: u32,
     pub ramp: u32,
-    /// Renderer-native mask: active=1, linear gain=2, Cartesian position=4.
+    /// Renderer-native mask: active=1, linear gain=2, Cartesian position=4, head lock=256.
     pub changed: u64,
     pub state: ObjectState,
 }
@@ -606,6 +608,7 @@ mod tests {
                         active: true,
                         gain: 1.0,
                         position: Some([0.0, 1.0, 0.0]),
+                        head_locked: false,
                     },
                 )
             })
@@ -697,6 +700,7 @@ mod tests {
                 active: true,
                 gain: 1.0,
                 position: Some([0.0, 1.0, 0.0]),
+                head_locked: false,
             },
         )];
         let planes = [Plane {

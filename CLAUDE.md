@@ -191,7 +191,7 @@ must then be removed and added again.
 `Ac4DecoderSession::decode_access_unit` returns borrowed views valid only until the Session's next
 mutable call. `decoder/worker.rs::own_scene_frame` copies the minimal semantics — stable element
 IDs, per-object mono planar normalized `f32`, one optional native LFE, integer sample times, OAMD
-active/position/gain/ramp — into player-owned types *before* the worker lets the Session advance.
+active/position/gain/ramp and content head-tracking policy — into player-owned types *before* the worker lets the Session advance.
 Core types must never cross into `backend`; a native crate must never see a bitstream or a Core
 Session.
 
@@ -210,7 +210,7 @@ all of it, each `unsafe_op_in_unsafe_fn = "deny"` and each exposing a safe surfa
 ### The three Scene consumers
 
 Exactly one consumer ever pops a given FIFO; all three resolve OAMD state through the same
-`backend/state.rs` helpers (`validate_block`, `element_state_at`, `listener_render_state`), so
+`backend/state.rs` validation/coordinate helpers and `decoder/metadata.rs` timeline resolution, so
 validation, timeline trimming and ramp resolution can't drift between them.
 
 - `backend/source.rs` (`windows_spatial_output`) implements `SpatialSource` on the WASAPI callback.

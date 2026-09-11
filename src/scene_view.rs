@@ -27,7 +27,7 @@
 
 use std::sync::{Mutex, PoisonError};
 
-use crate::decoder::PlaybackKey;
+use crate::decoder::{ContentHeadTracking, PlaybackKey, TrackingSummary};
 use crate::scene3d::params::{TRAIL_INTERVAL_MILLISECONDS, TRAIL_SAMPLES};
 
 /// Objects the view will draw. The design budget is 20 dynamic objects plus the
@@ -49,6 +49,7 @@ pub struct ObjectView {
     pub active: bool,
     pub position: [f32; 3],
     pub gain: f32,
+    pub tracking: ContentHeadTracking,
     /// Whether an instant (`ramp_frames == 0`) metadata update landed for this
     /// element inside the quantum being published. The mirror latches it until
     /// the next breadcrumb, because quanta are far shorter than the sampling
@@ -81,6 +82,7 @@ pub struct SceneViewFrame {
     /// `None` until the first write. Distinguishes "no playback yet" from a
     /// playback that legitimately carries no objects.
     key: Option<PlaybackKey>,
+    tracking: TrackingSummary,
 }
 
 impl Default for SceneViewFrame {
@@ -94,11 +96,32 @@ impl Default for SceneViewFrame {
             pending_jump: [false; MAX_VIEW_OBJECTS],
             next_trail_frame: 0,
             key: None,
+            tracking: TrackingSummary::default(),
         }
     }
 }
 
 impl SceneViewFrame {
+    pub const fn tracking(&self) -> TrackingSummary {
+        self.tracking
+    }
+
+    /// Keep stored trails in their declared reference frame. Rendering the
+    /// room uses the current forward head rotation for head-relative objects.
+    pub fn in_world_space(mut self, pose: crate::head_tracking::Quaternion) -> Self {
+        for slot in 0..self.total_objects.min(MAX_VIEW_OBJECTS) {
+            if self.objects[slot].tracking.head_locked() {
+                self.objects[slot].position = pose
+                    .conjugate()
+                    .rotate_listener(self.objects[slot].position);
+                for point in &mut self.trails[slot][..self.trail_lens[slot]] {
+                    *point = pose.conjugate().rotate_listener(*point);
+                }
+            }
+        }
+        self
+    }
+
     /// The objects that fit in the budget.
     #[must_use]
     pub fn objects(&self) -> &[ObjectView] {
@@ -202,7 +225,9 @@ impl SceneViewMirror {
         // Staged off-lock so the critical section stays short.
         let mut staged = [ObjectView::default(); MAX_VIEW_OBJECTS];
         let mut total = 0usize;
+        let mut tracking = TrackingSummary::default();
         for object in objects {
+            tracking.observe(object.element_id, object.tracking);
             if let Some(slot) = staged.get_mut(total) {
                 *slot = object;
             }
@@ -231,7 +256,9 @@ impl SceneViewMirror {
         // element set changed, a slot can now hold a different object and its
         // history is not that object's.
         for (slot, previous) in frame.objects.iter().enumerate() {
-            if previous.element_id != staged[slot].element_id {
+            if previous.element_id != staged[slot].element_id
+                || previous.tracking.head_locked() != staged[slot].tracking.head_locked()
+            {
                 frame.trail_lens[slot] = 0;
                 frame.pending_jump[slot] = false;
             }
@@ -240,6 +267,7 @@ impl SceneViewMirror {
         frame.objects = staged;
         frame.total_objects = total;
         frame.key = Some(key);
+        frame.tracking = tracking;
 
         // Latched rather than consumed here: the discontinuity belongs to a
         // sampled point, and the quantum that carries it is usually not the one
@@ -281,12 +309,91 @@ impl SceneViewMirror {
 mod tests {
     use super::*;
 
+    #[test]
+    fn reference_frames_rotate_only_head_locked_objects_and_reset_their_trails() {
+        let mirror = SceneViewMirror::new();
+        let key = PlaybackKey::new(1, 1);
+        let head = ObjectView {
+            position: [0.0, 0.0, -1.0],
+            tracking: ContentHeadTracking::HeadRelative,
+            ..object(7, 0.0)
+        };
+        let world = ObjectView {
+            element_id: 9,
+            tracking: ContentHeadTracking::SceneRelative,
+            ..head
+        };
+        mirror.write(key, [head, world], 0, 48_000);
+        let raw = mirror.read(key).unwrap();
+        let displayed = raw.in_world_space(crate::head_tracking::Quaternion::from_euler([
+            90.0, 0.0, 0.0,
+        ]));
+        assert!((displayed.objects()[0].position[0] + 1.0).abs() < 0.0001);
+        assert_eq!(
+            displayed.objects()[1].position.map(f32::to_bits),
+            world.position.map(f32::to_bits)
+        );
+        assert_eq!(
+            displayed.trail(0)[0].map(f32::to_bits),
+            displayed.objects()[0].position.map(f32::to_bits)
+        );
+        assert_eq!(
+            raw.objects()[0].position.map(f32::to_bits),
+            head.position.map(f32::to_bits)
+        );
+        mirror.write(
+            key,
+            [
+                ObjectView {
+                    tracking: ContentHeadTracking::SceneRelative,
+                    ..head
+                },
+                world,
+            ],
+            1,
+            48_000,
+        );
+        let switched = mirror.read(key).unwrap();
+        assert!(switched.trail(0).is_empty());
+        assert_eq!(switched.trail(1).len(), 1);
+        assert_eq!(switched.tracking().scene_relative, 2);
+        assert_eq!(switched.tracking().head_relative, 0);
+    }
+
+    #[test]
+    fn diagnostics_include_objects_beyond_the_visual_budget() {
+        let mirror = SceneViewMirror::new();
+        let key = PlaybackKey::new(1, 1);
+        let issue = crate::decoder::TrackingIssue::ConflictingGroups;
+        mirror.write(
+            key,
+            (0..=MAX_VIEW_OBJECTS).map(|index| ObjectView {
+                tracking: if index == MAX_VIEW_OBJECTS {
+                    ContentHeadTracking::Unsupported(issue)
+                } else {
+                    ContentHeadTracking::Unspecified
+                },
+                ..object(u64::try_from(index).unwrap(), 0.0)
+            }),
+            0,
+            48_000,
+        );
+        let frame = mirror.read(key).unwrap();
+        assert_eq!(frame.hidden_objects(), 1);
+        assert_eq!(frame.tracking().unspecified, MAX_VIEW_OBJECTS);
+        assert_eq!(frame.tracking().unsupported, 1);
+        assert_eq!(
+            frame.tracking().first_issue,
+            Some((u64::try_from(MAX_VIEW_OBJECTS).unwrap(), issue))
+        );
+    }
     fn object(element_id: u64, x: f32) -> ObjectView {
         ObjectView {
             element_id,
             active: true,
             position: [x, 0.0, 0.0],
             gain: 1.0,
+            tracking: ContentHeadTracking::Unspecified,
             jumped: false,
         }
     }

@@ -68,7 +68,7 @@ impl SceneRenderSource {
     fn render_quantum(&mut self, frame_count: u32) -> Result<RenderQuantum, String> {
         let requested = usize::try_from(frame_count)
             .map_err(|_| "Windows Spatial Audio frame count exceeds usize".to_owned())?;
-        let mut objects = BTreeMap::<u64, DynamicObjectRender>::new();
+        let mut objects = BTreeMap::<u64, TrackedObject>::new();
         // Per slot, not per element: the mirror's slots are the signature's
         // sorted element IDs, and so is `objects`' BTreeMap order.
         let mut jumped = [false; MAX_VIEW_OBJECTS];
@@ -152,11 +152,12 @@ impl SceneRenderSource {
             objects
                 .values()
                 .enumerate()
-                .map(|(slot, render)| ObjectView {
-                    element_id: render.element_id,
-                    active: render.active,
-                    position: render.position,
-                    gain: render.gain,
+                .map(|(slot, object)| ObjectView {
+                    element_id: object.audio.element_id,
+                    active: object.audio.active,
+                    position: object.audio.position,
+                    gain: object.audio.gain,
+                    tracking: object.tracking,
                     jumped: jumped.get(slot).copied().unwrap_or(false),
                 }),
             self.timeline_frame,
@@ -168,10 +169,12 @@ impl SceneRenderSource {
         // The scene mirror stays in world coordinates; only the system submission
         // is rotated into head space. Rotating both the room and avatar would double it.
         for object in objects.values_mut() {
-            object.position = self.last_pose.rotate_listener(object.position);
+            if !object.tracking.head_locked() {
+                object.audio.position = self.last_pose.rotate_listener(object.audio.position);
+            }
         }
         Ok(RenderQuantum {
-            objects: objects.into_values().collect(),
+            objects: objects.into_values().map(|object| object.audio).collect(),
             lfe: lfe.map(LfeQuantumAccumulator::finish),
             frames_written: u32::try_from(written).unwrap_or(u32::MAX),
             end_of_stream,
@@ -220,7 +223,7 @@ fn copy_object_pcm(
     take: usize,
     requested: usize,
     element_ids: &[u64],
-    renders: &mut BTreeMap<u64, DynamicObjectRender>,
+    renders: &mut BTreeMap<u64, TrackedObject>,
     jumped: &mut [bool; MAX_VIEW_OBJECTS],
 ) -> Result<(), String> {
     let take_frames =
@@ -258,15 +261,18 @@ fn copy_object_pcm(
         );
         let render = renders.entry(object.element_id()).or_insert_with(|| {
             let (active, position, gain) = listener_render_state(state);
-            DynamicObjectRender {
-                element_id: object.element_id(),
-                active,
-                position,
-                gain,
-                samples: vec![0.0; requested],
+            TrackedObject {
+                tracking: state.map_or_default(crate::decoder::SpatialObjectState::tracking),
+                audio: DynamicObjectRender {
+                    element_id: object.element_id(),
+                    active,
+                    position,
+                    gain,
+                    samples: vec![0.0; requested],
+                },
             }
         });
-        render.samples[destination_offset..destination_end]
+        render.audio.samples[destination_offset..destination_end]
             .copy_from_slice(&object.samples()[source_start..source_end]);
     }
     Ok(())
@@ -302,6 +308,11 @@ fn copy_lfe_pcm(
     destination.render.samples[destination_offset..destination_end]
         .copy_from_slice(&source.samples()[source_start..source_end]);
     Ok(())
+}
+
+struct TrackedObject {
+    audio: DynamicObjectRender,
+    tracking: crate::decoder::ContentHeadTracking,
 }
 
 struct LfeQuantumAccumulator {
@@ -362,6 +373,66 @@ mod tests {
         )
     }
 
+    #[test]
+    fn windows_rotation_respects_each_objects_reference_frame() {
+        use crate::decoder::{ContentHeadTracking, scene_queue_pair};
+        let state = SpatialObjectState::new(
+            true,
+            Some(SpatialPosition::new(0.0, 1.0, 0.0)),
+            Some(1.0),
+            true,
+        );
+        let block = DecodedSceneBlock::new(
+            48_000,
+            0,
+            4,
+            1,
+            0,
+            None,
+            true,
+            vec![
+                SceneObjectPcm::new(
+                    7,
+                    Some(state.with_tracking(ContentHeadTracking::SceneRelative)),
+                    vec![0.01; 4],
+                ),
+                SceneObjectPcm::new(
+                    9,
+                    Some(state.with_tracking(ContentHeadTracking::HeadRelative)),
+                    vec![0.01; 4],
+                ),
+            ],
+            None,
+            Vec::new(),
+        );
+        let signature = SceneSignature::from_block(&block);
+        let key = PlaybackKey::new(1, 1);
+        let (queue, reader) = scene_queue_pair(key);
+        queue.try_push(key, block).unwrap();
+        let mirror = Arc::new(SceneViewMirror::new());
+        let mut source =
+            SceneRenderSource::new(reader, Arc::clone(&mirror), 48_000, 2, false, signature, 0);
+        source
+            .pose
+            .set_test_pose(crate::head_tracking::Quaternion::from_euler([
+                90.0, 0.0, 0.0,
+            ]));
+        let output = source.render_quantum(4).unwrap();
+        assert!((output.objects[0].position[0] - 1.0).abs() < 0.0001);
+        assert_eq!(
+            output.objects[1].position.map(f32::to_bits),
+            [0.0_f32, 0.0, -1.0].map(f32::to_bits)
+        );
+        let view = mirror.read(key).unwrap();
+        assert_eq!(
+            view.objects()[0].position.map(f32::to_bits),
+            [0.0_f32, 0.0, -1.0].map(f32::to_bits)
+        );
+        assert_eq!(
+            view.objects()[1].tracking,
+            ContentHeadTracking::HeadRelative
+        );
+    }
     #[test]
     fn lfe_quantum_uses_ramped_state_and_pcm_at_its_start() {
         let target = complete_state(0.8);

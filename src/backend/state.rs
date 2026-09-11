@@ -6,9 +6,11 @@
 //! their arithmetic and its tests run on every platform.
 
 use crate::decoder::{
-    DecodedSceneBlock, SceneLfePcm, SceneMetadataUpdate, SceneObjectPcm, SceneSignature,
-    SpatialObjectState, SpatialPosition,
+    DecodedSceneBlock, FIELD_POSITION, SceneLfePcm, SceneObjectPcm, SceneSignature,
+    SpatialObjectState,
 };
+#[cfg(test)]
+use crate::decoder::{FIELD_GAIN, FIELD_HEAD_TRACKING, SpatialPosition};
 
 /// Check the same Scene contract before either consumer accepts a block.
 /// Error prefixes are also the app's automatic-reconfiguration contract.
@@ -99,124 +101,14 @@ pub(super) fn block_offset_at(
     Ok(Some(offset))
 }
 
-/// The element's state `offset_frames` into `block`, following every metadata
-/// update up to that point and interpolating whichever ramp is still running.
-pub(super) fn element_state_at(
-    block: &DecodedSceneBlock,
-    element_id: u64,
-    initial_state: Option<SpatialObjectState>,
-    offset_frames: u32,
-) -> Option<SpatialObjectState> {
-    state_at_updates(
-        block.metadata_updates(),
-        element_id,
-        initial_state,
-        offset_frames,
-    )
-}
-
-pub(super) fn state_at_updates(
-    updates: &[SceneMetadataUpdate],
-    element_id: u64,
-    initial_state: Option<SpatialObjectState>,
-    offset_frames: u32,
-) -> Option<SpatialObjectState> {
-    let mut state = initial_state;
-    let mut ramp: Option<MetadataRamp> = None;
-    for update in updates
-        .iter()
-        .copied()
-        .filter(|update| update.element_id() == element_id)
-    {
-        if update.offset_frames() > offset_frames {
-            break;
-        }
-        let from = ramp
-            .map(|active| active.state_at(update.offset_frames()))
-            .or(state);
-        if update.ramp_frames() == 0 {
-            state = Some(update.state());
-            ramp = None;
-        } else if let Some(from) = from {
-            state = Some(update.state());
-            ramp = Some(MetadataRamp {
-                start_frame: update.offset_frames(),
-                duration_frames: update.ramp_frames(),
-                from,
-                to: update.state(),
-            });
-        } else {
-            // With no state before the first complete update there is no valid ramp origin.
-            // Establish the first known state at its update boundary instead of muting the
-            // remainder of the Scene block.
-            state = Some(update.state());
-            ramp = None;
-        }
-    }
-    ramp.map(|active| active.state_at(offset_frames)).or(state)
-}
-
-#[derive(Clone, Copy)]
-struct MetadataRamp {
-    start_frame: u32,
-    duration_frames: u32,
-    from: SpatialObjectState,
-    to: SpatialObjectState,
-}
-
-impl MetadataRamp {
-    #[allow(
-        clippy::cast_precision_loss,
-        reason = "metadata ramp offsets become a normalized interpolation fraction"
-    )]
-    fn state_at(self, frame: u32) -> SpatialObjectState {
-        let elapsed = frame
-            .saturating_sub(self.start_frame)
-            .min(self.duration_frames);
-        let amount = if self.duration_frames == 0 {
-            1.0
-        } else {
-            elapsed as f32 / self.duration_frames as f32
-        };
-        interpolate_state(self.from, self.to, amount)
-    }
-}
-
-fn interpolate_state(
-    from: SpatialObjectState,
-    to: SpatialObjectState,
-    amount: f32,
-) -> SpatialObjectState {
-    let amount = amount.clamp(0.0, 1.0);
-    if amount <= 0.0 {
-        return from;
-    }
-    if amount >= 1.0 {
-        return to;
-    }
-    let position = match (from.position(), to.position()) {
-        (Some(from), Some(to)) => Some(SpatialPosition::new(
-            lerp(from.x(), to.x(), amount),
-            lerp(from.y(), to.y(), amount),
-            lerp(from.z(), to.z(), amount),
-        )),
-        (_, target) => target,
-    };
-    let linear_gain = match (from.linear_gain(), to.linear_gain()) {
-        (Some(from), Some(to)) => Some(lerp(from, to, amount)),
-        (_, target) => target,
-    };
-    SpatialObjectState::new(
-        to.metadata_active(),
-        position,
-        linear_gain,
-        from.semantic_complete() && to.semantic_complete(),
-    )
-}
-
-fn lerp(from: f32, to: f32, amount: f32) -> f32 {
-    from + (to - from) * amount
-}
+#[cfg(any(feature = "decode", test))]
+pub(super) use crate::decoder::metadata::element_state_at;
+#[cfg(macinrender_output)]
+pub(super) use crate::decoder::metadata::remaining_ramps;
+#[cfg(any(macinrender_output, test))]
+pub(super) use crate::decoder::metadata::state_at_updates;
+#[cfg(test)]
+use crate::decoder::metadata::{MetadataRamp, interpolate_state};
 
 /// Flatten a resolved state into listener coordinates: Core/ADM `[x, y, z]`
 /// becomes `[x, z, -y]`, clamped to the unit cube.
@@ -286,6 +178,7 @@ pub(super) fn has_instant_update(
             break;
         }
         if update.element_id() == element_id
+            && update.changed_fields() & FIELD_POSITION != 0
             && update.ramp_frames() == 0
             && update.offset_frames() >= from_offset
         {
@@ -310,6 +203,83 @@ mod tests {
         )
     }
 
+    #[test]
+    fn tracking_switches_at_onset_and_does_not_replace_continuous_targets() {
+        use crate::decoder::ContentHeadTracking;
+        let initial = SpatialObjectState::new(
+            true,
+            Some(SpatialPosition::new(-1.0, 0.0, 0.0)),
+            Some(0.0),
+            true,
+        )
+        .with_tracking(ContentHeadTracking::SceneRelative);
+        let target = SpatialObjectState::new(
+            true,
+            Some(SpatialPosition::new(1.0, 0.0, 0.0)),
+            Some(1.0),
+            true,
+        )
+        .with_tracking(ContentHeadTracking::HeadRelative);
+        let updates = [
+            SceneMetadataUpdate::new(7, 0, 100, FIELD_POSITION, target),
+            SceneMetadataUpdate::new(7, 0, 200, FIELD_GAIN, target),
+            SceneMetadataUpdate::new(7, 25, 0, FIELD_HEAD_TRACKING, target),
+            // An ignored binaural-mode-only event must not restart either ramp.
+            SceneMetadataUpdate::new(7, 40, 0, FIELD_HEAD_TRACKING, target),
+        ];
+        assert_eq!(state_at_updates(&updates, 7, None, 0), Some(target));
+        let before = state_at_updates(&updates, 7, Some(initial), 24).unwrap();
+        assert_eq!(before.tracking(), ContentHeadTracking::SceneRelative);
+        let at_switch = state_at_updates(&updates, 7, Some(initial), 25).unwrap();
+        assert_eq!(at_switch.tracking(), ContentHeadTracking::HeadRelative);
+        assert_eq!(
+            at_switch.position().unwrap().x().to_bits(),
+            (-0.5_f32).to_bits()
+        );
+        assert_eq!(at_switch.linear_gain(), Some(0.125));
+        let later = state_at_updates(&updates, 7, Some(initial), 50).unwrap();
+        assert_eq!(later.position().unwrap().x().to_bits(), 0.0_f32.to_bits());
+        assert_eq!(later.linear_gain(), Some(0.25));
+        let end = state_at_updates(&updates, 7, Some(initial), 200).unwrap();
+        assert_eq!(end, target);
+        let block = DecodedSceneBlock::new(
+            48_000,
+            0,
+            240,
+            1,
+            0,
+            None,
+            true,
+            vec![SceneObjectPcm::new(7, Some(initial), vec![0.01; 240])],
+            None,
+            updates.to_vec(),
+        );
+        assert!(!has_instant_update(&block, 7, 25, 41));
+        #[cfg(macinrender_output)]
+        {
+            let ramps = remaining_ramps(&block, 7, 50);
+            assert_eq!(ramps[0].unwrap().ramp_frames(), 50);
+            assert_eq!(ramps[1].unwrap().ramp_frames(), 150);
+            assert_eq!(ramps[0].unwrap().state().position(), target.position());
+            assert_eq!(
+                ramps[1].unwrap().state().linear_gain(),
+                target.linear_gain()
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_tracking_does_not_bypass_spatial_checks_or_invent_warmup_state() {
+        use crate::decoder::{ContentHeadTracking, TrackingIssue};
+        let tracking = ContentHeadTracking::Unsupported(TrackingIssue::MissingGlobalControl);
+        let state = complete_state(0.7).with_tracking(tracking);
+        assert!(listener_render_state(Some(state)).0);
+        let invalid = SpatialObjectState::new(true, state.position(), state.linear_gain(), false)
+            .with_tracking(tracking);
+        assert!(!listener_render_state(Some(invalid)).0);
+        assert!(!listener_render_state(None).0);
+        assert_eq!(state_at_updates(&[], 7, None, 0), None);
+    }
     #[test]
     fn maps_core_adm_axes_to_windows_listener_coordinates() {
         let state = SpatialObjectState::new(

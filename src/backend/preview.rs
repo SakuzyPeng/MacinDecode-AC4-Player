@@ -274,6 +274,7 @@ impl ScenePreview {
                     active,
                     position,
                     gain,
+                    tracking: state.map_or_default(crate::decoder::SpatialObjectState::tracking),
                     jumped: jumped.get(slot).copied().unwrap_or(false),
                 })
             });

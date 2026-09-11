@@ -40,7 +40,7 @@ native crate 看不到 AC-4 bitstream、Core Session 或 Core 的借用类型。
   读取并填满本次 quantum。
 - MP4 时间线早于 0 的部分被裁掉；重叠 block 从当前播放位置裁剪；正向空隙补静音。
 - Core/ADM Cartesian `[x, y, z]` 转换为 Windows listener coordinates `[x, z, -y]`，每轴限制在
-  `[-1, 1]`。
+  `[-1, 1]`。场景固定对象随后做头部逆旋转，头部固定对象跳过旋转；LFE 不参与方向补偿。
 - 每个 element ID 只激活一个动态对象并保持到流结束。每个 update 都重新提交位置与音量；inactive、
   坐标不完整或语义不完整的对象以零增益提交。
 - OAMD ramp 在每个 Windows quantum 起点插值。Windows 一个对象在单个 quantum 只接受一组位置/音量，
@@ -84,3 +84,7 @@ cargo test -p macindecode-windows-spatial-audio opens_enumerated_endpoints_by_st
 这两项测试要求默认 endpoint 支持 Spatial Audio：媒体回归检查对象槽位、至少 20 次 render update、
 PCM/object buffer、位置提交、Pause 和零欠载；EOS 回归检查对象释放后 renderer 稳定停留在 Ended。
 普通 `cargo test` 不依赖本地媒体或音频设备。
+
+逐对象跟踪与位置/增益使用同一个 quantum 起点状态，quantum 内的切换在下一边界生效。
+未指定策略使用场景固定默认值；无法解释的策略也采用该默认值，并在诊断中保留原因。
+Bypass/Near/Mid/Far 继续不影响此路径。

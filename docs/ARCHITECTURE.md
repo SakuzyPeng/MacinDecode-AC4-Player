@@ -111,7 +111,7 @@ render source，共用同一个镜像才不会让视图空一拍。
 **写入点**：`SceneRenderSource::render_quantum` 的尾部，直接抄这一帧**已经算好**的
 `RenderQuantum` 对象表，不重新解析一遍 OAMD。理由是平行推导会在 ramp 上和音频漂开；而且
 `backend::state::listener_render_state` 产出的坐标（Core/ADM `[x, y, z]` 映射为 `[x, z, -y]`）本来
-就是 `scene3d` 绘制所用的听众空间，不需要任何转换。
+就是 `scene3d` 使用的轴系。镜像另外保留内容参照系，绘制时将跟头对象及其轨迹按当前头姿正向旋转到世界坐标。
 
 **实时约束**（每一条都是必需的，不是风格问题）：
 
@@ -235,3 +235,10 @@ Windows 上不构造预览：那里 render source 拥有 FIFO，多一个消费�
 5. 增加 seek、Windows 设备切换与无重开恢复（已完成）。
 6. 接入 MacinRender SAF 渲染、系统空间输出、软件双耳与头部控制（已实现）。
 7. 扩展到实时 Apple AUSpatialMixer、EAR／HOA 后端，以及物理多声道设备输出。
+
+### 跨帧元数据续接
+
+`decoder::metadata` 只操作 Player 自有状态。每次连续解码维护逐元素当前值、目标和独立的位置/增益期限，
+在帧首生成剩余渐变事件，再应用该帧的 offset 0 控制；seek 重试、新 epoch、generation 或时间缺口清除历史。
+续接在目标帧裁剪和 FIFO 发布之前完成，预卷中的控制也能正确影响目标位置。三个 Scene 消费者共用同一
+解析器，不持有 Core 类型或第二份 PCM；跟踪策略及诊断仍在实际呈现时刻可见。
