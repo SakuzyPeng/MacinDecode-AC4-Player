@@ -45,6 +45,7 @@ fn callback(rect: Rect) -> SceneCallback {
         },
         SceneObject {
             display_number: 2,
+            head_locked: true,
             position: [0.3, 0.6, 0.2],
             active: true,
             gain: 0.1,

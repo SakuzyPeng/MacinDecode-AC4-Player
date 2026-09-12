@@ -81,7 +81,8 @@ the checksum and build information attachments do not need to be installed. You 
 **The 3D scene** (center of the window): drag to orbit, `Shift` + drag to pan, scroll to zoom. The
 `ISO` / `TOP` / `BACK` / `SIDE` / `RESET` buttons jump to fixed viewpoints, and two more toggle
 perspective/orthographic projection and element numbers. The scene draws at most 20 objects at once
-and says at the bottom left how many it left out.
+and says at the bottom left how many it left out. With element numbers enabled, black numbers identify scene-relative
+objects and white numbers identify head-locked objects.
 
 **For more detail:** **Details…** on the file card opens the bitstream details window, and the
 **`...`** button next to the scene heading opens diagnostics.

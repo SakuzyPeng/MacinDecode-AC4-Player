@@ -1562,6 +1562,10 @@ impl PlayerApp {
     /// own — that is the surest way to break the paper metaphor.
     ///
     fn draw_stage(&mut self, ui: &mut egui::Ui, decoder: &DecoderSnapshot) {
+        if self.object_numbers_visible {
+            draw_number_legend(ui);
+            ui.add_space(6.0);
+        }
         let available_height = ui.available_height();
         let frame = egui::Frame::NONE
             .fill(theme::STAGE)
@@ -1594,6 +1598,7 @@ impl PlayerApp {
                     position: object.position,
                     active: object.active,
                     gain: object.gain,
+                    head_locked: object.tracking.head_locked(),
                     trail: mirrored.trail(slot),
                     trail_jumps: mirrored.trail_jumps(slot),
                 };
@@ -2684,6 +2689,22 @@ const fn output_phase_label(phase: OutputPhase) -> &'static str {
         OutputPhase::Ended => "End of stream",
         OutputPhase::Failed => "Failed",
     }
+}
+
+fn draw_number_legend(ui: &mut egui::Ui) {
+    ui.horizontal_wrapped(|ui| {
+        for (label, colour, hint) in [
+            ("Scene relative", Color32::BLACK, "Black numbers: fixed in the scene, including unspecified policies and scene-relative fallbacks."),
+            ("Head locked", Color32::WHITE, "White numbers: attached to the listener's head when the output supports per-object head tracking."),
+        ] {
+            ui.horizontal(|ui| {
+                let (swatch, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
+                ui.painter().rect_filled(swatch, 0.0, theme::ACCENT);
+                ui.painter().text(swatch.center(), Align2::CENTER_CENTER, "8", egui::FontId::monospace(12.0), colour);
+                ui.label(RichText::new(label).size(11.0).color(theme::MUTED));
+            }).response.on_hover_text(hint);
+        }
+    });
 }
 
 fn section_title(ui: &mut egui::Ui, title: &str) {

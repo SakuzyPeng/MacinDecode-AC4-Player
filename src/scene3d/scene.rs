@@ -37,6 +37,8 @@ pub struct SceneObject<'a> {
     /// Linear gain, which decides whether the object reads as sounding or as
     /// present but silent.
     pub gain: f32,
+    /// Content reference frame: scene-relative numbers are black, head-locked numbers white.
+    pub head_locked: bool,
     /// Where this object has been, oldest first, in the same normalized
     /// coordinates as `position`.
     pub trail: &'a [[f32; 3]],
@@ -133,7 +135,7 @@ fn add_lfe_slot(mesh: &mut MeshBuilder, present: bool, show_number: bool, view: 
     if present {
         mesh.add_box(centre, size, object_colour, view);
         if show_number {
-            add_box_number(mesh, 0, centre, size, view);
+            add_box_number(mesh, 0, centre, size, number_colour(false), view);
         }
     } else {
         mesh.add_wire_box(
@@ -226,7 +228,14 @@ fn add_object(
     let edge = params::OBJECT_EDGE;
     mesh.add_box([x, y, z], [edge; 3], object_colour(object, view), view);
     if show_label {
-        add_box_number(mesh, object.display_number, [x, y, z], [edge; 3], view);
+        add_box_number(
+            mesh,
+            object.display_number,
+            [x, y, z],
+            [edge; 3],
+            number_colour(object.head_locked),
+            view,
+        );
     }
 
     let drop = Rgb::from_color32(theme::MUTED).lerp(Rgb::from_color32(theme::BORDER), 0.35);
@@ -309,6 +318,7 @@ fn add_box_number(
     number: u64,
     centre: [f32; 3],
     size: [f32; 3],
+    colour: Rgb,
     view: &ViewContext,
 ) {
     let (digits, first) = decimal_digits(number);
@@ -344,13 +354,21 @@ fn add_box_number(
                     Layer::Line,
                     face_label_point(centre, face, digit_centre, from),
                     face_label_point(centre, face, digit_centre, to),
-                    view.ink,
+                    colour,
                     params::OBJECT_LABEL_STROKE_POINTS,
                     view,
                 );
             }
         }
     }
+}
+
+fn number_colour(head_locked: bool) -> Rgb {
+    Rgb::from_color32(if head_locked {
+        eframe::egui::Color32::WHITE
+    } else {
+        eframe::egui::Color32::BLACK
+    })
 }
 
 fn aligned_extent(size: [f32; 3], axis: [f32; 3]) -> f32 {
@@ -590,6 +608,7 @@ mod tests {
             position,
             active: true,
             gain: 1.0,
+            head_locked: false,
             trail: &[],
             trail_jumps: &[],
         }
