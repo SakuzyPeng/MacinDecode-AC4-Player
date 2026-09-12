@@ -14,6 +14,12 @@ Player 将 AC-4 Core 的 Scene 转换为 renderer-native Scene，经 MacinRender
 - 软件朝向在 Mac 优先使用 AirPods，缺失或权限不可用时使用手动朝向；Windows 使用手动朝向。
   系统空间音频模式保持上游中性姿态，macOS 的系统头追由系统负责。
 
+软件双耳的设备输出在主音量之后使用两耳联动的采样峰值保护：5 ms 前视、100 ms 释放，
+上限为 -1 dBFS。自定义 SOFA 的增益和多对象叠加可能让浮点双耳输出超过满幅；保护器会在
+miniaudio 硬限幅之前平滑降低两耳增益。未触发保护时按原音量逐采样通过，低音量不会被
+预先限幅。前视缓存保留暂停位置，并在 seek/新 epoch 时清空；结尾完整排出，媒体帧数不变。
+原生 Scene 的浮点拉取仍保留超满幅数据，系统空间音频交由系统处理最终输出。
+
 ## 内容指定的逐对象头追
 
 Player 消费 Core 的有效 `headphone_policy()`，只使用其中的跟踪参照系。`SceneRelative`
