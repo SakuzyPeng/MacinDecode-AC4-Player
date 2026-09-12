@@ -23,15 +23,15 @@ eframe = { version = "=0.36.1", default-features = false, features = [
 # Already in the tree via wgpu, so taking it as a direct dependency costs no
 # extra compilation. Used only for the scene vertex cast in `scene3d::gpu`.
 bytemuck = { version = "1", features = ["derive"] }
-macindecode-ac4-inspect = { git = "https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git", rev = "b9dee0d4feee01deeb478c440f55a5c9c8a1f1d9" }
+macindecode-ac4-inspect = { git = "https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git", rev = "987605c5f964c6f630c389edb4258e80fc351c73" }
 # Core decode. Not platform-gated: these crates carry no `target_os` of their
 # own and Core's release CI builds `audio-decode` for Linux, macOS and Windows
 # alike. What is Windows-only is *playback*, which lives in the native crate
 # below. The feature exists because the build needs the locally generated ETSI
 # spec tables (see README), not because a platform cannot decode.
-macindecode-ac4-bitstream = { git = "https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git", rev = "b9dee0d4feee01deeb478c440f55a5c9c8a1f1d9", optional = true }
-macindecode-ac4-mp4 = { git = "https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git", rev = "b9dee0d4feee01deeb478c440f55a5c9c8a1f1d9", features = ["std"] }
-macindecode-ac4-scene = { git = "https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git", rev = "b9dee0d4feee01deeb478c440f55a5c9c8a1f1d9", features = ["audio-decode"], optional = true }
+macindecode-ac4-bitstream = { git = "https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git", rev = "987605c5f964c6f630c389edb4258e80fc351c73", optional = true }
+macindecode-ac4-mp4 = { git = "https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git", rev = "987605c5f964c6f630c389edb4258e80fc351c73", features = ["std"] }
+macindecode-ac4-scene = { git = "https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git", rev = "987605c5f964c6f630c389edb4258e80fc351c73", features = ["audio-decode"], optional = true }
 rfd = { version = "=0.17.2", default-features = false, features = [
     "common-controls-v6",
     "wayland",
