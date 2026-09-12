@@ -1562,10 +1562,19 @@ impl PlayerApp {
     /// own — that is the surest way to break the paper metaphor.
     ///
     fn draw_stage(&mut self, ui: &mut egui::Ui, decoder: &DecoderSnapshot) {
-        if self.object_numbers_visible {
-            draw_number_legend(ui);
-            ui.add_space(6.0);
-        }
+        // Counts and geometry share the same presentation-clock snapshot.
+        let mirror_frame = self
+            .output
+            .scene_view()
+            .read(self.decoder.playback_key())
+            .map(|frame| frame.in_world_space(self.output.head_snapshot().pose));
+        draw_tracking_counts(
+            ui,
+            mirror_frame
+                .as_ref()
+                .map(crate::scene_view::SceneViewFrame::tracking),
+        );
+        ui.add_space(6.0);
         let available_height = ui.available_height();
         let frame = egui::Frame::NONE
             .fill(theme::STAGE)
@@ -1581,11 +1590,6 @@ impl PlayerApp {
         // These are locals because a SceneObject borrows its trail out of the
         // frame, which on `self` would be a self-referential struct. The array
         // is sized to the object budget, so it costs no allocation either way.
-        let mirror_frame = self
-            .output
-            .scene_view()
-            .read(self.decoder.playback_key())
-            .map(|frame| frame.in_world_space(self.output.head_snapshot().pose));
         let mut objects =
             [scene3d::scene::SceneObject::default(); crate::scene_view::MAX_VIEW_OBJECTS];
         let mut hidden_objects = 0usize;
@@ -2691,17 +2695,24 @@ const fn output_phase_label(phase: OutputPhase) -> &'static str {
     }
 }
 
-fn draw_number_legend(ui: &mut egui::Ui) {
+fn draw_tracking_counts(ui: &mut egui::Ui, tracking: Option<crate::decoder::TrackingSummary>) {
+    let scene_relative =
+        tracking.map(|value| value.scene_relative + value.unspecified + value.unsupported);
+    let head_locked = tracking.map(|value| value.head_relative);
     ui.horizontal_wrapped(|ui| {
-        for (label, colour, hint) in [
-            ("Scene relative", Color32::BLACK, "Black numbers: fixed in the scene, including unspecified policies and scene-relative fallbacks."),
-            ("Head locked", Color32::WHITE, "White numbers: attached to the listener's head when the output supports per-object head tracking."),
+        for (label, count, colour, hint) in [
+            ("Scene relative", scene_relative, Color32::BLACK, "Objects fixed in the scene at the current playback position, including unspecified policies and scene-relative fallbacks. Includes objects beyond the view limit; excludes LFE."),
+            ("Head locked", head_locked, Color32::WHITE, "Objects with a head-relative policy at the current playback position. Includes objects beyond the view limit; excludes LFE."),
         ] {
             ui.horizontal(|ui| {
-                let (swatch, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
-                ui.painter().rect_filled(swatch, 0.0, theme::ACCENT);
-                ui.painter().text(swatch.center(), Align2::CENTER_CENTER, "8", egui::FontId::monospace(12.0), colour);
                 ui.label(RichText::new(label).size(11.0).color(theme::MUTED));
+                egui::Frame::NONE
+                    .fill(theme::ACCENT)
+                    .inner_margin(egui::Margin::symmetric(5, 2))
+                    .show(ui, |ui| {
+                        let count = count.map_or_else(|| "—".to_owned(), |value| value.to_string());
+                        ui.label(RichText::new(count).monospace().size(12.0).color(colour));
+                    });
             }).response.on_hover_text(hint);
         }
     });
