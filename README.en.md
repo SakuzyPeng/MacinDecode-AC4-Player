@@ -82,7 +82,7 @@ the checksum and build information attachments do not need to be installed. You 
 `ISO` / `TOP` / `BACK` / `SIDE` / `RESET` buttons jump to fixed viewpoints, and two more toggle
 perspective/orthographic projection and element numbers. The scene draws at most 20 objects at once
 and says at the bottom left how many it left out. With element numbers enabled, black numbers identify scene-relative
-objects and white numbers identify head-locked objects. Live counts for both reference frames appear above the scene.
+objects and white numbers identify head-locked objects. Live counts for both reference frames appear above the scene in fixed square badges with centered numbers.
 
 **For more detail:** **Details…** on the file card opens the bitstream details window, and the
 **`...`** button next to the scene heading opens diagnostics.

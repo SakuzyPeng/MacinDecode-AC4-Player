@@ -2706,16 +2706,35 @@ fn draw_tracking_counts(ui: &mut egui::Ui, tracking: Option<crate::decoder::Trac
         ] {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(label).size(11.0).color(theme::MUTED));
-                egui::Frame::NONE
-                    .fill(theme::ACCENT)
-                    .inner_margin(egui::Margin::symmetric(5, 2))
-                    .show(ui, |ui| {
-                        let count = count.map_or_else(|| "—".to_owned(), |value| value.to_string());
-                        ui.label(RichText::new(count).monospace().size(12.0).color(colour));
-                    });
+                draw_tracking_count_badge(ui, count, colour);
             }).response.on_hover_text(hint);
         }
     });
+}
+
+fn draw_tracking_count_badge(ui: &mut egui::Ui, count: Option<usize>, colour: Color32) {
+    let text = count.map_or_else(|| "—".to_owned(), |value| value.to_string());
+    let (rect, response) = ui.allocate_exact_size(egui::Vec2::splat(28.0), egui::Sense::hover());
+    response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, ui.is_enabled(), &text));
+    ui.painter().rect_filled(rect, 0.0, theme::ACCENT);
+
+    let mut galley =
+        ui.painter()
+            .layout_no_wrap(text.clone(), egui::FontId::monospace(12.0), colour);
+    let available = rect.shrink(4.0).size();
+    let size = galley.mesh_bounds.size();
+    let scale = (available.x / size.x.max(1.0))
+        .min(available.y / size.y.max(1.0))
+        .min(1.0);
+    if scale < 1.0 {
+        galley = ui
+            .painter()
+            .layout_no_wrap(text, egui::FontId::monospace(12.0 * scale), colour);
+    }
+    // Centre the visible digits, including font bearings, rather than the line's leading.
+    let origin = rect.center() - galley.mesh_bounds.center().to_vec2();
+    ui.painter().galley(origin, galley, colour);
 }
 
 fn section_title(ui: &mut egui::Ui, title: &str) {
