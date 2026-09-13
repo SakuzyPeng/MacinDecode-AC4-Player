@@ -188,6 +188,25 @@ impl ObjectMeters {
     }
 }
 
+/// Where a level sits on the nameplate strip, on the footprint's decibel scale
+/// so the two readings of the same object agree.
+fn loudness_fraction(loudness: f32) -> f32 {
+    let quiet =
+        (loudness.max(0.0).log10() / scene3d::params::OBJECT_SILENT_GAIN.log10()).clamp(0.0, 1.0);
+    1.0 - quiet
+}
+
+/// A theme colour at a given opacity.
+fn fade(colour: Color32, alpha: f32) -> Color32 {
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "alpha is clamped to 0..=1 before scaling into a u8"
+    )]
+    let alpha = (alpha.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+    Color32::from_rgba_unmultiplied(colour.r(), colour.g(), colour.b(), alpha)
+}
+
 /// Frames the fast meter averages before the ballistics see them.
 fn window_frames(sample_rate: u32) -> u32 {
     (u64::from(sample_rate) * u64::from(scene3d::params::METER_WINDOW_MILLISECONDS) / 1000)
@@ -1747,9 +1766,144 @@ impl PlayerApp {
                 }
             }
 
+            if self.object_loudness_visible {
+                self.draw_object_nameplates(ui, rect, objects);
+            }
             self.draw_camera_presets(ui, rect);
             self.draw_camera_readout(ui, rect, hidden_objects);
         });
+    }
+
+    /// The floating loudness readout above each object.
+    ///
+    /// Screen space, because `MeshBuilder` emits world geometry only and a
+    /// readout has to stay the same size at any zoom. That costs the depth test
+    /// the face numbers get for free, which is the trade this carries
+    /// deliberately: the plate reports loudness and nothing else, so it never
+    /// has to be big enough for an identity as well, and the number that says
+    /// *which* object this is stays printed on the cube's six faces where the
+    /// depth buffer still hides the ones behind it. Neither toggle moves the
+    /// other; each reading has one home.
+    fn draw_object_nameplates(
+        &self,
+        ui: &egui::Ui,
+        stage: egui::Rect,
+        objects: &[scene3d::scene::SceneObject<'_>],
+    ) {
+        let font = egui::FontId::monospace(scene3d::params::NAMEPLATE_TEXT_POINTS);
+        let pad = scene3d::params::NAMEPLATE_PAD_POINTS;
+        let strip = scene3d::params::NAMEPLATE_STRIP_POINTS;
+        // Measured from the widest readout the scale can produce, once, rather
+        // than from the value each plate happens to show.
+        let widest = "0".repeat(scene3d::params::NAMEPLATE_CELLS);
+        let measure = |text: String| {
+            ui.painter()
+                .layout_no_wrap(text, font.clone(), theme::TEXT)
+                .rect
+                .width()
+        };
+        let cell = measure("0".to_owned());
+        let plate_width = measure(widest) + pad * 2.0;
+        let plate_height = scene3d::params::NAMEPLATE_TEXT_POINTS + strip + 6.0;
+
+        // Farthest first, so a nearer plate lands on top of the one behind it.
+        // Without a depth buffer this is the only ordering available, and it is
+        // at least the ordering the objects themselves have.
+        let direction = self.camera.direction();
+        let mut order: Vec<usize> = (0..objects.len()).collect();
+        order.sort_by(|left, right| {
+            let depth = |index: usize| {
+                let position = scene3d::scene::object_world_position(objects[index].position);
+                position[0] * direction[0] + position[1] * direction[1] + position[2] * direction[2]
+            };
+            depth(*left).total_cmp(&depth(*right))
+        });
+
+        let painter = ui.painter().with_clip_rect(stage);
+        for index in order {
+            let object = &objects[index];
+            if !object.active {
+                continue;
+            }
+            let [x, y, z] = scene3d::scene::object_world_position(object.position);
+            let anchor = self.camera.project(
+                [
+                    x,
+                    y + scene3d::params::OBJECT_EDGE / 2.0 + scene3d::params::NAMEPLATE_OFFSET,
+                    z,
+                ],
+                stage,
+            );
+            let silent = object.loudness < scene3d::params::OBJECT_SILENT_GAIN;
+            let alpha = if silent {
+                scene3d::params::NAMEPLATE_SILENT_ALPHA
+            } else {
+                1.0
+            };
+            let plate = egui::Rect::from_min_size(
+                egui::pos2(anchor.x - plate_width / 2.0, anchor.y - plate_height),
+                egui::vec2(plate_width, plate_height),
+            );
+            painter.rect_filled(plate, 2.5, fade(theme::INK, 0.70 * alpha));
+
+            // The sign owns its own cell and the digits are right-aligned
+            // against the last, so neither walks sideways as the level moves.
+            // Infinity has no decimal point to align, so it sits next to the
+            // sign instead — which is what keeps the sign itself still in every
+            // state the readout has.
+            let decibels = 20.0 * object.loudness.max(0.0).log10();
+            let baseline = plate.top() + (plate.height() - strip) / 2.0;
+            let text_colour = if decibels > -0.5 && !silent {
+                fade(theme::WARNING, alpha)
+            } else {
+                fade(theme::BACKGROUND, alpha)
+            };
+            let (sign, magnitude) = if silent {
+                ("−", "∞".to_owned())
+            } else if decibels > -0.05 {
+                (" ", format!("{:.1}", decibels.abs()))
+            } else {
+                ("−", format!("{:.1}", decibels.abs()))
+            };
+            painter.text(
+                egui::pos2(plate.left() + pad, baseline),
+                Align2::LEFT_CENTER,
+                sign,
+                font.clone(),
+                text_colour,
+            );
+            if silent {
+                painter.text(
+                    egui::pos2(plate.left() + pad + cell, baseline),
+                    Align2::LEFT_CENTER,
+                    magnitude,
+                    font.clone(),
+                    text_colour,
+                );
+            } else {
+                painter.text(
+                    egui::pos2(plate.right() - pad, baseline),
+                    Align2::RIGHT_CENTER,
+                    magnitude,
+                    font.clone(),
+                    text_colour,
+                );
+            }
+
+            // The same value as a strip, which is what makes a row of plates
+            // scannable without reading every digit.
+            let filled = plate_width * loudness_fraction(object.loudness);
+            let track = egui::Rect::from_min_size(
+                egui::pos2(plate.left(), plate.bottom() - strip),
+                egui::vec2(plate_width, strip),
+            );
+            painter.rect_filled(track, 0.0, fade(theme::INK, 0.35 * alpha));
+            painter.rect_filled(
+                egui::Rect::from_min_size(track.min, egui::vec2(filled, strip)),
+                0.0,
+                fade(theme::ACCENT, alpha),
+            );
+        }
     }
 
     /// Live camera state, bottom-left of the stage.
@@ -3312,6 +3466,28 @@ mod tests {
             !context.has_requested_repaint(),
             "a latched failure must not keep waking the UI"
         );
+    }
+
+    #[test]
+    fn the_nameplate_strip_and_the_footprint_share_one_decibel_floor() {
+        // Two readings of the same object in two places; if their floors ever
+        // drift, a strip can sit empty under a footprint core that is not, and
+        // the picture contradicts itself.
+        assert!(loudness_fraction(0.0).abs() < f32::EPSILON);
+        assert!(loudness_fraction(scene3d::params::OBJECT_SILENT_GAIN).abs() < f32::EPSILON);
+        assert!((loudness_fraction(1.0) - 1.0).abs() < f32::EPSILON);
+        assert!((loudness_fraction(4.0) - 1.0).abs() < f32::EPSILON);
+        // Monotonic in between, so a louder object never reads shorter.
+        let mut previous = 0.0;
+        for step in 0..=20_u8 {
+            let gain = scene3d::params::OBJECT_SILENT_GAIN.powf(1.0 - f32::from(step) / 20.0);
+            let fraction = loudness_fraction(gain);
+            assert!(
+                fraction >= previous,
+                "gain {gain} gave {fraction} after {previous}"
+            );
+            previous = fraction;
+        }
     }
 
     #[test]

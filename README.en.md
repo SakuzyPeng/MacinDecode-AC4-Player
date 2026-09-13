@@ -88,7 +88,13 @@ With `LVL` enabled the floor footprint carries two readings instead of one: the 
 gain the metadata asks for, and the filled core is the level actually measured, both read on the same
 decibel scale. A wide ring around a small core is an object that was positioned and gained but has
 almost no signal in it — something gain alone cannot show. Loudness is measured before rendering,
-K-weighted per ITU-R BS.1770, and cross-checked against the reference implementation in the tests.
+A small nameplate also floats above each object, reporting dBFS and nothing else: its width is
+fixed and the sign and digits each own a cell, so nothing shifts sideways as the level crosses
+-10 dB, and a plate below the silence floor fades out. **Element numbers stay printed on the cube's
+six faces and never move with `LVL`** — identity uses the depth buffer, the readout uses the screen,
+and each has one home. Trail breadcrumbs are sized by the loudness recorded when each was taken.
+Loudness is measured before rendering, K-weighted per ITU-R BS.1770, and cross-checked against the
+reference implementation in the tests.
 
 **For more detail:** **Details…** on the file card opens the bitstream details window, and the
 **`...`** button next to the scene heading opens diagnostics.

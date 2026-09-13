@@ -633,7 +633,7 @@ fn travelled_far(from: [f32; 3], to: [f32; 3]) -> bool {
 /// Map the normalized acoustic coordinates into the display room. The floor is
 /// farther below the head than the ceiling is above it, so elevation uses two
 /// linear halves and keeps zero exactly at the listener's head.
-fn object_world_position([x, y, z]: [f32; 3]) -> [f32; 3] {
+pub fn object_world_position([x, y, z]: [f32; 3]) -> [f32; 3] {
     let elevation = y.clamp(-1.0, 1.0);
     let world_y = if elevation >= 0.0 {
         elevation * CEILING_Y

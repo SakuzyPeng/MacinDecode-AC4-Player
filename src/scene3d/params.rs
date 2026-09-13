@@ -164,6 +164,31 @@ pub const METER_ATTACK_MILLISECONDS: f32 = 10.0;
 /// number would make the picture lag the sound by a window length.
 pub const METER_RELEASE_MILLISECONDS: f32 = 300.0;
 
+/// How far above a cube's top face the loudness nameplate is anchored, in world
+/// units. Clear of the face label without floating free of the object.
+pub const NAMEPLATE_OFFSET: f32 = 0.055;
+
+/// Characters the nameplate's readout reserves: sign, two integer digits, the
+/// point, one decimal — `-00.0`, the widest value the scale can produce.
+///
+/// The plate is sized from this rather than from the value it currently shows,
+/// and the two cells inside it are fixed: the sign owns the first, the digits
+/// are right-aligned against the last. A plate that grew with its own value
+/// would make the level strip beneath it mean a different number of pixels on
+/// every object, and right-aligning the whole string instead would pin the
+/// decimal point but leave the sign hopping a cell whenever the level crossed
+/// -10 dB. Neither is a scale.
+pub const NAMEPLATE_CELLS: usize = 5;
+/// Readout size in screen points. Fixed, so the plate does not grow with zoom.
+pub const NAMEPLATE_TEXT_POINTS: f32 = 11.0;
+/// Horizontal padding inside the plate, in screen points.
+pub const NAMEPLATE_PAD_POINTS: f32 = 6.0;
+/// Height of the level strip along the plate's bottom edge, in screen points.
+pub const NAMEPLATE_STRIP_POINTS: f32 = 3.0;
+/// Opacity of a nameplate whose object has fallen below the silence floor.
+/// It recedes rather than disappearing, as the cube itself does.
+pub const NAMEPLATE_SILENT_ALPHA: f32 = 0.32;
+
 /// Trail breadcrumbs kept per object, and how far apart in time they are taken.
 /// Forty at forty milliseconds is 1.6 seconds of history.
 ///
