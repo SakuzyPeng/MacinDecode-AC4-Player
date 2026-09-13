@@ -54,6 +54,7 @@ pub struct AppPreferences {
     pub muted: bool,
     pub camera: CameraState,
     pub object_numbers: bool,
+    pub object_loudness: bool,
     pub manual_head: [f32; 3],
     #[serde(with = "crate::playlist::native_path")]
     pub last_directory: PathBuf,
@@ -66,6 +67,7 @@ impl Default for AppPreferences {
             muted: false,
             camera: Camera::default().state(),
             object_numbers: true,
+            object_loudness: true,
             manual_head: [0.0; 3],
             last_directory: PathBuf::new(),
         }

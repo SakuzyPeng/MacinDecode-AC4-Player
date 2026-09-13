@@ -211,7 +211,10 @@ all of it, each `unsafe_op_in_unsafe_fn = "deny"` and each exposing a safe surfa
 
 Exactly one consumer ever pops a given FIFO; all three resolve OAMD state through the same
 `backend/state.rs` validation/coordinate helpers and `decoder/metadata.rs` timeline resolution, so
-validation, timeline trimming and ramp resolution can't drift between them.
+validation, timeline trimming and ramp resolution can't drift between them. All three also measure
+per-object loudness through the same `backend/state.rs::KWeighting`, under one set of rules: a
+timeline gap counts as silence (its zeros go *through* the filter), an underrun counts as nothing,
+and master volume never enters — the meter reads content level, not the volume control.
 
 - `backend/source.rs` (`windows_spatial_output`) implements `SpatialSource` on the WASAPI callback.
   One quantum can span several Scene blocks, so it concatenates blocks, trims pre-zero MP4 timeline
@@ -235,7 +238,22 @@ producer submits ADM coordinates unchanged because the renderer is ADM-native.
 `scene_view::SceneViewMirror` is the one-way channel from whichever consumer is live to the frame
 that draws it: `try_lock` writes that drop rather than block, a fixed `MAX_VIEW_OBJECTS` (20) array
 so neither side allocates, and reader-copies-and-leaves. A scene past the budget is truncated and
-reported on screen, never grown. `scene3d` draws it through wgpu (real depth buffer, MSAA) with
+reported on screen, never grown.
+
+Each slot also carries a ring of `LOUDNESS_BINS` (40) × `LOUDNESS_BIN_MILLISECONDS` (10 ms) K-weighted
+energy bins — 400 ms, exactly the BS.1770 momentary window, so summing the ring *is* the standard's
+quantity rather than an approximation. **The mirror stores energy, never a meter reading**, for two
+reasons that are both load bearing: the three consumers publish at cadences differing by orders of
+magnitude, and `write` holds the previous frame on an empty update, so a decaying value stored here
+would freeze instead of falling. A bin therefore closes when it *holds* a bin's worth of frames, not
+on a clock, and ballistics live in `app::ObjectMeters` on the drawing side. The bins clear at the same
+two sites the trails do — key change, and a slot changing element or reference frame.
+
+Per-object loudness is not a standardised quantity (BS.1770 is defined over a channel-based
+programme; object audio is measured by rendering to a reference layout first). The arithmetic is
+pinned instead: `ebur128` is a **dev-dependency only**, and `backend::state`'s cross-check asserts
+agreement with `EbuR128::loudness_momentary` within 0.01 LU. Keep that test passing rather than
+loosening it, and keep the UI labelling the in-scene readout as dBFS. `scene3d` draws it through wgpu (real depth buffer, MSAA) with
 everything except `scene3d::gpu` unit-tested without an adapter.
 
 ### Stream reuse vs rebuild

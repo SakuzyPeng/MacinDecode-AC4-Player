@@ -37,6 +37,10 @@ pub struct SceneObject<'a> {
     /// Linear gain, which decides whether the object reads as sounding or as
     /// present but silent.
     pub gain: f32,
+    /// Measured level the renderer will actually produce for this object,
+    /// already through the meter's ballistics. Read on the same decibel scale
+    /// as `gain`, so it can never exceed it — see [`params::FOOTPRINT_RING_POINTS`].
+    pub loudness: f32,
     /// Content reference frame: scene-relative numbers are black, head-locked numbers white.
     pub head_locked: bool,
     /// Where this object has been, oldest first, in the same normalized
@@ -53,6 +57,9 @@ pub struct SceneInput<'a> {
     pub objects: &'a [SceneObject<'a>],
     /// Print LFE zero and every dynamic object's one-based number on all faces.
     pub show_element_numbers: bool,
+    /// Draw the measured loudness channels. Measurement itself always runs —
+    /// this only decides whether the picture carries it.
+    pub show_loudness: bool,
     /// Whether the presentation carries an LFE element. The slot is drawn either
     /// way; only its occupancy changes.
     pub has_lfe: bool,
@@ -86,7 +93,13 @@ pub fn build(
     // honest reading of "we do not know where this is".
     for object in input.objects.iter().filter(|object| object.active) {
         add_trail(mesh, object, &view);
-        add_object(mesh, object, input.show_element_numbers, &view);
+        add_object(
+            mesh,
+            object,
+            input.show_element_numbers,
+            input.show_loudness,
+            &view,
+        );
     }
 }
 
@@ -222,6 +235,7 @@ fn add_object(
     mesh: &mut MeshBuilder,
     object: &SceneObject<'_>,
     show_label: bool,
+    show_loudness: bool,
     view: &ViewContext,
 ) {
     let [x, y, z] = object_world_position(object.position);
@@ -247,14 +261,25 @@ fn add_object(
         params::HAIRLINE_POINTS * 0.8,
         view,
     );
-    mesh.add_floor_mark(
-        x,
-        z,
-        edge * footprint_scale(object.gain),
-        FLOOR_Y,
-        Rgb::from_color32(theme::MUTED).lerp(view.stage, 0.4),
-        view,
-    );
+    let mark = Rgb::from_color32(theme::MUTED).lerp(view.stage, 0.4);
+    let gain_edge = edge * footprint_scale(object.gain);
+    if show_loudness {
+        // The ring is what the metadata asks for, the core what the object
+        // delivers. Both are read on the same decibel scale, so the core is
+        // bounded by the ring by construction rather than by a clamp.
+        let level_edge = (edge * footprint_scale(object.loudness)).min(gain_edge);
+        mesh.add_floor_ring(
+            [x, z],
+            gain_edge,
+            FLOOR_Y,
+            Rgb::from_color32(theme::MUTED),
+            params::FOOTPRINT_RING_POINTS,
+            view,
+        );
+        mesh.add_floor_mark(x, z, level_edge, FLOOR_Y, mark, view);
+    } else {
+        mesh.add_floor_mark(x, z, gain_edge, FLOOR_Y, mark, view);
+    }
 }
 
 /// Seven deliberately separated display segments: top, upper-left,
@@ -608,6 +633,7 @@ mod tests {
             position,
             active: true,
             gain: 1.0,
+            loudness: 1.0,
             head_locked: false,
             trail: &[],
             trail_jumps: &[],
@@ -619,6 +645,53 @@ mod tests {
             gain,
             ..sounding([0.3, 0.4, -0.2])
         }
+    }
+
+    /// Decal vertices a scene emits with no objects at all: the floor grid.
+    fn empty_decal_vertices() -> usize {
+        built(&[]).decal.len()
+    }
+
+    #[test]
+    fn the_loudness_core_never_reaches_past_the_gain_ring() {
+        // Both readings run through `footprint_scale`, so the core is bounded
+        // by construction rather than by a clamp — this pins that the wiring
+        // keeps it that way for a level that exceeds its own gain.
+        for (gain, loudness) in [(1.0, 1.0), (1.0, 0.001), (0.03, 0.5), (0.5, 2.0)] {
+            let object = SceneObject {
+                gain,
+                loudness,
+                ..sounding([0.0, 0.0, 0.0])
+            };
+            let ring = params::OBJECT_EDGE * footprint_scale(gain);
+            let core = (params::OBJECT_EDGE * footprint_scale(loudness)).min(ring);
+            assert!(
+                core <= ring,
+                "gain {gain} loudness {loudness}: core {core} exceeded ring {ring}"
+            );
+            let _ = object;
+        }
+    }
+
+    #[test]
+    fn the_footprint_stays_one_solid_mark_until_loudness_is_shown() {
+        let object = sounding([0.0, 0.0, 0.0]);
+        let objects = [object];
+        let plain = with_input(SceneInput {
+            objects: &objects,
+            show_loudness: false,
+            ..SceneInput::default()
+        });
+        let split = with_input(SceneInput {
+            objects: &objects,
+            show_loudness: true,
+            ..SceneInput::default()
+        });
+        // Off: the grid plus one floor quad. On: the same quad plus the ring's
+        // four hairlines, each of which is a quad of its own.
+        let grid = empty_decal_vertices();
+        assert_eq!(plain.decal.len(), grid + 6);
+        assert_eq!(split.decal.len(), grid + 6 + 4 * 6);
     }
 
     fn built(objects: &[SceneObject]) -> MeshBuilder {

@@ -49,6 +49,13 @@ sha2 = "0.10"
 
 [dev-dependencies]
 pollster = "0.4"
+# The reference EBU R128 implementation, used only to cross-check our own
+# K-weighting against it in `backend::state`'s tests. Deliberately not a runtime
+# dependency: the measurement has to be re-readable at an arbitrary past
+# presentation position, which a stateful integrator cannot do, and the app
+# would otherwise carry a filter it only needs in order to agree with this one.
+# `about.toml` sets `ignore-dev-dependencies`, so it stays out of the About list.
+ebur128 = "0.1.10"
 
 [features]
 default = ["decode", "macinrender"]

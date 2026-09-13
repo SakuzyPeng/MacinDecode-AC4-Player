@@ -132,6 +132,38 @@ pub const FOOTPRINT_MIN_SCALE: f32 = 0.45;
 /// than growing without bound across the neighbouring objects' floor.
 pub const FOOTPRINT_MAX_SCALE: f32 = 1.60;
 
+/// Hairline width of the gain ring, in screen points.
+///
+/// With measured loudness available the footprint carries two readings instead
+/// of one: the ring is still gain — the width the metadata *asks* for — and the
+/// filled core is the level the object actually delivers, read on the very same
+/// decibel scale. The core can therefore never exceed the ring, and the gap
+/// between them is the whole point: a wide ring around an empty core is an
+/// object that was positioned and gained but has nothing in it, which is
+/// exactly the mistake a gain-only footprint cannot show.
+///
+/// Splitting the floor mark rather than adding a mark keeps the scene's object
+/// count of visual elements unchanged, and keeps the reading where
+/// [`FOOTPRINT_MIN_SCALE`] argues it belongs: coplanar with the floor, where it
+/// can cross no face and hide no scene number.
+pub const FOOTPRINT_RING_POINTS: f32 = 0.9;
+
+/// Audio the fast meter averages before the ballistics see it, in milliseconds.
+///
+/// Short enough that a transient is not averaged away, long enough that the
+/// reading is a level rather than a sample. The attack and release below are
+/// what actually set the meter's feel; this only decides what it is chasing.
+pub const METER_WINDOW_MILLISECONDS: u32 = 30;
+/// Meter attack time constant, in milliseconds. Fast, so a hit reads as a hit.
+pub const METER_ATTACK_MILLISECONDS: f32 = 10.0;
+/// Meter release time constant, in milliseconds.
+///
+/// Slow enough to read, and deliberately not the 400 ms of the momentary
+/// window: that window is a *measurement* the off-stage readout reports, while
+/// this is the feel of a meter riding a moving object. Loading both onto one
+/// number would make the picture lag the sound by a window length.
+pub const METER_RELEASE_MILLISECONDS: f32 = 300.0;
+
 /// Trail breadcrumbs kept per object, and how far apart in time they are taken.
 /// Forty at forty milliseconds is 1.6 seconds of history.
 ///

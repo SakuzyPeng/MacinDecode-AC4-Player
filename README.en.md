@@ -80,9 +80,15 @@ the checksum and build information attachments do not need to be installed. You 
 
 **The 3D scene** (center of the window): drag to orbit, `Shift` + drag to pan, scroll to zoom. The
 `ISO` / `TOP` / `BACK` / `SIDE` / `RESET` buttons jump to fixed viewpoints, and two more toggle
-perspective/orthographic projection and element numbers. The scene draws at most 20 objects at once
+perspective/orthographic projection, element numbers and `LVL` loudness. The scene draws at most 20 objects at once
 and says at the bottom left how many it left out. With element numbers enabled, black numbers identify scene-relative
 objects and white numbers identify head-locked objects. Live counts for both reference frames appear above the scene in fixed square badges with centered numbers.
+
+With `LVL` enabled the floor footprint carries two readings instead of one: the hairline ring is the
+gain the metadata asks for, and the filled core is the level actually measured, both read on the same
+decibel scale. A wide ring around a small core is an object that was positioned and gained but has
+almost no signal in it — something gain alone cannot show. Loudness is measured before rendering,
+K-weighted per ITU-R BS.1770, and cross-checked against the reference implementation in the tests.
 
 **For more detail:** **Details…** on the file card opens the bitstream details window, and the
 **`...`** button next to the scene heading opens diagnostics.

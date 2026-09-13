@@ -10,7 +10,11 @@
 //! This is the substitute. It walks the same FIFO at wall-clock rate and
 //! resolves object state through the same [`element_state_at`] the audio path
 //! uses, so the positions it publishes are the ones that would have been
-//! submitted. What it does not do is touch PCM: there is nowhere to send it.
+//! submitted. It does read PCM, but only to measure it: the samples go nowhere,
+//! and the energy it takes from them goes through the same [`KWeighting`] the
+//! two render paths use. A build with no output would otherwise show a scene
+//! whose every object reads as permanently silent, which is a claim about the
+//! content rather than about the platform.
 //!
 //! Two invariants keep it from ever competing with real playback:
 //!
@@ -23,10 +27,11 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::decoder::{DecodedSceneBlock, PlaybackKey, SceneQueueReader, SceneSignature};
-use crate::scene_view::{MAX_VIEW_OBJECTS, ObjectView, SceneViewMirror};
+use crate::scene_view::{MAX_VIEW_OBJECTS, ObjectEnergy, ObjectView, SceneViewMirror};
 
 use super::state::{
-    block_offset_at, element_state_at, has_instant_update, listener_render_state, validate_block,
+    KWeighting, block_offset_at, element_state_at, has_instant_update, listener_render_state,
+    validate_block,
 };
 
 /// Where the walk has reached inside one popped block.
@@ -53,6 +58,12 @@ pub(super) struct ScenePreview {
     /// evenly, and dropping the remainder every tick would run the preview
     /// measurably slow.
     carry_frames: f64,
+    /// One K-weighting filter per scene slot. It belongs here rather than
+    /// beside the walk because the filter has memory that has to survive block
+    /// boundaries, and the walk's cursor does not. Slots are stable for the
+    /// life of a stream: an element-set change alters the `SceneSignature` and
+    /// rebuilds the preview, which starts these clean.
+    loudness: [KWeighting; MAX_VIEW_OBJECTS],
 }
 
 impl ScenePreview {
@@ -75,6 +86,7 @@ impl ScenePreview {
             error: None,
             last_tick: None,
             carry_frames: 0.0,
+            loudness: [KWeighting::new(sample_rate); MAX_VIEW_OBJECTS],
         }
     }
 
@@ -117,6 +129,7 @@ impl ScenePreview {
         };
 
         let mut jumped = [false; MAX_VIEW_OBJECTS];
+        let mut energy = [ObjectEnergy::default(); MAX_VIEW_OBJECTS];
         while remaining > 0 {
             let exhausted = self
                 .current
@@ -151,6 +164,15 @@ impl ScenePreview {
                 .saturating_add(i64::from(cursor.offset_frames));
             if block_position > self.timeline_frame {
                 let gap = (block_position - self.timeline_frame).min(remaining);
+                // Silence, not absence: the renderers emit zeros across a gap,
+                // and the filter has to see them or this path's numbers stop
+                // matching theirs for the same audio.
+                let gap_frames = u32::try_from(gap).unwrap_or(u32::MAX);
+                for (slot, filter) in self.loudness.iter_mut().enumerate() {
+                    if let Some(slot_energy) = energy.get_mut(slot) {
+                        slot_energy.absorb(filter.measure_silence(gap_frames));
+                    }
+                }
                 self.timeline_frame = self.timeline_frame.saturating_add(gap);
                 remaining -= gap;
                 continue;
@@ -168,31 +190,65 @@ impl ScenePreview {
             }
             let take_frames = u32::try_from(take).unwrap_or(u32::MAX);
             let span_end = cursor.offset_frames.saturating_add(take_frames);
-            for (slot, element_id) in self
-                .scene_signature
-                .object_element_ids()
-                .iter()
-                .enumerate()
-                .take(MAX_VIEW_OBJECTS)
-            {
-                if let Some(flag) = jumped.get_mut(slot)
-                    && has_instant_update(
-                        &cursor.block,
-                        *element_id,
-                        cursor.offset_frames,
-                        span_end,
-                    )
-                {
-                    *flag = true;
-                }
-            }
+            Self::scan_span(
+                cursor,
+                self.scene_signature.object_element_ids(),
+                span_end,
+                &mut self.loudness,
+                &mut jumped,
+                &mut energy,
+            );
             cursor.offset_frames = span_end;
             self.timeline_frame = self.timeline_frame.saturating_add(take);
             remaining -= take;
         }
 
-        self.publish(&jumped);
+        self.publish(&jumped, &energy);
         true
+    }
+
+    /// Scan one walked span: which elements jumped inside it, and what each one
+    /// measured across it.
+    ///
+    /// Both questions are asked over exactly the same `[offset, span_end)`
+    /// window, which is why they share a pass — a measurement taken over a
+    /// different span from the jump scan would describe a different moment of
+    /// the same walk.
+    fn scan_span(
+        cursor: &BlockCursor,
+        element_ids: &[u64],
+        span_end: u32,
+        loudness: &mut [KWeighting; MAX_VIEW_OBJECTS],
+        jumped: &mut [bool; MAX_VIEW_OBJECTS],
+        energy: &mut [ObjectEnergy; MAX_VIEW_OBJECTS],
+    ) {
+        for (slot, element_id) in element_ids.iter().enumerate().take(MAX_VIEW_OBJECTS) {
+            if let Some(flag) = jumped.get_mut(slot)
+                && has_instant_update(&cursor.block, *element_id, cursor.offset_frames, span_end)
+            {
+                *flag = true;
+            }
+            let (Some(filter), Some(slot_energy)) = (loudness.get_mut(slot), energy.get_mut(slot))
+            else {
+                continue;
+            };
+            let Some(object) = cursor
+                .block
+                .objects()
+                .iter()
+                .find(|object| object.element_id() == *element_id)
+            else {
+                continue;
+            };
+            let from = usize::try_from(cursor.offset_frames).unwrap_or(usize::MAX);
+            let to = usize::try_from(span_end).unwrap_or(usize::MAX);
+            let samples = object.samples();
+            let span = &samples[from.min(samples.len())..to.min(samples.len())];
+            let state =
+                element_state_at(&cursor.block, *element_id, object.initial_state(), span_end);
+            let (_, _, gain) = listener_render_state(state);
+            slot_energy.absorb(filter.measure(span, gain));
+        }
     }
 
     fn load_next_block(&mut self) -> Result<bool, String> {
@@ -238,7 +294,11 @@ impl ScenePreview {
     }
 
     /// Resolve every element where the walk stopped and hand it to the mirror.
-    fn publish(&self, jumped: &[bool; MAX_VIEW_OBJECTS]) {
+    fn publish(
+        &self,
+        jumped: &[bool; MAX_VIEW_OBJECTS],
+        energy: &[ObjectEnergy; MAX_VIEW_OBJECTS],
+    ) {
         let Some(cursor) = self.current.as_ref() else {
             return;
         };
@@ -276,6 +336,7 @@ impl ScenePreview {
                     gain,
                     tracking: state.map_or_default(crate::decoder::SpatialObjectState::tracking),
                     jumped: jumped.get(slot).copied().unwrap_or(false),
+                    energy: energy.get(slot).copied().unwrap_or_default(),
                 })
             });
 

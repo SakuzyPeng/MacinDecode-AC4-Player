@@ -83,6 +83,12 @@ pub struct PlayerApp {
     /// Whether zero-based LFE / one-based dynamic-object numbers are printed
     /// on every element face.
     object_numbers_visible: bool,
+    /// Whether the measured loudness channels are drawn. Measurement always
+    /// runs on the audio side; this decides only what the picture carries.
+    object_loudness_visible: bool,
+    /// Meter ballistics, the one part of the loudness picture that depends on
+    /// time rather than on the current frame.
+    object_meters: ObjectMeters,
     /// Listener pose. Head tracking will drive the two angles; until then the
     /// listener faces the room's front.
     figure: scene3d::figure::Figure,
@@ -114,6 +120,80 @@ impl Wake for DialogWake {
 /// remains 1..=20 whether or not the presentation carries LFE.
 fn object_display_number(slot: usize) -> u64 {
     u64::try_from(slot.saturating_add(1)).unwrap_or(u64::MAX)
+}
+
+/// Per-slot meter ballistics over the mirror's energy bins.
+///
+/// The mirror stores energy rather than a meter reading on purpose, so the
+/// ballistics live here, on the side that knows how much wall time has passed
+/// since it last drew. That is also what makes the meter fall when the audio
+/// stops: `SceneViewMirror::write` holds its last frame when a publication
+/// carries no objects, so a decaying value stored there would freeze at
+/// whatever it last was, while a value chased from here keeps releasing.
+#[derive(Debug, Default)]
+struct ObjectMeters {
+    /// Linear level per slot, after attack and release.
+    level: [f32; crate::scene_view::MAX_VIEW_OBJECTS],
+    /// The playback these levels belong to. A superseded one starts silent
+    /// rather than releasing from the previous stream's last reading.
+    key: Option<crate::decoder::PlaybackKey>,
+    last_advanced: Option<Instant>,
+}
+
+impl ObjectMeters {
+    /// Chase each slot's recent mean square, then hand back the levels.
+    fn advance(
+        &mut self,
+        frame: &crate::scene_view::SceneViewFrame,
+        key: crate::decoder::PlaybackKey,
+        sample_rate: u32,
+        now: Instant,
+    ) -> &[f32; crate::scene_view::MAX_VIEW_OBJECTS] {
+        if self.key != Some(key) {
+            self.level = [0.0; crate::scene_view::MAX_VIEW_OBJECTS];
+            self.key = Some(key);
+            self.last_advanced = None;
+        }
+        let elapsed = self
+            .last_advanced
+            .map_or(0.0, |last| now.duration_since(last).as_secs_f32());
+        self.last_advanced = Some(now);
+
+        let window = window_frames(sample_rate);
+        for (slot, level) in self.level.iter_mut().enumerate() {
+            let (mean_square, frames) = frame.mean_square(slot, window);
+            // No audio measured yet is not the same as silence: leave the
+            // meter where it is rather than releasing from a reading that was
+            // never taken.
+            let target = if frames == 0 {
+                *level
+            } else {
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    reason = "a mean square is a display value; f32 carries it well past the -36 dB floor"
+                )]
+                let target = mean_square.sqrt() as f32;
+                target
+            };
+            let tau = if target > *level {
+                scene3d::params::METER_ATTACK_MILLISECONDS
+            } else {
+                scene3d::params::METER_RELEASE_MILLISECONDS
+            };
+            // The same one-pole form the head tracker eases with.
+            let alpha = 1.0 - (-elapsed * 1000.0 / tau).exp();
+            *level += (target - *level) * alpha.clamp(0.0, 1.0);
+        }
+        &self.level
+    }
+}
+
+/// Frames the fast meter averages before the ballistics see them.
+fn window_frames(sample_rate: u32) -> u32 {
+    (u64::from(sample_rate) * u64::from(scene3d::params::METER_WINDOW_MILLISECONDS) / 1000)
+        .try_into()
+        .unwrap_or(u32::MAX)
+        .max(1)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -390,6 +470,8 @@ impl PlayerApp {
             sofa_picker: None,
             camera,
             object_numbers_visible: true,
+            object_loudness_visible: true,
+            object_meters: ObjectMeters::default(),
             figure: scene3d::figure::Figure::default(),
             scene_mesh: scene3d::mesh::MeshBuilder::default(),
             scene_renderer_ready,
@@ -1594,6 +1676,16 @@ impl PlayerApp {
             [scene3d::scene::SceneObject::default(); crate::scene_view::MAX_VIEW_OBJECTS];
         let mut hidden_objects = 0usize;
         let mut object_count = 0usize;
+        // Ballistics ride the same snapshot as the geometry, so the meter and
+        // the object it sits under can never be a frame apart.
+        let levels = mirror_frame.as_ref().map(|mirrored| {
+            *self.object_meters.advance(
+                mirrored,
+                self.decoder.playback_key(),
+                decoder.metrics().map_or(48_000, DecodeMetrics::sample_rate),
+                Instant::now(),
+            )
+        });
         if let Some(mirrored) = mirror_frame.as_ref() {
             hidden_objects = mirrored.hidden_objects();
             for (slot, object) in mirrored.objects().iter().enumerate() {
@@ -1602,6 +1694,10 @@ impl PlayerApp {
                     position: object.position,
                     active: object.active,
                     gain: object.gain,
+                    loudness: levels
+                        .as_ref()
+                        .and_then(|levels| levels.get(slot).copied())
+                        .unwrap_or(0.0),
                     head_locked: object.tracking.head_locked(),
                     trail: mirrored.trail(slot),
                     trail_jumps: mirrored.trail_jumps(slot),
@@ -1634,6 +1730,7 @@ impl PlayerApp {
                     scene3d::scene::SceneInput {
                         objects,
                         show_element_numbers: self.object_numbers_visible,
+                        show_loudness: self.object_loudness_visible,
                         // Not from the mirror: the presentation's LFE layout is
                         // known as soon as the decoder reports metrics, well
                         // before the render callback produces a first quantum,
@@ -1764,6 +1861,26 @@ impl PlayerApp {
                     .clicked()
                 {
                     self.camera.toggle_projection();
+                }
+                ui.add_space(4.0);
+
+                let levels_hint = if self.object_loudness_visible {
+                    "Hide measured object loudness"
+                } else {
+                    "Show measured object loudness"
+                };
+                if ui
+                    .add_sized(
+                        [44.0, 26.0],
+                        egui::Button::new(
+                            RichText::new("LVL").size(10.0).strong().color(theme::MUTED),
+                        )
+                        .selected(self.object_loudness_visible),
+                    )
+                    .on_hover_text(levels_hint)
+                    .clicked()
+                {
+                    self.object_loudness_visible = !self.object_loudness_visible;
                 }
                 ui.add_space(4.0);
 

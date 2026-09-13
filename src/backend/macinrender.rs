@@ -5,7 +5,8 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use super::state::{
-    element_state_at, listener_render_state, remaining_ramps, state_at_updates, validate_block,
+    KWeighting, element_state_at, listener_render_state, remaining_ramps, state_at_updates,
+    validate_block,
 };
 use super::{
     OutputDeviceInfo, OutputDeviceSelection, OutputPhase, OutputSettings, OutputSnapshot,
@@ -15,7 +16,9 @@ use crate::decoder::{
     DecodedSceneBlock, SceneMetadataUpdate, SceneQueueReader, SceneSignature, SpatialObjectState,
 };
 use crate::head_tracking::NativeTarget;
-use crate::scene_view::{ObjectView, SceneViewMirror};
+use crate::scene_view::{
+    LoudnessBin, MAX_VIEW_OBJECTS, ObjectEnergy, ObjectView, SceneViewMirror, loudness_bin_frames,
+};
 use macindecode_macinrender as native;
 
 const NATIVE_EPOCH: u64 = 1;
@@ -210,33 +213,119 @@ impl Drop for Runtime {
     }
 }
 
+/// What this path keeps about a block after its PCM has gone to the renderer.
+///
+/// Loudness is measured here, at submit time, and stored — it is a measurement
+/// rather than PCM, so it belongs in the metadata-only history by the same
+/// argument that keeps the samples out of it. It has to be stored because this
+/// path resolves the picture at the device's *presentation* position: a
+/// stateful meter could only ever answer "how loud is it now", and what the
+/// view needs is "how loud was it where the listener currently is".
+///
+/// Bins are indexed from block offset zero, not from the submit offset, because
+/// `start`/`duration` here are the untrimmed ones and the publish path computes
+/// its offsets against them. A trimmed head therefore leaves its bins empty,
+/// which reads as "not measured" rather than as silence — correct, because that
+/// audio was never rendered.
 struct MetadataFrame {
     start: i64,
     duration: u32,
     complete: bool,
     objects: Vec<(u64, Option<SpatialObjectState>)>,
     updates: Vec<SceneMetadataUpdate>,
+    /// Object-major, `objects.len() * bins` entries.
+    energy: Vec<LoudnessBin>,
+    bins: usize,
 }
 impl MetadataFrame {
-    fn new(block: &DecodedSceneBlock) -> Self {
+    fn new(
+        block: &DecodedSceneBlock,
+        offset: u32,
+        loudness: &mut [KWeighting; MAX_VIEW_OBJECTS],
+        bin_frames: u32,
+    ) -> Self {
         let mut objects: Vec<_> = block
             .objects()
             .iter()
             .map(|object| (object.element_id(), object.initial_state()))
             .collect();
         objects.sort_unstable_by_key(|(id, _)| *id);
+
+        let span = usize::try_from(bin_frames.max(1)).unwrap_or(usize::MAX);
+        let bins = usize::try_from(block.duration_frames().div_ceil(bin_frames.max(1)))
+            .unwrap_or(usize::MAX)
+            .max(1);
+        let head = usize::try_from(offset).unwrap_or(usize::MAX);
+        let mut energy = vec![LoudnessBin::default(); objects.len() * bins];
+        for (slot, (element_id, _)) in objects.iter().enumerate() {
+            let (Some(filter), Some(object)) = (
+                loudness.get_mut(slot),
+                block
+                    .objects()
+                    .iter()
+                    .find(|object| object.element_id() == *element_id),
+            ) else {
+                continue;
+            };
+            let samples = object.samples();
+            for bin in 0..bins {
+                let to = bin
+                    .saturating_add(1)
+                    .saturating_mul(span)
+                    .min(samples.len());
+                let from = bin.saturating_mul(span).max(head);
+                if from >= to {
+                    continue;
+                }
+                // Resolve the gain where the bin starts, the way the Windows
+                // quantum resolves it once at its own start: one gain per
+                // measured window, so a ramp quantises the same way on both.
+                let state = element_state_at(
+                    block,
+                    *element_id,
+                    object.initial_state(),
+                    u32::try_from(from).unwrap_or(u32::MAX),
+                );
+                let (_, _, gain) = listener_render_state(state);
+                let measured = filter.measure(&samples[from..to], gain);
+                if let Some(cell) = energy.get_mut(slot * bins + bin) {
+                    cell.weighted_sum = measured.weighted_sum_squares;
+                    cell.frames = measured.frames;
+                    cell.peak = measured.peak;
+                }
+            }
+        }
+
         Self {
             start: block.start_frame(),
             duration: block.duration_frames(),
             complete: block.state_complete(),
             objects,
             updates: block.metadata_updates().to_vec(),
+            energy,
+            bins,
         }
     }
     fn bytes(&self) -> usize {
         size_of::<Self>()
             + self.objects.len() * size_of::<(u64, Option<SpatialObjectState>)>()
             + self.updates.len() * size_of::<SceneMetadataUpdate>()
+            + self.energy.len() * size_of::<LoudnessBin>()
+    }
+    /// Energy in bins `first..=last` for the object in `slot`.
+    fn energy_over(&self, slot: usize, first: usize, last: usize) -> ObjectEnergy {
+        let mut total = ObjectEnergy::default();
+        for bin in first..=last.min(self.bins.saturating_sub(1)) {
+            let Some(cell) = self.energy.get(slot * self.bins + bin) else {
+                break;
+            };
+            total.absorb(ObjectEnergy {
+                weighted_sum_squares: cell.weighted_sum,
+                frames: cell.frames,
+                peak: cell.peak,
+            });
+        }
+        total
     }
     fn end(&self) -> i64 {
         self.start.saturating_add(i64::from(self.duration))
@@ -464,6 +553,13 @@ fn run(
     let mut pending = None::<DecodedSceneBlock>;
     let mut history = VecDeque::<MetadataFrame>::new();
     let mut history_bytes = 0;
+    let mut loudness = [KWeighting::new(config.sample_rate); MAX_VIEW_OBJECTS];
+    let bin_frames = loudness_bin_frames(config.sample_rate);
+    // Absolute frame through which energy has already been handed to the
+    // mirror. This path publishes far more often than the bin grid, so without
+    // a watermark two publications inside one bin would each report that bin's
+    // whole energy and the meter would read high.
+    let mut emitted_through = i64::MIN;
     let mut next_sample = target;
     let mut first = true;
     let mut ended = false;
@@ -538,26 +634,56 @@ fn run(
                 .min(frame.duration.saturating_sub(1));
             let previous = u32::try_from(last_view_time.saturating_sub(frame.start).max(0))
                 .unwrap_or(u32::MAX);
+            // Whole bins only, from the first one this frame has not yet handed
+            // over through the one the presentation position sits in. Emitting
+            // the trailing partial bin whole lets the meter lead the sound by
+            // under one bin, which is well inside the meter's own averaging
+            // window and cheaper than carrying a partial-bin remainder.
+            let first_bin = if emitted_through <= frame.start {
+                0
+            } else {
+                usize::try_from((emitted_through - frame.start) / i64::from(bin_frames))
+                    .unwrap_or(usize::MAX)
+            };
+            let last_bin = usize::try_from(offset / bin_frames).unwrap_or(usize::MAX);
+            let emitting = first_bin <= last_bin;
+            if emitting {
+                emitted_through =
+                    frame
+                        .start
+                        .saturating_add(i64::from(bin_frames).saturating_mul(
+                            i64::try_from(last_bin.saturating_add(1)).unwrap_or(i64::MAX),
+                        ));
+            }
             mirror.write(
                 reader.playback_key(),
-                frame.objects.iter().map(|(id, initial)| {
-                    let state = state_at_updates(&frame.updates, *id, *initial, offset);
-                    let (active, position, gain) = listener_render_state(state);
-                    ObjectView {
-                        element_id: *id,
-                        active: active && frame.complete,
-                        position,
-                        gain,
-                        tracking: state.map_or_default(SpatialObjectState::tracking),
-                        jumped: frame.updates.iter().any(|u| {
-                            u.element_id() == *id
-                                && u.changed_fields() & crate::decoder::FIELD_POSITION != 0
-                                && u.ramp_frames() == 0
-                                && u.offset_frames() >= previous
-                                && u.offset_frames() <= offset
-                        }),
-                    }
-                }),
+                frame
+                    .objects
+                    .iter()
+                    .enumerate()
+                    .map(|(slot, (id, initial))| {
+                        let state = state_at_updates(&frame.updates, *id, *initial, offset);
+                        let (active, position, gain) = listener_render_state(state);
+                        ObjectView {
+                            element_id: *id,
+                            active: active && frame.complete,
+                            position,
+                            gain,
+                            tracking: state.map_or_default(SpatialObjectState::tracking),
+                            jumped: frame.updates.iter().any(|u| {
+                                u.element_id() == *id
+                                    && u.changed_fields() & crate::decoder::FIELD_POSITION != 0
+                                    && u.ramp_frames() == 0
+                                    && u.offset_frames() >= previous
+                                    && u.offset_frames() <= offset
+                            }),
+                            energy: if emitting {
+                                frame.energy_over(slot, first_bin, last_bin)
+                            } else {
+                                ObjectEnergy::default()
+                            },
+                        }
+                    }),
                 view_time,
                 config.sample_rate,
             );
@@ -635,6 +761,12 @@ fn run(
                         actual.object_element_ids(),
                         actual.lfe_element_id(),
                     )?;
+                    // A new configuration generation can remap which element
+                    // owns which slot, and a filter's memory belongs to the
+                    // audio it has been fed. Start them clean, as the mirror
+                    // does with the bins on the same event.
+                    loudness = [KWeighting::new(config.sample_rate); MAX_VIEW_OBJECTS];
+                    emitted_through = i64::MIN;
                     signature = actual;
                 }
                 validate_block(
@@ -660,7 +792,7 @@ fn run(
                     if offset >= block.duration_frames() {
                         pending = None;
                     } else if submit_block(&mut session, block, offset)? {
-                        let metadata = MetadataFrame::new(block);
+                        let metadata = MetadataFrame::new(block, offset, &mut loudness, bin_frames);
                         history_bytes += metadata.bytes();
                         history.push_back(metadata);
                         next_sample = block

@@ -35,6 +35,88 @@ use crate::scene3d::params::{TRAIL_INTERVAL_MILLISECONDS, TRAIL_SAMPLES};
 /// because growing it would move the allocation onto the audio thread.
 pub const MAX_VIEW_OBJECTS: usize = 20;
 
+/// Loudness bins kept per object, and the audio each one nominally covers.
+///
+/// Forty at ten milliseconds is four hundred milliseconds — the ITU-R BS.1770
+/// momentary window, so a reader that sums the whole ring is computing exactly
+/// the quantity the standard defines and not an approximation of it.
+///
+/// Ten milliseconds is also the Windows render quantum, so on that path a bin
+/// is one publication. The other two paths publish faster (`MacinRender` polls
+/// the device every two milliseconds) or slower (the preview is capped at a
+/// quarter second), which is why a bin closes once it *holds* a bin's worth of
+/// frames rather than when a clock says so: the grid then comes out the same
+/// on all three regardless of how often each one publishes.
+pub const LOUDNESS_BINS: usize = 40;
+/// Audio one loudness bin nominally covers, in milliseconds.
+pub const LOUDNESS_BIN_MILLISECONDS: u32 = 10;
+
+/// Frames in one loudness bin, at least one so the grid can never stall on a
+/// pathological sample rate.
+#[must_use]
+pub fn loudness_bin_frames(sample_rate: u32) -> u32 {
+    (u64::from(sample_rate) * u64::from(LOUDNESS_BIN_MILLISECONDS) / 1000)
+        .try_into()
+        .unwrap_or(u32::MAX)
+        .max(1)
+}
+
+/// K-weighted energy measured over one publication window of one object.
+///
+/// Energy rather than a finished meter reading, and that is the load-bearing
+/// choice in this module. The three consumers publish at cadences that differ
+/// by orders of magnitude, so any value advanced one step per publication would
+/// behave differently on each; and [`SceneViewMirror::write`] deliberately holds
+/// the previous frame when an update carries no objects, so a decaying value
+/// stored here would freeze rather than fall. Ballistics therefore belong where
+/// the picture is drawn, applied to what these bins accumulated.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ObjectEnergy {
+    /// Sum of the squared K-weighted samples, already multiplied by the OAMD
+    /// gain the renderer was handed — this is the level the output will
+    /// produce, not the level in the object's own track. Accumulated as `f64`
+    /// to stay inside the reference implementation's own precision.
+    pub weighted_sum_squares: f64,
+    /// Frames the sum covers. A timeline gap contributes frames carrying no
+    /// energy, because a gap really does render silence; an underrun
+    /// contributes neither, because a transport fault is not content.
+    pub frames: u32,
+    /// Largest absolute sample in the window, unweighted, for clip indication.
+    pub peak: f32,
+}
+
+impl ObjectEnergy {
+    /// Fold `other` into this window. A consumer that walks a publication in
+    /// several spans accumulates them this way rather than publishing each.
+    #[cfg_attr(
+        not(feature = "decode"),
+        allow(
+            dead_code,
+            reason = "energy is accumulated by the render callback or the scene \
+                      preview, and neither exists without a decoder"
+        )
+    )]
+    pub fn absorb(&mut self, other: Self) {
+        self.weighted_sum_squares += other.weighted_sum_squares;
+        self.frames = self.frames.saturating_add(other.frames);
+        self.peak = self.peak.max(other.peak);
+    }
+}
+
+/// One closed or filling loudness bin.
+///
+/// The sum stays `f64` all the way to the reader rather than narrowing for
+/// storage. Forty bins for twenty objects is under thirteen kilobytes either
+/// way, and keeping the width means the whole chain from the filter to the
+/// displayed decibel carries the reference implementation's precision, with no
+/// narrowing step to account for when the cross-check disagrees.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct LoudnessBin {
+    pub weighted_sum: f64,
+    pub frames: u32,
+    pub peak: f32,
+}
+
 /// One dynamic object as the render callback submitted it to Windows.
 ///
 /// `position` is already in the listener space `backend/source.rs` renders in —
@@ -55,6 +137,8 @@ pub struct ObjectView {
     /// the next breadcrumb, because quanta are far shorter than the sampling
     /// interval and the flag belongs to a sampled point, not to a quantum.
     pub jumped: bool,
+    /// What this element's audio measured over the window being published.
+    pub energy: ObjectEnergy,
 }
 
 /// One instant of the scene, as the audio thread last saw it, plus the recent
@@ -77,6 +161,11 @@ pub struct SceneViewFrame {
     /// because a quantum is roughly a quarter of the sampling interval, so the
     /// update that jumped is usually not the one being sampled.
     pending_jump: [bool; MAX_VIEW_OBJECTS],
+    /// Loudness bins per object slot, oldest first and contiguous. The last
+    /// entry of each slot is the bin still filling, so a reader always has the
+    /// freshest audio available rather than waiting a bin for it.
+    loudness: [[LoudnessBin; LOUDNESS_BINS]; MAX_VIEW_OBJECTS],
+    loudness_lens: [usize; MAX_VIEW_OBJECTS],
     /// Presentation frame at which the next breadcrumb is due.
     next_trail_frame: i64,
     /// `None` until the first write. Distinguishes "no playback yet" from a
@@ -94,6 +183,8 @@ impl Default for SceneViewFrame {
             trail_lens: [0; MAX_VIEW_OBJECTS],
             trail_jumps: [[false; TRAIL_SAMPLES]; MAX_VIEW_OBJECTS],
             pending_jump: [false; MAX_VIEW_OBJECTS],
+            loudness: [[LoudnessBin::default(); LOUDNESS_BINS]; MAX_VIEW_OBJECTS],
+            loudness_lens: [0; MAX_VIEW_OBJECTS],
             next_trail_frame: 0,
             key: None,
             tracking: TrackingSummary::default(),
@@ -157,6 +248,44 @@ impl SceneViewFrame {
     pub const fn hidden_objects(&self) -> usize {
         self.total_objects.saturating_sub(MAX_VIEW_OBJECTS)
     }
+
+    /// What `slot` measured recently, oldest bin first, the last still filling.
+    ///
+    /// Empty until the first publication, and emptied whenever the slot changes
+    /// hands — a measurement belongs to an element, not to an array index.
+    #[must_use]
+    pub fn loudness_bins(&self, slot: usize) -> &[LoudnessBin] {
+        match self.loudness_lens.get(slot) {
+            Some(&len) => &self.loudness[slot][..len],
+            None => &[],
+        }
+    }
+
+    /// Mean square of `slot`'s newest `window_frames` of audio, and the frames
+    /// that mean actually covers.
+    ///
+    /// Readers sum backwards by *frames* rather than by bins because a bin is
+    /// closed by how much audio it holds, not by a clock: a consumer that
+    /// publishes rarely lands a longer-than-nominal bin, and counting bins
+    /// would then silently measure a different amount of audio. The returned
+    /// frame count is short of `window_frames` only while the ring is still
+    /// filling, which is how a caller tells "quiet" from "not yet measured".
+    #[must_use]
+    pub fn mean_square(&self, slot: usize, window_frames: u32) -> (f64, u32) {
+        let mut sum = 0.0_f64;
+        let mut frames = 0_u32;
+        for bin in self.loudness_bins(slot).iter().rev() {
+            if frames >= window_frames {
+                break;
+            }
+            sum += bin.weighted_sum;
+            frames = frames.saturating_add(bin.frames);
+        }
+        if frames == 0 {
+            return (0.0, 0);
+        }
+        (sum / f64::from(frames), frames)
+    }
 }
 
 /// Breadcrumb spacing in presentation frames, at least one so the cadence can
@@ -164,6 +293,41 @@ impl SceneViewFrame {
 pub fn sample_interval_frames(sample_rate: u32) -> i64 {
     let frames = u64::from(sample_rate) * u64::from(TRAIL_INTERVAL_MILLISECONDS) / 1000;
     i64::try_from(frames).unwrap_or(i64::MAX).max(1)
+}
+
+/// Fold one publication's energy into a slot's newest bin, opening a new one
+/// first when the current bin already holds its share of audio.
+///
+/// A publication longer than a bin lands whole in one bin rather than being
+/// spread across several: the consumer hands over one number for the window, so
+/// splitting it would have to invent a distribution. The mean stays exact
+/// either way, because every bin carries the frame count its sum covers; what
+/// coarsens is only the time resolution, and only on a path that publishes
+/// more slowly than the grid — which is the silent preview, where nothing is
+/// being heard anyway.
+fn push_energy(
+    bins: &mut [LoudnessBin; LOUDNESS_BINS],
+    len: &mut usize,
+    energy: ObjectEnergy,
+    bin_frames: u32,
+) {
+    let open = match len.checked_sub(1) {
+        Some(index) if bins[index].frames < bin_frames => index,
+        _ => {
+            if *len < LOUDNESS_BINS {
+                *len += 1;
+            } else {
+                bins.copy_within(1.., 0);
+            }
+            let index = *len - 1;
+            bins[index] = LoudnessBin::default();
+            index
+        }
+    };
+    let bin = &mut bins[open];
+    bin.weighted_sum += energy.weighted_sum_squares;
+    bin.frames = bin.frames.saturating_add(energy.frames);
+    bin.peak = bin.peak.max(energy.peak);
 }
 
 fn push_trail(
@@ -250,6 +414,7 @@ impl SceneViewMirror {
         if frame.key != Some(key) {
             frame.trail_lens = [0; MAX_VIEW_OBJECTS];
             frame.pending_jump = [false; MAX_VIEW_OBJECTS];
+            frame.loudness_lens = [0; MAX_VIEW_OBJECTS];
             frame.next_trail_frame = timeline_frame;
         }
         // A trail belongs to an element, not to an array index. If the scene's
@@ -261,6 +426,7 @@ impl SceneViewMirror {
             {
                 frame.trail_lens[slot] = 0;
                 frame.pending_jump[slot] = false;
+                frame.loudness_lens[slot] = 0;
             }
         }
 
@@ -272,8 +438,15 @@ impl SceneViewMirror {
         // Latched rather than consumed here: the discontinuity belongs to a
         // sampled point, and the quantum that carries it is usually not the one
         // a breadcrumb falls on.
+        let bin_frames = loudness_bin_frames(sample_rate);
         for slot in 0..total.min(MAX_VIEW_OBJECTS) {
             frame.pending_jump[slot] |= frame.objects[slot].jumped;
+            push_energy(
+                &mut frame.loudness[slot],
+                &mut frame.loudness_lens[slot],
+                frame.objects[slot].energy,
+                bin_frames,
+            );
         }
 
         if timeline_frame >= frame.next_trail_frame {
@@ -387,6 +560,102 @@ mod tests {
             Some((u64::try_from(MAX_VIEW_OBJECTS).unwrap(), issue))
         );
     }
+    #[test]
+    fn energy_bins_close_on_a_bin_of_audio_and_the_mean_covers_the_window_asked_for() {
+        let mirror = SceneViewMirror::new();
+        let key = PlaybackKey::new(1, 1);
+        let bin = loudness_bin_frames(48_000);
+        // Three publications of exactly one bin each: the ring should hold
+        // three bins rather than one fat one or three partial ones.
+        for step in 0..3 {
+            mirror.write(
+                key,
+                [energetic(1.0, bin)],
+                i64::from(step) * i64::from(bin),
+                48_000,
+            );
+        }
+        let frame = mirror.read(key).unwrap();
+        assert_eq!(frame.loudness_bins(0).len(), 3);
+
+        // A window of one bin sees one bin's frames; a window larger than the
+        // ring sees everything the ring holds and says so.
+        let (mean, frames) = frame.mean_square(0, bin);
+        assert_eq!(frames, bin);
+        assert!((mean - 1.0).abs() < 1e-12, "mean square was {mean}");
+        let (_, all) = frame.mean_square(0, bin * 10);
+        assert_eq!(all, bin * 3);
+    }
+
+    #[test]
+    fn a_publication_shorter_than_a_bin_keeps_filling_the_same_bin() {
+        let mirror = SceneViewMirror::new();
+        let key = PlaybackKey::new(1, 1);
+        let bin = loudness_bin_frames(48_000);
+        // MacinRender publishes far more often than the grid; those updates
+        // have to accumulate rather than each claiming a bin of their own.
+        for step in 0..4 {
+            mirror.write(key, [energetic(1.0, bin / 4)], i64::from(step), 48_000);
+        }
+        let frame = mirror.read(key).unwrap();
+        assert_eq!(frame.loudness_bins(0).len(), 1);
+        assert_eq!(frame.loudness_bins(0)[0].frames, (bin / 4) * 4);
+    }
+
+    #[test]
+    fn a_superseded_playback_and_a_reused_slot_both_start_the_measurement_over() {
+        let mirror = SceneViewMirror::new();
+        let first = PlaybackKey::new(1, 1);
+        let bin = loudness_bin_frames(48_000);
+        mirror.write(first, [energetic(1.0, bin)], 0, 48_000);
+        assert_eq!(mirror.read(first).unwrap().loudness_bins(0).len(), 1);
+
+        // A seek: the measurement belongs to the playback that produced it.
+        let second = PlaybackKey::new(1, 2);
+        mirror.write(second, [energetic(0.0, bin)], 0, 48_000);
+        let frame = mirror.read(second).unwrap();
+        assert_eq!(frame.loudness_bins(0).len(), 1);
+        assert_eq!(
+            frame.loudness_bins(0)[0].weighted_sum.to_bits(),
+            0.0_f64.to_bits()
+        );
+
+        // The slot changing hands: a measurement belongs to an element, not to
+        // an array index.
+        mirror.write(second, [energetic(1.0, bin)], i64::from(bin), 48_000);
+        assert_eq!(mirror.read(second).unwrap().loudness_bins(0).len(), 2);
+        let moved = ObjectView {
+            element_id: 99,
+            ..energetic(1.0, bin)
+        };
+        mirror.write(second, [moved], i64::from(bin) * 2, 48_000);
+        assert_eq!(mirror.read(second).unwrap().loudness_bins(0).len(), 1);
+    }
+
+    #[test]
+    fn the_ring_is_bounded_and_drops_its_oldest_measurement() {
+        let mirror = SceneViewMirror::new();
+        let key = PlaybackKey::new(1, 1);
+        let bin = loudness_bin_frames(48_000);
+        for step in 0..(LOUDNESS_BINS + 5) {
+            let step = i64::try_from(step).unwrap();
+            mirror.write(key, [energetic(1.0, bin)], step * i64::from(bin), 48_000);
+        }
+        let frame = mirror.read(key).unwrap();
+        assert_eq!(frame.loudness_bins(0).len(), LOUDNESS_BINS);
+    }
+
+    fn energetic(mean_square: f64, frames: u32) -> ObjectView {
+        ObjectView {
+            energy: ObjectEnergy {
+                weighted_sum_squares: mean_square * f64::from(frames),
+                frames,
+                peak: 0.0,
+            },
+            ..object(7, 0.0)
+        }
+    }
+
     fn object(element_id: u64, x: f32) -> ObjectView {
         ObjectView {
             element_id,
@@ -395,6 +664,7 @@ mod tests {
             gain: 1.0,
             tracking: ContentHeadTracking::Unspecified,
             jumped: false,
+            energy: ObjectEnergy::default(),
         }
     }
 
