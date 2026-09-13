@@ -11,6 +11,7 @@ use crate::decoder::{
 };
 #[cfg(test)]
 use crate::decoder::{FIELD_GAIN, FIELD_HEAD_TRACKING, SpatialPosition};
+use crate::scene_view::ObjectEnergy;
 
 /// Check the same Scene contract before either consumer accepts a block.
 /// Error prefixes are also the app's automatic-reconfiguration contract.
@@ -156,6 +157,163 @@ pub(super) fn lfe_render_state(state: Option<SpatialObjectState>) -> (bool, f32)
     )
 }
 
+/// ITU-R BS.1770-4 K-weighting: the head-effect shelf and the RLB high-pass,
+/// cascaded into one fourth-order section, with one filter's memory.
+///
+/// This is the measurement half of the object loudness channel, and it lives
+/// beside the OAMD resolution for the same reason that does: all three Scene
+/// consumers have to agree, and a second derivation would drift. What it
+/// returns is energy, never a meter reading — see [`ObjectEnergy`] for why that
+/// distinction is load bearing.
+///
+/// The constants are the standard's, and the bilinear derivation below is the
+/// one every conformant implementation uses, so the coefficients come out equal
+/// at any sample rate rather than only at forty-eight kilohertz. `state` is
+/// direct form II: one slot for the incoming sample and four of history.
+///
+/// **A per-object loudness is not a standardised quantity.** BS.1770 defines
+/// loudness over a channel-based programme, with channel weights and programme
+/// gating; object audio is measured by rendering to a reference layout first.
+/// What this computes — momentary loudness of one mono object, weight one — is
+/// well defined as arithmetic and is what any other object meter would compute,
+/// but no standard blesses it as *the* loudness of an object. The UI says so;
+/// this type is the reason it can.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct KWeighting {
+    numerator: [f64; 5],
+    denominator: [f64; 5],
+    state: [f64; 5],
+}
+
+impl KWeighting {
+    /// Derive the cascade for `sample_rate`.
+    #[allow(
+        clippy::inconsistent_digit_grouping,
+        clippy::unreadable_literal,
+        reason = "the coefficients are transcribed digit for digit from ITU-R \
+                  BS.1770-4; regrouping them would make checking them against \
+                  the standard harder, which is the only check that matters here"
+    )]
+    pub(super) fn new(sample_rate: u32) -> Self {
+        let rate = f64::from(sample_rate.max(1));
+
+        // Stage one: the high-frequency shelf standing in for the head.
+        let shelf_frequency = 1681.974450955533_f64;
+        let shelf_gain_db = 3.999843853973347_f64;
+        let shelf_q = 0.7071752369554196_f64;
+        let shelf_k = (std::f64::consts::PI * shelf_frequency / rate).tan();
+        let shelf_high = 10.0_f64.powf(shelf_gain_db / 20.0);
+        let shelf_band = shelf_high.powf(0.4996667741545416);
+        let shelf_norm = shelf_k.mul_add(shelf_k, 1.0 + shelf_k / shelf_q);
+        let shelf_b = [
+            shelf_k.mul_add(shelf_k, shelf_band.mul_add(shelf_k / shelf_q, shelf_high))
+                / shelf_norm,
+            2.0 * shelf_k.mul_add(shelf_k, -shelf_high) / shelf_norm,
+            shelf_k.mul_add(shelf_k, shelf_high - shelf_band * shelf_k / shelf_q) / shelf_norm,
+        ];
+        let shelf_a = [
+            1.0,
+            2.0 * shelf_k.mul_add(shelf_k, -1.0) / shelf_norm,
+            shelf_k.mul_add(shelf_k, 1.0 - shelf_k / shelf_q) / shelf_norm,
+        ];
+
+        // Stage two: the RLB high-pass, whose numerator is a fixed `1, -2, 1`.
+        let rlb_frequency = 38.13547087602444_f64;
+        let rlb_q = 0.5003270373238773_f64;
+        let rlb_k = (std::f64::consts::PI * rlb_frequency / rate).tan();
+        let rlb_norm = rlb_k.mul_add(rlb_k, 1.0 + rlb_k / rlb_q);
+        let rlb_b = [1.0, -2.0, 1.0];
+        let rlb_a = [
+            1.0,
+            2.0 * rlb_k.mul_add(rlb_k, -1.0) / rlb_norm,
+            rlb_k.mul_add(rlb_k, 1.0 - rlb_k / rlb_q) / rlb_norm,
+        ];
+
+        Self {
+            numerator: convolve(shelf_b, rlb_b),
+            denominator: convolve(shelf_a, rlb_a),
+            state: [0.0; 5],
+        }
+    }
+
+    /// Measure one publication window of an object's mono plane.
+    ///
+    /// `gain` is the OAMD gain the renderer was handed, and it enters as its
+    /// square because the sum is of squared samples. Master volume deliberately
+    /// does not: the meter reports the content's level, not where the listener
+    /// happens to have left the volume control.
+    pub(super) fn measure(&mut self, samples: &[f32], gain: f32) -> ObjectEnergy {
+        // Samples reaching the FIFO are already finite and correctly sized
+        // (`decoder::worker::validate_samples`), so only the gain needs a guard.
+        let gain = if gain.is_finite() { gain.max(0.0) } else { 0.0 };
+        let mut sum = 0.0_f64;
+        let mut peak = 0.0_f32;
+        for &sample in samples {
+            peak = peak.max(sample.abs());
+            let weighted = self.step(f64::from(sample));
+            sum = weighted.mul_add(weighted, sum);
+        }
+        let gain_squared = f64::from(gain) * f64::from(gain);
+        ObjectEnergy {
+            weighted_sum_squares: sum * gain_squared,
+            frames: u32::try_from(samples.len()).unwrap_or(u32::MAX),
+            peak: peak * gain,
+        }
+    }
+
+    /// Measure `frames` of a timeline gap.
+    ///
+    /// A gap renders silence, so it counts as silence rather than as nothing —
+    /// and the zeros go through the filter rather than around it, because the
+    /// filter has memory and the path that does not skip them (the Windows
+    /// quantum, where a gap is already zeros in the buffer) would otherwise
+    /// produce a different number from the same audio.
+    pub(super) fn measure_silence(&mut self, frames: u32) -> ObjectEnergy {
+        let mut sum = 0.0_f64;
+        for _ in 0..frames {
+            let weighted = self.step(0.0);
+            sum = weighted.mul_add(weighted, sum);
+        }
+        ObjectEnergy {
+            weighted_sum_squares: sum,
+            frames,
+            peak: 0.0,
+        }
+    }
+
+    /// One direct-form-II step.
+    fn step(&mut self, sample: f64) -> f64 {
+        let denominator = self.denominator;
+        let numerator = self.numerator;
+        self.state[0] = sample
+            - denominator[1] * self.state[1]
+            - denominator[2] * self.state[2]
+            - denominator[3] * self.state[3]
+            - denominator[4] * self.state[4];
+        let out = numerator[0] * self.state[0]
+            + numerator[1] * self.state[1]
+            + numerator[2] * self.state[2]
+            + numerator[3] * self.state[3]
+            + numerator[4] * self.state[4];
+        self.state[4] = self.state[3];
+        self.state[3] = self.state[2];
+        self.state[2] = self.state[1];
+        self.state[1] = self.state[0];
+        out
+    }
+}
+
+/// Cascade two biquads into one fourth-order section.
+fn convolve(first: [f64; 3], second: [f64; 3]) -> [f64; 5] {
+    [
+        first[0] * second[0],
+        first[0].mul_add(second[1], first[1] * second[0]),
+        first[0].mul_add(second[2], first[1].mul_add(second[1], first[2] * second[0])),
+        first[1].mul_add(second[2], first[2] * second[1]),
+        first[2] * second[2],
+    ]
+}
+
 /// Whether an instant metadata update for `element_id` lands in
 /// `[from_offset, to_offset)` of `block`.
 ///
@@ -201,6 +359,154 @@ mod tests {
             Some(gain),
             true,
         )
+    }
+
+    const RATE: u32 = 48_000;
+
+    /// Momentary loudness of a mean square, as ITU-R BS.1770-4 defines it.
+    fn loudness(mean_square: f64) -> f64 {
+        10.0 * mean_square.log10() - 0.691
+    }
+
+    fn sine(frequency: f64, amplitude: f32, frames: u32) -> Vec<f32> {
+        (0..frames)
+            .map(|frame| {
+                let phase = std::f64::consts::TAU * frequency * f64::from(frame) / f64::from(RATE);
+                amplitude * as_f32(phase.sin())
+            })
+            .collect()
+    }
+
+    /// Narrow a generated sample. Test signals only, where the value is bounded
+    /// to the unit interval and the narrowing is the point.
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "test signal generation, bounded to [-1, 1]"
+    )]
+    fn as_f32(value: f64) -> f32 {
+        value as f32
+    }
+
+    /// Deterministic noise: a 32-bit xorshift mapped into `[-amplitude, amplitude]`.
+    fn noise(amplitude: f32, frames: u32) -> Vec<f32> {
+        let mut state = 0x1234_5678_u32;
+        (0..frames)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                amplitude * as_f32((f64::from(state) / f64::from(u32::MAX)).mul_add(2.0, -1.0))
+            })
+            .collect()
+    }
+
+    /// Our own momentary reading over a whole signal, the way the mirror's ring
+    /// computes it: one energy accumulation, then mean square to loudness.
+    fn measured_loudness(samples: &[f32], gain: f32) -> f64 {
+        let mut filter = KWeighting::new(RATE);
+        let energy = filter.measure(samples, gain);
+        loudness(energy.weighted_sum_squares / f64::from(energy.frames))
+    }
+
+    fn reference_loudness(samples: &[f32], gain: f32) -> f64 {
+        let mut meter =
+            ebur128::EbuR128::new(1, RATE, ebur128::Mode::M).expect("reference meter is valid");
+        let scaled: Vec<f32> = samples.iter().map(|sample| sample * gain).collect();
+        meter
+            .add_frames_f32(&scaled)
+            .expect("reference accepts f32");
+        meter.loudness_momentary().expect("momentary is in mode M")
+    }
+
+    #[test]
+    fn k_weighted_loudness_matches_the_reference_implementation() {
+        // The reference resolves momentary loudness over its own trailing
+        // 400 ms window, so the signals below are exactly that long and the two
+        // therefore integrate the same audio. What is left is arithmetic order,
+        // which is why the budget is a hundredth of a decibel rather than the
+        // tenth the cross-check contract allows.
+        let frames = 400 * RATE / 1000;
+        for (name, samples) in [
+            ("1 kHz sine at -20 dBFS", sine(1000.0, 0.1, frames)),
+            ("1 kHz sine at full scale", sine(1000.0, 1.0, frames)),
+            ("60 Hz sine below the RLB corner", sine(60.0, 0.5, frames)),
+            ("10 kHz sine above the shelf", sine(10_000.0, 0.5, frames)),
+            ("wideband noise", noise(0.3, frames)),
+        ] {
+            for gain in [1.0_f32, 0.5, 0.031_622_78] {
+                let ours = measured_loudness(&samples, gain);
+                let reference = reference_loudness(&samples, gain);
+                assert!(
+                    (ours - reference).abs() < 0.01,
+                    "{name} at gain {gain}: measured {ours} LUFS, reference {reference} LUFS"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn silence_measures_as_frames_without_energy_and_leaves_no_peak() {
+        let mut filter = KWeighting::new(RATE);
+        let energy = filter.measure_silence(480);
+        assert_eq!(energy.frames, 480);
+        assert_eq!(energy.weighted_sum_squares.to_bits(), 0.0_f64.to_bits());
+        assert_eq!(energy.peak.to_bits(), 0.0_f32.to_bits());
+    }
+
+    #[test]
+    fn a_gap_measured_as_silence_equals_the_same_span_of_zero_samples() {
+        // The Windows quantum hands the filter a buffer whose gap region is
+        // already zeros, while the preview skips the samples and calls
+        // `measure_silence`. The two have to come out identical or the paths
+        // disagree about the same audio.
+        let tail = sine(1000.0, 0.5, 480);
+        let mut zeros_path = KWeighting::new(RATE);
+        let mut silence_path = KWeighting::new(RATE);
+
+        let mut buffered = vec![0.0_f32; 480];
+        buffered.extend_from_slice(&tail);
+        let buffered = zeros_path.measure(&buffered, 1.0);
+
+        let mut skipped = silence_path.measure_silence(480);
+        skipped.absorb(silence_path.measure(&tail, 1.0));
+
+        assert_eq!(buffered.frames, skipped.frames);
+        assert!(
+            (buffered.weighted_sum_squares - skipped.weighted_sum_squares).abs() < 1e-12,
+            "buffered {} vs skipped {}",
+            buffered.weighted_sum_squares,
+            skipped.weighted_sum_squares
+        );
+    }
+
+    #[test]
+    fn gain_enters_the_energy_as_its_square_and_degenerate_gains_land_on_silence() {
+        let samples = sine(1000.0, 0.5, 4800);
+        let unity = KWeighting::new(RATE).measure(&samples, 1.0);
+        let halved = KWeighting::new(RATE).measure(&samples, 0.5);
+        assert!(
+            (halved.weighted_sum_squares / unity.weighted_sum_squares - 0.25).abs() < 1e-9,
+            "half gain gave {} of the unity energy",
+            halved.weighted_sum_squares / unity.weighted_sum_squares
+        );
+        assert!((halved.peak - unity.peak * 0.5).abs() < f32::EPSILON);
+
+        for degenerate in [0.0_f32, -1.0, f32::NAN, f32::INFINITY] {
+            let energy = KWeighting::new(RATE).measure(&samples, degenerate);
+            assert_eq!(
+                energy.weighted_sum_squares.to_bits(),
+                0.0_f64.to_bits(),
+                "gain {degenerate} should measure as silence"
+            );
+            assert_eq!(energy.frames, 4800);
+        }
+    }
+
+    #[test]
+    fn an_empty_span_measures_as_nothing_at_all() {
+        let energy = KWeighting::new(RATE).measure(&[], 1.0);
+        assert_eq!(energy.frames, 0);
+        assert_eq!(energy.weighted_sum_squares.to_bits(), 0.0_f64.to_bits());
     }
 
     #[test]

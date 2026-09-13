@@ -6,11 +6,11 @@ use macindecode_windows_spatial_audio::{
 };
 
 use crate::decoder::{DecodedSceneBlock, PlaybackKey, SceneQueueReader, SceneSignature};
-use crate::scene_view::{MAX_VIEW_OBJECTS, ObjectView, SceneViewMirror};
+use crate::scene_view::{MAX_VIEW_OBJECTS, ObjectEnergy, ObjectView, SceneViewMirror};
 
 use super::state::{
-    block_offset_at, element_state_at, has_instant_update, lfe_render_state, listener_render_state,
-    validate_block,
+    KWeighting, block_offset_at, element_state_at, has_instant_update, lfe_render_state,
+    listener_render_state, validate_block,
 };
 
 pub(super) struct SceneRenderSource {
@@ -29,6 +29,12 @@ pub(super) struct SceneRenderSource {
     scene_signature: SceneSignature,
     timeline_frame: i64,
     current: Option<BlockCursor>,
+    /// One K-weighting filter per scene slot, in the same order the mirror's
+    /// slots are. It lives here rather than beside the quantum's object map
+    /// because that map is rebuilt every callback while the filter's memory has
+    /// to carry across block and quantum boundaries alike. An epoch change
+    /// rebuilds this whole source, so the filters never need clearing.
+    loudness: [KWeighting; MAX_VIEW_OBJECTS],
 }
 
 impl SceneRenderSource {
@@ -57,6 +63,7 @@ impl SceneRenderSource {
                 start_frame.cast_signed()
             },
             current: None,
+            loudness: [KWeighting::new(sample_rate); MAX_VIEW_OBJECTS],
         }
     }
 
@@ -147,6 +154,20 @@ impl SceneRenderSource {
         // monotonic presentation-time source here, and it jumps exactly when a
         // seek does — which is also when the trail has to be discarded, so the
         // two stay consistent for free.
+        // Measure exactly the audio that is about to be submitted, over the
+        // frames actually written: a forward gap is already zeros in these
+        // buffers and so counts as the silence it renders, while an underrun
+        // tail is past `written` and counts as nothing, because a starved FIFO
+        // is a transport fault rather than a quiet object.
+        let mut energy = [ObjectEnergy::default(); MAX_VIEW_OBJECTS];
+        for ((slot, object), filter) in objects.values().enumerate().zip(&mut self.loudness) {
+            let Some(slot_energy) = energy.get_mut(slot) else {
+                break;
+            };
+            let samples = &object.audio.samples[..written.min(object.audio.samples.len())];
+            *slot_energy = filter.measure(samples, object.audio.gain);
+        }
+
         self.mirror.write(
             self.key,
             objects
@@ -159,6 +180,7 @@ impl SceneRenderSource {
                     gain: object.audio.gain,
                     tracking: object.tracking,
                     jumped: jumped.get(slot).copied().unwrap_or(false),
+                    energy: energy.get(slot).copied().unwrap_or_default(),
                 }),
             self.timeline_frame,
             self.sample_rate,

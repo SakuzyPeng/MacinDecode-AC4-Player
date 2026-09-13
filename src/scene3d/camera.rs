@@ -307,11 +307,6 @@ impl Camera {
     /// Uses the same matrix the GPU gets, so a label and the geometry it names
     /// cannot disagree.
     #[must_use]
-    #[allow(
-        dead_code,
-        reason = "the CPU half of the projection contract; object labels and \
-                  hover hit-testing consume it in the next increment"
-    )]
     pub fn project(&self, point: [f32; 3], viewport: Rect) -> Pos2 {
         let matrix = self.view_projection(viewport.width() / viewport.height().max(f32::EPSILON));
         let clip = transform(matrix, point);

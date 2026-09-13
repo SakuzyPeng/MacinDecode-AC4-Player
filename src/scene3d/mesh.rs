@@ -377,6 +377,39 @@ impl MeshBuilder {
             bytes,
         );
     }
+
+    /// The outline of that same square, as four hairlines in the floor plane.
+    ///
+    /// Takes its centre as one pair rather than as two coordinates: with the
+    /// extra width argument the split form runs past the argument budget, and
+    /// a floor position is one thing anyway.
+    ///
+    /// On the decal stream rather than the line stream: it is coplanar with the
+    /// floor mark it encloses and with the grid beneath it, and the decal bias
+    /// is what keeps all three from z-fighting. Its width is in screen points
+    /// like every other annotation, so it stays a hairline at any zoom instead
+    /// of thickening into a world-sized band.
+    pub fn add_floor_ring(
+        &mut self,
+        centre: [f32; 2],
+        size: f32,
+        floor_y: f32,
+        colour: Rgb,
+        width_points: f32,
+        view: &ViewContext,
+    ) {
+        let [x, z] = centre;
+        let half = size / 2.0;
+        let corners = [
+            [x - half, floor_y, z - half],
+            [x + half, floor_y, z - half],
+            [x + half, floor_y, z + half],
+            [x - half, floor_y, z + half],
+        ];
+        for (from, to) in corners.iter().zip(corners.iter().cycle().skip(1)) {
+            self.add_line(Layer::Decal, *from, *to, colour, width_points, view);
+        }
+    }
 }
 
 /// Tone for a face, chosen by the dominant axis of its outward normal.

@@ -132,6 +132,88 @@ pub const FOOTPRINT_MIN_SCALE: f32 = 0.45;
 /// than growing without bound across the neighbouring objects' floor.
 pub const FOOTPRINT_MAX_SCALE: f32 = 1.60;
 
+/// Hairline width of the gain ring, in screen points.
+///
+/// With measured loudness available the footprint carries two readings instead
+/// of one: the ring is still gain — the width the metadata *asks* for — and the
+/// filled core is the level the object actually delivers, read on the very same
+/// decibel scale. The core can therefore never exceed the ring, and the gap
+/// between them is the whole point: a wide ring around an empty core is an
+/// object that was positioned and gained but has nothing in it, which is
+/// exactly the mistake a gain-only footprint cannot show.
+///
+/// Splitting the floor mark rather than adding a mark keeps the scene's object
+/// count of visual elements unchanged, and keeps the reading where
+/// [`FOOTPRINT_MIN_SCALE`] argues it belongs: coplanar with the floor, where it
+/// can cross no face and hide no scene number.
+pub const FOOTPRINT_RING_POINTS: f32 = 0.9;
+
+/// Audio the fast meter averages before the ballistics see it, in milliseconds.
+///
+/// Short enough that a transient is not averaged away, long enough that the
+/// reading is a level rather than a sample. The attack and release below are
+/// what actually set the meter's feel; this only decides what it is chasing.
+pub const METER_WINDOW_MILLISECONDS: u32 = 30;
+/// Meter attack time constant, in milliseconds. Fast, so a hit reads as a hit.
+pub const METER_ATTACK_MILLISECONDS: f32 = 10.0;
+/// Meter release time constant, in milliseconds.
+///
+/// Slow enough to read, and deliberately not the 400 ms of the momentary
+/// window: that window is a *measurement* the off-stage readout reports, while
+/// this is the feel of a meter riding a moving object. Loading both onto one
+/// number would make the picture lag the sound by a window length.
+pub const METER_RELEASE_MILLISECONDS: f32 = 300.0;
+
+/// How far above a cube's top face the loudness nameplate is anchored, in world
+/// units. Clear of the face label without floating free of the object.
+pub const NAMEPLATE_OFFSET: f32 = 0.055;
+
+/// Characters the nameplate's readout reserves: sign, two integer digits, the
+/// point, one decimal — `-00.0`, the widest value the scale can produce.
+///
+/// The plate is sized from this rather than from the value it currently shows,
+/// and the two cells inside it are fixed: the sign owns the first, the digits
+/// are right-aligned against the last. A plate that grew with its own value
+/// would make the level strip beneath it mean a different number of pixels on
+/// every object, and right-aligning the whole string instead would pin the
+/// decimal point but leave the sign hopping a cell whenever the level crossed
+/// -10 dB. Neither is a scale.
+pub const NAMEPLATE_CELLS: usize = 5;
+/// Readout size in screen points. Fixed, so the plate does not grow with zoom.
+pub const NAMEPLATE_TEXT_POINTS: f32 = 11.0;
+/// Horizontal padding inside the plate, in screen points.
+pub const NAMEPLATE_PAD_POINTS: f32 = 6.0;
+/// Height of the level strip along the plate's bottom edge, in screen points.
+pub const NAMEPLATE_STRIP_POINTS: f32 = 3.0;
+/// How long an object must stay below the silence floor before it starts
+/// fading out of the scene, in seconds.
+///
+/// Long enough to cross the things that are *supposed* to be quiet — the gap
+/// between phrases, a pause in dialogue, the decay tail of a percussive hit —
+/// and short enough that a track which is genuinely empty does not keep its
+/// place in a crowded room. Two seconds is also comfortably longer than the
+/// meter's own release, so the fade can never be triggered by the ballistics
+/// still settling.
+///
+/// **Recovery is immediate; only the disappearance is gradual.** A fade-in
+/// would delay the one event the view exists to show, while a fade-out only
+/// delays tidying up. Coming back is free, going away is not.
+pub const SILENCE_HOLD_SECONDS: f32 = 2.0;
+/// How long the fade itself takes once the hold has elapsed, in seconds.
+/// Slow enough to read as something leaving rather than something blinking out.
+pub const SILENCE_FADE_SECONDS: f32 = 0.6;
+
+/// How much of a fully faded object survives, as a fraction of its normal
+/// presence.
+///
+/// Not zero, and the reason is the whole point of the loudness channel: an
+/// object with full gain and an empty track *is* persistently silent, so hiding
+/// it outright would hide exactly the fault the split footprint was built to
+/// reveal. The cube recedes to a ghost, and the gain ring on the floor does not
+/// fade at all — a wide empty ring is still saying that something here is
+/// asking for level and delivering none.
+pub const SILENT_PRESENCE_FLOOR: f32 = 0.10;
+
 /// Trail breadcrumbs kept per object, and how far apart in time they are taken.
 /// Forty at forty milliseconds is 1.6 seconds of history.
 ///
@@ -158,6 +240,20 @@ pub const FLOOR_TRAIL_WEIGHT: f32 = 0.45;
 /// Breadcrumb edge as a fraction of [`OBJECT_EDGE`]. Small enough that a dense
 /// trail does not read as a second row of objects.
 pub const TRAIL_MARK_SCALE: f32 = 0.30;
+
+/// Breadcrumb size at the silence floor and at unity, as multiples of
+/// [`TRAIL_MARK_SCALE`], when measured loudness is shown.
+///
+/// This is the one place the trail carries something other than time, and it is
+/// allowed to because of *which* loudness it carries. `add_trail` argues that
+/// tinting past marks with the present gain asserts something that was never
+/// true; the mirror records a reading taken at the moment each mark was, so
+/// this says only what was true then. The range stays narrow — the gap between
+/// marks is still speed, and a size swing large enough to compete with it would
+/// cost the reading the trail already has.
+pub const TRAIL_LOUD_MIN_SCALE: f32 = 0.55;
+/// Breadcrumb size at unity gain, as a multiple of [`TRAIL_MARK_SCALE`].
+pub const TRAIL_LOUD_MAX_SCALE: f32 = 1.45;
 
 /// How far two consecutive samples have to be apart, in normalized units,
 /// before an instant metadata update is worth annotating as a jump.

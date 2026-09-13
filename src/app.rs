@@ -83,6 +83,12 @@ pub struct PlayerApp {
     /// Whether zero-based LFE / one-based dynamic-object numbers are printed
     /// on every element face.
     object_numbers_visible: bool,
+    /// Whether the measured loudness channels are drawn. Measurement always
+    /// runs on the audio side; this decides only what the picture carries.
+    object_loudness_visible: bool,
+    /// Meter ballistics, the one part of the loudness picture that depends on
+    /// time rather than on the current frame.
+    object_meters: ObjectMeters,
     /// Listener pose. Head tracking will drive the two angles; until then the
     /// listener faces the room's front.
     figure: scene3d::figure::Figure,
@@ -114,6 +120,148 @@ impl Wake for DialogWake {
 /// remains 1..=20 whether or not the presentation carries LFE.
 fn object_display_number(slot: usize) -> u64 {
     u64::try_from(slot.saturating_add(1)).unwrap_or(u64::MAX)
+}
+
+/// Per-slot meter ballistics over the mirror's energy bins.
+///
+/// The mirror stores energy rather than a meter reading on purpose, so the
+/// ballistics live here, on the side that knows how much wall time has passed
+/// since it last drew. That is also what makes the meter fall when the audio
+/// stops: `SceneViewMirror::write` holds its last frame when a publication
+/// carries no objects, so a decaying value stored there would freeze at
+/// whatever it last was, while a value chased from here keeps releasing.
+#[derive(Debug, Default)]
+struct ObjectMeters {
+    /// Linear level per slot, after attack and release.
+    level: [f32; crate::scene_view::MAX_VIEW_OBJECTS],
+    /// How long each slot has been continuously below the silence floor, in
+    /// seconds. Reset to zero the instant a level comes back, because coming
+    /// back is what the view exists to show: only the disappearance is allowed
+    /// to take time.
+    silent_for: [f32; crate::scene_view::MAX_VIEW_OBJECTS],
+    /// The playback these levels belong to. A superseded one starts silent
+    /// rather than releasing from the previous stream's last reading.
+    key: Option<crate::decoder::PlaybackKey>,
+    last_advanced: Option<Instant>,
+}
+
+impl ObjectMeters {
+    /// Chase each slot's recent mean square, then hand back the levels.
+    fn advance(
+        &mut self,
+        frame: &crate::scene_view::SceneViewFrame,
+        key: crate::decoder::PlaybackKey,
+        sample_rate: u32,
+        now: Instant,
+    ) {
+        if self.key != Some(key) {
+            self.level = [0.0; crate::scene_view::MAX_VIEW_OBJECTS];
+            // A fresh playback starts fully present rather than inheriting the
+            // previous stream's silence: nothing has been measured yet, and
+            // "not measured" is not "quiet".
+            self.silent_for = [0.0; crate::scene_view::MAX_VIEW_OBJECTS];
+            self.key = Some(key);
+            self.last_advanced = None;
+        }
+        let elapsed = self
+            .last_advanced
+            .map_or(0.0, |last| now.duration_since(last).as_secs_f32());
+        self.last_advanced = Some(now);
+
+        let window = window_frames(sample_rate);
+        for (slot, level) in self.level.iter_mut().enumerate() {
+            let (mean_square, frames) = frame.mean_square(slot, window);
+            // No audio measured yet is not the same as silence: leave the
+            // meter where it is rather than releasing from a reading that was
+            // never taken.
+            let target = if frames == 0 {
+                *level
+            } else {
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    reason = "a mean square is a display value; f32 carries it well past the -36 dB floor"
+                )]
+                let target = mean_square.sqrt() as f32;
+                target
+            };
+            let tau = if target > *level {
+                scene3d::params::METER_ATTACK_MILLISECONDS
+            } else {
+                scene3d::params::METER_RELEASE_MILLISECONDS
+            };
+            // The same one-pole form the head tracker eases with.
+            let alpha = 1.0 - (-elapsed * 1000.0 / tau).exp();
+            *level += (target - *level) * alpha.clamp(0.0, 1.0);
+
+            if let Some(silent_for) = self.silent_for.get_mut(slot) {
+                if *level < scene3d::params::OBJECT_SILENT_GAIN {
+                    *silent_for += elapsed;
+                } else {
+                    *silent_for = 0.0;
+                }
+            }
+        }
+    }
+
+    /// Linear level per slot, as the meter currently reads it.
+    const fn levels(&self) -> &[f32; crate::scene_view::MAX_VIEW_OBJECTS] {
+        &self.level
+    }
+
+    /// How present each slot should be drawn, `1.0` fully and `0.0` faded out.
+    ///
+    /// One number with two readings, because the nameplate and the object want
+    /// different floors from the same fade: the plate takes it as an opacity
+    /// and so disappears, while the cube uses it to recede toward the stage and
+    /// stops at [`scene3d::params::SILENT_PRESENCE_FLOOR`].
+    fn presence(&self, slot: usize) -> f32 {
+        let Some(silent_for) = self.silent_for.get(slot) else {
+            return 1.0;
+        };
+        // Expressed as time remaining rather than as the fraction elapsed. The
+        // two are equivalent, but this one lands on exactly zero at the end of
+        // the fade — both sides of the subtraction round the same way — where
+        // the elapsed form leaves a sliver of presence behind and an object
+        // that is invisible but still counted as present.
+        let remaining = (scene3d::params::SILENCE_HOLD_SECONDS
+            + scene3d::params::SILENCE_FADE_SECONDS)
+            - silent_for;
+        (remaining / scene3d::params::SILENCE_FADE_SECONDS).clamp(0.0, 1.0)
+    }
+
+    /// Slots that have faded out completely.
+    fn faded_out(&self, objects: usize) -> usize {
+        (0..objects.min(crate::scene_view::MAX_VIEW_OBJECTS))
+            .filter(|slot| self.presence(*slot) <= 0.0)
+            .count()
+    }
+}
+
+/// Where a level sits on the nameplate strip, on the footprint's decibel scale
+/// so the two readings of the same object agree.
+fn loudness_fraction(loudness: f32) -> f32 {
+    let quiet =
+        (loudness.max(0.0).log10() / scene3d::params::OBJECT_SILENT_GAIN.log10()).clamp(0.0, 1.0);
+    1.0 - quiet
+}
+
+/// A theme colour at a given opacity.
+fn fade(colour: Color32, alpha: f32) -> Color32 {
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "alpha is clamped to 0..=1 before scaling into a u8"
+    )]
+    let alpha = (alpha.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+    Color32::from_rgba_unmultiplied(colour.r(), colour.g(), colour.b(), alpha)
+}
+
+/// Frames the fast meter averages before the ballistics see them.
+fn window_frames(sample_rate: u32) -> u32 {
+    (u64::from(sample_rate) * u64::from(scene3d::params::METER_WINDOW_MILLISECONDS) / 1000)
+        .try_into()
+        .unwrap_or(u32::MAX)
+        .max(1)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -390,6 +538,8 @@ impl PlayerApp {
             sofa_picker: None,
             camera,
             object_numbers_visible: true,
+            object_loudness_visible: true,
+            object_meters: ObjectMeters::default(),
             figure: scene3d::figure::Figure::default(),
             scene_mesh: scene3d::mesh::MeshBuilder::default(),
             scene_renderer_ready,
@@ -1568,11 +1718,28 @@ impl PlayerApp {
             .scene_view()
             .read(self.decoder.playback_key())
             .map(|frame| frame.in_world_space(self.output.head_snapshot().pose));
+        // Ballistics ride the same snapshot as the geometry, so the meter, the
+        // object it sits under and the silent count above them can never be a
+        // frame apart. This has to run before the counts are drawn, because the
+        // silence clock it advances is what the third badge reports.
+        if let Some(mirrored) = mirror_frame.as_ref() {
+            self.object_meters.advance(
+                mirrored,
+                self.decoder.playback_key(),
+                decoder.metrics().map_or(48_000, DecodeMetrics::sample_rate),
+                Instant::now(),
+            );
+        }
+        let silent_objects = mirror_frame.as_ref().and_then(|mirrored| {
+            self.object_loudness_visible
+                .then(|| self.object_meters.faded_out(mirrored.objects().len()))
+        });
         draw_tracking_counts(
             ui,
             mirror_frame
                 .as_ref()
                 .map(crate::scene_view::SceneViewFrame::tracking),
+            silent_objects,
         );
         ui.add_space(6.0);
         let available_height = ui.available_height();
@@ -1594,6 +1761,7 @@ impl PlayerApp {
             [scene3d::scene::SceneObject::default(); crate::scene_view::MAX_VIEW_OBJECTS];
         let mut hidden_objects = 0usize;
         let mut object_count = 0usize;
+        let levels = *self.object_meters.levels();
         if let Some(mirrored) = mirror_frame.as_ref() {
             hidden_objects = mirrored.hidden_objects();
             for (slot, object) in mirrored.objects().iter().enumerate() {
@@ -1602,9 +1770,16 @@ impl PlayerApp {
                     position: object.position,
                     active: object.active,
                     gain: object.gain,
+                    loudness: levels.get(slot).copied().unwrap_or(0.0),
+                    presence: if self.object_loudness_visible {
+                        self.object_meters.presence(slot)
+                    } else {
+                        1.0
+                    },
                     head_locked: object.tracking.head_locked(),
                     trail: mirrored.trail(slot),
                     trail_jumps: mirrored.trail_jumps(slot),
+                    trail_loudness: mirrored.trail_loudness(slot),
                 };
                 object_count = object_count.saturating_add(1);
             }
@@ -1634,6 +1809,7 @@ impl PlayerApp {
                     scene3d::scene::SceneInput {
                         objects,
                         show_element_numbers: self.object_numbers_visible,
+                        show_loudness: self.object_loudness_visible,
                         // Not from the mirror: the presentation's LFE layout is
                         // known as soon as the decoder reports metrics, well
                         // before the render callback produces a first quantum,
@@ -1649,9 +1825,147 @@ impl PlayerApp {
                 }
             }
 
+            if self.object_loudness_visible {
+                self.draw_object_nameplates(ui, rect, objects);
+            }
             self.draw_camera_presets(ui, rect);
             self.draw_camera_readout(ui, rect, hidden_objects);
         });
+    }
+
+    /// The floating loudness readout above each object.
+    ///
+    /// Screen space, because `MeshBuilder` emits world geometry only and a
+    /// readout has to stay the same size at any zoom. That costs the depth test
+    /// the face numbers get for free, which is the trade this carries
+    /// deliberately: the plate reports loudness and nothing else, so it never
+    /// has to be big enough for an identity as well, and the number that says
+    /// *which* object this is stays printed on the cube's six faces where the
+    /// depth buffer still hides the ones behind it. Neither toggle moves the
+    /// other; each reading has one home.
+    fn draw_object_nameplates(
+        &self,
+        ui: &egui::Ui,
+        stage: egui::Rect,
+        objects: &[scene3d::scene::SceneObject<'_>],
+    ) {
+        let font = egui::FontId::monospace(scene3d::params::NAMEPLATE_TEXT_POINTS);
+        let pad = scene3d::params::NAMEPLATE_PAD_POINTS;
+        let strip = scene3d::params::NAMEPLATE_STRIP_POINTS;
+        // Measured from the widest readout the scale can produce, once, rather
+        // than from the value each plate happens to show.
+        let widest = "0".repeat(scene3d::params::NAMEPLATE_CELLS);
+        let measure = |text: String| {
+            ui.painter()
+                .layout_no_wrap(text, font.clone(), theme::TEXT)
+                .rect
+                .width()
+        };
+        let cell = measure("0".to_owned());
+        let plate_width = measure(widest) + pad * 2.0;
+        let plate_height = scene3d::params::NAMEPLATE_TEXT_POINTS + strip + 6.0;
+
+        // Farthest first, so a nearer plate lands on top of the one behind it.
+        // Without a depth buffer this is the only ordering available, and it is
+        // at least the ordering the objects themselves have.
+        let direction = self.camera.direction();
+        let mut order: Vec<usize> = (0..objects.len()).collect();
+        order.sort_by(|left, right| {
+            let depth = |index: usize| {
+                let position = scene3d::scene::object_world_position(objects[index].position);
+                position[0] * direction[0] + position[1] * direction[1] + position[2] * direction[2]
+            };
+            depth(*left).total_cmp(&depth(*right))
+        });
+
+        let painter = ui.painter().with_clip_rect(stage);
+        for index in order {
+            let object = &objects[index];
+            if !object.active {
+                continue;
+            }
+            let [x, y, z] = scene3d::scene::object_world_position(object.position);
+            let anchor = self.camera.project(
+                [
+                    x,
+                    y + scene3d::params::OBJECT_EDGE / 2.0 + scene3d::params::NAMEPLATE_OFFSET,
+                    z,
+                ],
+                stage,
+            );
+            // The plate takes presence as a plain opacity, so it leaves
+            // altogether rather than resting at some low alpha: a readout that
+            // says nothing but -∞ forever is what crowds the view, and the
+            // count above the stage is where that object is accounted for now.
+            let alpha = object.presence.clamp(0.0, 1.0);
+            if alpha <= 0.0 {
+                continue;
+            }
+            let silent = object.loudness < scene3d::params::OBJECT_SILENT_GAIN;
+            let plate = egui::Rect::from_min_size(
+                egui::pos2(anchor.x - plate_width / 2.0, anchor.y - plate_height),
+                egui::vec2(plate_width, plate_height),
+            );
+            painter.rect_filled(plate, 2.5, fade(theme::INK, 0.70 * alpha));
+
+            // The sign owns its own cell and the digits are right-aligned
+            // against the last, so neither walks sideways as the level moves.
+            // Infinity has no decimal point to align, so it sits next to the
+            // sign instead — which is what keeps the sign itself still in every
+            // state the readout has.
+            let decibels = 20.0 * object.loudness.max(0.0).log10();
+            let baseline = plate.top() + (plate.height() - strip) / 2.0;
+            let text_colour = if decibels > -0.5 && !silent {
+                fade(theme::WARNING, alpha)
+            } else {
+                fade(theme::BACKGROUND, alpha)
+            };
+            let (sign, magnitude) = if silent {
+                ("−", "∞".to_owned())
+            } else if decibels > -0.05 {
+                (" ", format!("{:.1}", decibels.abs()))
+            } else {
+                ("−", format!("{:.1}", decibels.abs()))
+            };
+            painter.text(
+                egui::pos2(plate.left() + pad, baseline),
+                Align2::LEFT_CENTER,
+                sign,
+                font.clone(),
+                text_colour,
+            );
+            if silent {
+                painter.text(
+                    egui::pos2(plate.left() + pad + cell, baseline),
+                    Align2::LEFT_CENTER,
+                    magnitude,
+                    font.clone(),
+                    text_colour,
+                );
+            } else {
+                painter.text(
+                    egui::pos2(plate.right() - pad, baseline),
+                    Align2::RIGHT_CENTER,
+                    magnitude,
+                    font.clone(),
+                    text_colour,
+                );
+            }
+
+            // The same value as a strip, which is what makes a row of plates
+            // scannable without reading every digit.
+            let filled = plate_width * loudness_fraction(object.loudness);
+            let track = egui::Rect::from_min_size(
+                egui::pos2(plate.left(), plate.bottom() - strip),
+                egui::vec2(plate_width, strip),
+            );
+            painter.rect_filled(track, 0.0, fade(theme::INK, 0.35 * alpha));
+            painter.rect_filled(
+                egui::Rect::from_min_size(track.min, egui::vec2(filled, strip)),
+                0.0,
+                fade(theme::ACCENT, alpha),
+            );
+        }
     }
 
     /// Live camera state, bottom-left of the stage.
@@ -1764,6 +2078,26 @@ impl PlayerApp {
                     .clicked()
                 {
                     self.camera.toggle_projection();
+                }
+                ui.add_space(4.0);
+
+                let levels_hint = if self.object_loudness_visible {
+                    "Hide measured object loudness"
+                } else {
+                    "Show measured object loudness"
+                };
+                if ui
+                    .add_sized(
+                        [44.0, 26.0],
+                        egui::Button::new(
+                            RichText::new("LVL").size(10.0).strong().color(theme::MUTED),
+                        )
+                        .selected(self.object_loudness_visible),
+                    )
+                    .on_hover_text(levels_hint)
+                    .clicked()
+                {
+                    self.object_loudness_visible = !self.object_loudness_visible;
                 }
                 ui.add_space(4.0);
 
@@ -2695,7 +3029,16 @@ const fn output_phase_label(phase: OutputPhase) -> &'static str {
     }
 }
 
-fn draw_tracking_counts(ui: &mut egui::Ui, tracking: Option<crate::decoder::TrackingSummary>) {
+/// The count strip above the stage.
+///
+/// `silent` is `None` when there is nothing to report — the badge is then left
+/// out entirely rather than drawn as a dash, because a dash already means "no
+/// data" for the two reference-frame counts and the two senses must not blur.
+fn draw_tracking_counts(
+    ui: &mut egui::Ui,
+    tracking: Option<crate::decoder::TrackingSummary>,
+    silent: Option<usize>,
+) {
     let scene_relative =
         tracking.map(|value| value.scene_relative + value.unspecified + value.unsupported);
     let head_locked = tracking.map(|value| value.head_relative);
@@ -2706,18 +3049,38 @@ fn draw_tracking_counts(ui: &mut egui::Ui, tracking: Option<crate::decoder::Trac
         ] {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(label).size(11.0).color(theme::MUTED));
-                draw_tracking_count_badge(ui, count, colour);
+                draw_tracking_count_badge(ui, count, theme::ACCENT, colour);
             }).response.on_hover_text(hint);
+        }
+        // Deliberately a different fill from the two above. Those split the
+        // objects by reference frame and add up to the scene; this one reports
+        // a level state that a scene-relative and a head-locked object can both
+        // be in, so a reader who saw three accent badges in a row would be
+        // right to try to add them up and wrong about what they got.
+        if let Some(silent) = silent {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Silent").size(11.0).color(theme::MUTED));
+                draw_tracking_count_badge(ui, Some(silent), theme::MUTED, theme::BACKGROUND);
+            })
+            .response
+            .on_hover_text(
+                "Objects whose measured level has stayed below the silence floor long enough to fade out of the scene. Counts only the objects the view can draw; excludes LFE. Their gain rings stay on the floor.",
+            );
         }
     });
 }
 
-fn draw_tracking_count_badge(ui: &mut egui::Ui, count: Option<usize>, colour: Color32) {
+fn draw_tracking_count_badge(
+    ui: &mut egui::Ui,
+    count: Option<usize>,
+    fill: Color32,
+    colour: Color32,
+) {
     let text = count.map_or_else(|| "—".to_owned(), |value| value.to_string());
     let (rect, response) = ui.allocate_exact_size(egui::Vec2::splat(28.0), egui::Sense::hover());
     response
         .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, ui.is_enabled(), &text));
-    ui.painter().rect_filled(rect, 0.0, theme::ACCENT);
+    ui.painter().rect_filled(rect, 0.0, fill);
 
     let mut galley =
         ui.painter()
@@ -3194,6 +3557,74 @@ mod tests {
             !context.has_requested_repaint(),
             "a latched failure must not keep waking the UI"
         );
+    }
+
+    #[test]
+    fn presence_holds_then_fades_and_a_returning_level_restores_it_at_once() {
+        let mut meters = ObjectMeters::default();
+        assert!((meters.presence(0) - 1.0).abs() < f32::EPSILON);
+
+        // Inside the hold, a silent object is still fully present: the hold is
+        // there to cross phrase gaps and decay tails without flicker.
+        meters.silent_for[0] = scene3d::params::SILENCE_HOLD_SECONDS - 0.01;
+        assert!((meters.presence(0) - 1.0).abs() < f32::EPSILON);
+
+        // Halfway through the fade, halfway out.
+        meters.silent_for[0] =
+            scene3d::params::SILENCE_HOLD_SECONDS + scene3d::params::SILENCE_FADE_SECONDS / 2.0;
+        let half = meters.presence(0);
+        assert!(
+            (half - 0.5).abs() < 0.01,
+            "half a fade in, presence was {half}"
+        );
+
+        // Past the fade it stays at zero rather than going negative.
+        meters.silent_for[0] =
+            scene3d::params::SILENCE_HOLD_SECONDS + scene3d::params::SILENCE_FADE_SECONDS * 4.0;
+        assert!(meters.presence(0).abs() < f32::EPSILON);
+
+        // Coming back is immediate. Disappearing may take time; reappearing may
+        // not, because reappearing is the event the view exists to show.
+        meters.silent_for[0] = 0.0;
+        assert!((meters.presence(0) - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn the_silent_count_reports_only_the_slots_that_faded_all_the_way_out() {
+        let mut meters = ObjectMeters::default();
+        let gone = scene3d::params::SILENCE_HOLD_SECONDS + scene3d::params::SILENCE_FADE_SECONDS;
+        meters.silent_for[0] = gone;
+        meters.silent_for[1] = gone;
+        // Still inside the hold, so not yet counted — the badge reports what has
+        // actually left the picture, not what is merely quiet this instant.
+        meters.silent_for[2] = scene3d::params::SILENCE_HOLD_SECONDS / 2.0;
+        assert_eq!(meters.faded_out(4), 2);
+        // A slot beyond the reported object count is not counted at all.
+        meters.silent_for[5] = gone;
+        assert_eq!(meters.faded_out(4), 2);
+        assert_eq!(meters.faded_out(6), 3);
+    }
+
+    #[test]
+    fn the_nameplate_strip_and_the_footprint_share_one_decibel_floor() {
+        // Two readings of the same object in two places; if their floors ever
+        // drift, a strip can sit empty under a footprint core that is not, and
+        // the picture contradicts itself.
+        assert!(loudness_fraction(0.0).abs() < f32::EPSILON);
+        assert!(loudness_fraction(scene3d::params::OBJECT_SILENT_GAIN).abs() < f32::EPSILON);
+        assert!((loudness_fraction(1.0) - 1.0).abs() < f32::EPSILON);
+        assert!((loudness_fraction(4.0) - 1.0).abs() < f32::EPSILON);
+        // Monotonic in between, so a louder object never reads shorter.
+        let mut previous = 0.0;
+        for step in 0..=20_u8 {
+            let gain = scene3d::params::OBJECT_SILENT_GAIN.powf(1.0 - f32::from(step) / 20.0);
+            let fraction = loudness_fraction(gain);
+            assert!(
+                fraction >= previous,
+                "gain {gain} gave {fraction} after {previous}"
+            );
+            previous = fraction;
+        }
     }
 
     #[test]
