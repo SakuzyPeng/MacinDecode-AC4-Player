@@ -49,6 +49,8 @@ pub struct SceneObject<'a> {
     /// Aligned with `trail`: which marks the object arrived at instantly rather
     /// than travelled to.
     pub trail_jumps: &'a [bool],
+    /// Aligned with `trail`: how loud the object was when each mark was taken.
+    pub trail_loudness: &'a [f32],
 }
 
 /// Everything one frame of the scene depends on.
@@ -92,7 +94,7 @@ pub fn build(
     // in the one place guaranteed to look deliberate. Leaving it out is the
     // honest reading of "we do not know where this is".
     for object in input.objects.iter().filter(|object| object.active) {
-        add_trail(mesh, object, &view);
+        add_trail(mesh, object, input.show_loudness, &view);
         add_object(
             mesh,
             object,
@@ -445,6 +447,21 @@ fn object_colour(object: &SceneObject<'_>, view: &ViewContext) -> Rgb {
     }
 }
 
+/// A breadcrumb's size multiplier for the level recorded when it was taken.
+///
+/// Read on the same decibel scale as the footprint, and against the same floor,
+/// so a mark and the footprint under it bottom out together. An unrecorded
+/// reading keeps the plain size rather than collapsing to the minimum: absent
+/// is not the same as silent.
+fn trail_loudness_scale(loudness: Option<f32>) -> f32 {
+    let Some(loudness) = loudness else {
+        return 1.0;
+    };
+    let quiet = (loudness.max(0.0).log10() / params::OBJECT_SILENT_GAIN.log10()).clamp(0.0, 1.0);
+    params::TRAIL_LOUD_MAX_SCALE
+        + (params::TRAIL_LOUD_MIN_SCALE - params::TRAIL_LOUD_MAX_SCALE) * quiet
+}
+
 /// The footprint's edge for a gain, as a multiple of [`params::OBJECT_EDGE`].
 ///
 /// Read in decibels between [`params::OBJECT_SILENT_GAIN`] and unity, because a
@@ -471,7 +488,12 @@ fn footprint_scale(gain: f32) -> f32 {
 /// Each mark is projected onto the floor as well. That projection is not
 /// decoration — at a grazing or axis-aligned view the airborne marks carry no
 /// depth at all, and the projection is what still places the path on the grid.
-fn add_trail(mesh: &mut MeshBuilder, object: &SceneObject<'_>, view: &ViewContext) {
+fn add_trail(
+    mesh: &mut MeshBuilder,
+    object: &SceneObject<'_>,
+    show_loudness: bool,
+    view: &ViewContext,
+) {
     let Ok(count) = u16::try_from(object.trail.len()) else {
         return;
     };
@@ -492,6 +514,11 @@ fn add_trail(mesh: &mut MeshBuilder, object: &SceneObject<'_>, view: &ViewContex
         let freshness = f32::from(u16::try_from(index).unwrap_or(u16::MAX).saturating_add(1))
             / f32::from(count);
         let faded = colour.lerp(view.stage, params::TRAIL_FADE * (1.0 - freshness));
+        let mark = if show_loudness {
+            edge * trail_loudness_scale(object.trail_loudness.get(index).copied())
+        } else {
+            edge
+        };
         let [x, y, z] = object_world_position(*point);
         let arrival = trail_jump_at(object, index);
         let departure = trail_jump_at(object, index.saturating_add(1));
@@ -503,12 +530,12 @@ fn add_trail(mesh: &mut MeshBuilder, object: &SceneObject<'_>, view: &ViewContex
             // the eye is meant to find.
             jump_mark(mesh, [x, y, z], view);
         } else {
-            mesh.add_box([x, y, z], [edge; 3], faded, view);
+            mesh.add_box([x, y, z], [mark; 3], faded, view);
         }
         mesh.add_floor_mark(
             x,
             z,
-            edge * 0.7,
+            mark * 0.7,
             FLOOR_Y,
             faded.lerp(view.stage, 1.0 - params::FLOOR_TRAIL_WEIGHT),
             view,
@@ -637,6 +664,7 @@ mod tests {
             head_locked: false,
             trail: &[],
             trail_jumps: &[],
+            trail_loudness: &[],
         }
     }
 

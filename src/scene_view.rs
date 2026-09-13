@@ -157,6 +157,12 @@ pub struct SceneViewFrame {
     trail_lens: [usize; MAX_VIEW_OBJECTS],
     /// Which breadcrumbs the object arrived at rather than travelled to.
     trail_jumps: [[bool; TRAIL_SAMPLES]; MAX_VIEW_OBJECTS],
+    /// How loud the object was *when* each breadcrumb was taken, as a linear
+    /// level. Recorded rather than derived: `add_trail` argues that painting
+    /// history with the present gain asserts something that was not true, and
+    /// the same objection would apply to the present level — but a reading
+    /// taken at the moment the mark was is simply what was true then.
+    trail_loudness: [[f32; TRAIL_SAMPLES]; MAX_VIEW_OBJECTS],
     /// A discontinuity seen since the last breadcrumb was taken. Latched here
     /// because a quantum is roughly a quarter of the sampling interval, so the
     /// update that jumped is usually not the one being sampled.
@@ -182,6 +188,7 @@ impl Default for SceneViewFrame {
             trails: [[[0.0; 3]; TRAIL_SAMPLES]; MAX_VIEW_OBJECTS],
             trail_lens: [0; MAX_VIEW_OBJECTS],
             trail_jumps: [[false; TRAIL_SAMPLES]; MAX_VIEW_OBJECTS],
+            trail_loudness: [[0.0; TRAIL_SAMPLES]; MAX_VIEW_OBJECTS],
             pending_jump: [false; MAX_VIEW_OBJECTS],
             loudness: [[LoudnessBin::default(); LOUDNESS_BINS]; MAX_VIEW_OBJECTS],
             loudness_lens: [0; MAX_VIEW_OBJECTS],
@@ -227,6 +234,16 @@ impl SceneViewFrame {
     pub fn trail(&self, slot: usize) -> &[[f32; 3]] {
         match self.trail_lens.get(slot) {
             Some(&len) => &self.trails[slot][..len],
+            None => &[],
+        }
+    }
+
+    /// How loud `slot` was at each of its breadcrumbs, aligned with
+    /// [`Self::trail`]. Linear level, as the meter reads it.
+    #[must_use]
+    pub fn trail_loudness(&self, slot: usize) -> &[f32] {
+        match self.trail_lens.get(slot) {
+            Some(&len) => &self.trail_loudness[slot][..len],
             None => &[],
         }
     }
@@ -330,23 +347,33 @@ fn push_energy(
     bin.peak = bin.peak.max(energy.peak);
 }
 
+#[derive(Debug, Clone, Copy)]
+struct Breadcrumb {
+    point: [f32; 3],
+    jumped: bool,
+    loudness: f32,
+}
+
 fn push_trail(
     trail: &mut [[f32; 3]; TRAIL_SAMPLES],
     jumps: &mut [bool; TRAIL_SAMPLES],
+    loudness: &mut [f32; TRAIL_SAMPLES],
     len: &mut usize,
-    point: [f32; 3],
-    jumped: bool,
+    mark: Breadcrumb,
 ) {
     if let Some(slot) = trail.get_mut(*len) {
-        *slot = point;
-        jumps[*len] = jumped;
+        *slot = mark.point;
+        jumps[*len] = mark.jumped;
+        loudness[*len] = mark.loudness;
         *len = len.saturating_add(1);
         return;
     }
     trail.copy_within(1.., 0);
     jumps.copy_within(1.., 0);
-    trail[TRAIL_SAMPLES - 1] = point;
-    jumps[TRAIL_SAMPLES - 1] = jumped;
+    loudness.copy_within(1.., 0);
+    trail[TRAIL_SAMPLES - 1] = mark.point;
+    jumps[TRAIL_SAMPLES - 1] = mark.jumped;
+    loudness[TRAIL_SAMPLES - 1] = mark.loudness;
 }
 
 /// The shared handle. `SpatialOutputController` owns it, the render source
@@ -455,12 +482,28 @@ impl SceneViewMirror {
             for slot in 0..total.min(MAX_VIEW_OBJECTS) {
                 let point = frame.objects[slot].position;
                 let jumped = std::mem::take(&mut frame.pending_jump[slot]);
+                // Read before the borrow below: this is what the object
+                // measured around the instant the mark is being taken.
+                let (mean_square, measured) = frame.mean_square(slot, bin_frames);
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    reason = "a breadcrumb's level is a display value, well inside f32"
+                )]
+                let loudness = if measured == 0 {
+                    0.0
+                } else {
+                    mean_square.sqrt() as f32
+                };
                 push_trail(
                     &mut frame.trails[slot],
                     &mut frame.trail_jumps[slot],
+                    &mut frame.trail_loudness[slot],
                     &mut frame.trail_lens[slot],
-                    point,
-                    jumped,
+                    Breadcrumb {
+                        point,
+                        jumped,
+                        loudness,
+                    },
                 );
             }
         }
@@ -643,6 +686,35 @@ mod tests {
         }
         let frame = mirror.read(key).unwrap();
         assert_eq!(frame.loudness_bins(0).len(), LOUDNESS_BINS);
+    }
+
+    #[test]
+    fn a_breadcrumb_records_the_level_that_was_true_when_it_was_taken() {
+        let mirror = SceneViewMirror::new();
+        let key = PlaybackKey::new(1, 1);
+        let bin = loudness_bin_frames(48_000);
+        let interval = sample_interval_frames(48_000);
+
+        // Loud while the first mark is taken, silent by the second. The trail
+        // has to keep both readings rather than repainting the first with the
+        // second — that is the whole reason the reading is stored per mark.
+        mirror.write(key, [energetic(0.25, bin)], 0, 48_000);
+        mirror.write(key, [energetic(0.0, bin)], interval, 48_000);
+        let frame = mirror.read(key).unwrap();
+
+        assert_eq!(frame.trail(0).len(), 2);
+        let levels = frame.trail_loudness(0);
+        assert!(
+            (levels[0] - 0.5).abs() < 1e-6,
+            "first breadcrumb recorded {}",
+            levels[0]
+        );
+        assert!(
+            levels[1] < levels[0],
+            "second breadcrumb recorded {} against the first's {}",
+            levels[1],
+            levels[0]
+        );
     }
 
     fn energetic(mean_square: f64, frames: u32) -> ObjectView {

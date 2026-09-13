@@ -1701,6 +1701,7 @@ impl PlayerApp {
                     head_locked: object.tracking.head_locked(),
                     trail: mirrored.trail(slot),
                     trail_jumps: mirrored.trail_jumps(slot),
+                    trail_loudness: mirrored.trail_loudness(slot),
                 };
                 object_count = object_count.saturating_add(1);
             }

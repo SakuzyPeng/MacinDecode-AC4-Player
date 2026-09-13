@@ -191,6 +191,20 @@ pub const FLOOR_TRAIL_WEIGHT: f32 = 0.45;
 /// trail does not read as a second row of objects.
 pub const TRAIL_MARK_SCALE: f32 = 0.30;
 
+/// Breadcrumb size at the silence floor and at unity, as multiples of
+/// [`TRAIL_MARK_SCALE`], when measured loudness is shown.
+///
+/// This is the one place the trail carries something other than time, and it is
+/// allowed to because of *which* loudness it carries. `add_trail` argues that
+/// tinting past marks with the present gain asserts something that was never
+/// true; the mirror records a reading taken at the moment each mark was, so
+/// this says only what was true then. The range stays narrow — the gap between
+/// marks is still speed, and a size swing large enough to compete with it would
+/// cost the reading the trail already has.
+pub const TRAIL_LOUD_MIN_SCALE: f32 = 0.55;
+/// Breadcrumb size at unity gain, as a multiple of [`TRAIL_MARK_SCALE`].
+pub const TRAIL_LOUD_MAX_SCALE: f32 = 1.45;
+
 /// How far two consecutive samples have to be apart, in normalized units,
 /// before an instant metadata update is worth annotating as a jump.
 ///
