@@ -104,6 +104,7 @@ impl PlayerApp {
                     self.camera = scene3d::camera::Camera::from_state(self.preferences.camera);
                     self.object_numbers_visible = self.preferences.object_numbers;
                     self.object_loudness_visible = self.preferences.object_loudness;
+                    self.fade_silent_objects = self.preferences.fade_silent_objects;
                     self.preferences_observed = self.preferences.clone();
                     self.cursor.clone_from(&session.cursor);
                     self.checkpoint = session.clone();
@@ -550,6 +551,7 @@ impl PlayerApp {
         prefs.camera = self.camera.state();
         prefs.object_numbers = self.object_numbers_visible;
         prefs.object_loudness = self.object_loudness_visible;
+        prefs.fade_silent_objects = self.fade_silent_objects;
         prefs
     }
     fn save_checkpoint(&mut self) {

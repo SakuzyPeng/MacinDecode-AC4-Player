@@ -76,6 +76,7 @@ pub struct PlayerApp {
     bitstream_details_open: bool,
     diagnostics_open: bool,
     output_settings_open: bool,
+    object_visual_settings_open: bool,
     pending_output_change: Option<OutputSettings>,
     audio_settings_error: Option<String>,
     sofa_picker: Option<Pin<Box<dyn Future<Output = Option<rfd::FileHandle>>>>>,
@@ -86,6 +87,8 @@ pub struct PlayerApp {
     /// Whether the measured loudness channels are drawn. Measurement always
     /// runs on the audio side; this decides only what the picture carries.
     object_loudness_visible: bool,
+    /// Whether sustained silence dims objects, independently of loudness display.
+    fade_silent_objects: bool,
     /// Meter ballistics, the one part of the loudness picture that depends on
     /// time rather than on the current frame.
     object_meters: ObjectMeters,
@@ -533,12 +536,14 @@ impl PlayerApp {
             bitstream_details_open: false,
             diagnostics_open: false,
             output_settings_open: false,
+            object_visual_settings_open: false,
             pending_output_change: None,
             audio_settings_error: None,
             sofa_picker: None,
             camera,
             object_numbers_visible: true,
             object_loudness_visible: true,
+            fade_silent_objects: true,
             object_meters: ObjectMeters::default(),
             figure: scene3d::figure::Figure::default(),
             scene_mesh: scene3d::mesh::MeshBuilder::default(),
@@ -967,6 +972,7 @@ impl PlayerApp {
         reason = "the endpoint picker and header share one tightly coupled egui panel"
     )]
     fn draw_header(&mut self, root: &mut egui::Ui) {
+        let compact_header = root.available_width() < 1_100.0;
         let output = self.output.snapshot();
         let devices = self.output.devices().to_vec();
         let preferred = self.output.preferred_device().clone();
@@ -1044,11 +1050,13 @@ impl PlayerApp {
                     });
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui.button("About").clicked() { self.about.open = true; }
+                        if ui.button("Object visuals").clicked() { self.object_visual_settings_open = true; }
                         if ui.button("Audio settings").clicked() { show_settings = true; }
                         ui.add_enabled_ui(!system_output, |ui| {
                         egui::ComboBox::from_id_salt("output-device")
                             .selected_text(preferred_label)
-                            .width(220.0)
+                            .width(if compact_header { 160.0 } else { 220.0 })
+                            .truncate()
                             .show_ui(ui, |ui| {
                                 let default_response = ui
                                     .add_enabled_ui(default_eligible, |ui| {
@@ -1110,12 +1118,14 @@ impl PlayerApp {
                                 ui.add_enabled(false, egui::Label::new(device_detail));
                             });
                         });
-                        ui.label(
-                            RichText::new("OUTPUT DEVICE")
-                                .size(10.0)
-                                .strong()
-                                .color(theme::MUTED),
-                        );
+                        if !compact_header {
+                            ui.label(
+                                RichText::new("OUTPUT DEVICE")
+                                    .size(10.0)
+                                    .strong()
+                                    .color(theme::MUTED),
+                            );
+                        }
                     });
                 });
                 let clip = ui.clip_rect();
@@ -1469,6 +1479,31 @@ impl PlayerApp {
         }
     }
 
+    fn draw_object_visual_settings(&mut self, context: &egui::Context) {
+        if !self.object_visual_settings_open {
+            return;
+        }
+        let mut open = true;
+        egui::Window::new("Object visual settings")
+            .open(&mut open)
+            .resizable(false)
+            .default_width(320.0)
+            .show(context, |ui| {
+                ui.checkbox(&mut self.object_numbers_visible, "Element numbers (IDs)")
+                    .on_hover_text("Show numbers on scene objects and the LFE.");
+                ui.checkbox(&mut self.object_loudness_visible, "Object loudness (LVL)")
+                    .on_hover_text("Show measured levels above objects, in their footprints and along their trails.");
+                ui.separator();
+                ui.checkbox(&mut self.fade_silent_objects, "Fade persistently silent objects");
+                ui.label(
+                    RichText::new("Quiet objects fade after about two seconds and return when sound resumes.")
+                        .small()
+                        .color(theme::MUTED),
+                );
+            });
+        self.object_visual_settings_open = open;
+    }
+
     fn draw_source_sidebar(&mut self, root: &mut egui::Ui) {
         egui::Panel::left("source-sidebar")
             .exact_size(310.0)
@@ -1731,7 +1766,7 @@ impl PlayerApp {
             );
         }
         let silent_objects = mirror_frame.as_ref().and_then(|mirrored| {
-            self.object_loudness_visible
+            self.fade_silent_objects
                 .then(|| self.object_meters.faded_out(mirrored.objects().len()))
         });
         draw_tracking_counts(
@@ -1771,7 +1806,7 @@ impl PlayerApp {
                     active: object.active,
                     gain: object.gain,
                     loudness: levels.get(slot).copied().unwrap_or(0.0),
-                    presence: if self.object_loudness_visible {
+                    presence: if self.fade_silent_objects {
                         self.object_meters.presence(slot)
                     } else {
                         1.0
@@ -2078,46 +2113,6 @@ impl PlayerApp {
                     .clicked()
                 {
                     self.camera.toggle_projection();
-                }
-                ui.add_space(4.0);
-
-                let levels_hint = if self.object_loudness_visible {
-                    "Hide measured object loudness"
-                } else {
-                    "Show measured object loudness"
-                };
-                if ui
-                    .add_sized(
-                        [44.0, 26.0],
-                        egui::Button::new(
-                            RichText::new("LVL").size(10.0).strong().color(theme::MUTED),
-                        )
-                        .selected(self.object_loudness_visible),
-                    )
-                    .on_hover_text(levels_hint)
-                    .clicked()
-                {
-                    self.object_loudness_visible = !self.object_loudness_visible;
-                }
-                ui.add_space(4.0);
-
-                let labels_hint = if self.object_numbers_visible {
-                    "Hide scene element numbers"
-                } else {
-                    "Show scene element numbers"
-                };
-                if ui
-                    .add_sized(
-                        [44.0, 26.0],
-                        egui::Button::new(
-                            RichText::new("IDs").size(10.0).strong().color(theme::MUTED),
-                        )
-                        .selected(self.object_numbers_visible),
-                    )
-                    .on_hover_text(labels_hint)
-                    .clicked()
-                {
-                    self.object_numbers_visible = !self.object_numbers_visible;
                 }
                 ui.add_space(4.0);
 
@@ -2764,6 +2759,7 @@ impl eframe::App for PlayerApp {
         self.draw_bitstream_details_window(&context);
         self.draw_diagnostics_window(&context);
         self.draw_output_settings(&context);
+        self.draw_object_visual_settings(&context);
         self.about.draw(&context);
         if let Some(smoke) = &mut self.smoke {
             smoke.frame(

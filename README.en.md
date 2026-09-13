@@ -79,8 +79,10 @@ the checksum and build information attachments do not need to be installed. You 
    sequential, repeat-one, repeat-all and shuffle modes.
 
 **The 3D scene** (center of the window): drag to orbit, `Shift` + drag to pan, scroll to zoom. The
-`ISO` / `TOP` / `BACK` / `SIDE` / `RESET` buttons jump to fixed viewpoints, and two more toggle
-perspective/orthographic projection, element numbers and `LVL` loudness. The scene draws at most 20 objects at once
+`ISO` / `TOP` / `BACK` / `SIDE` / `RESET` buttons jump to fixed viewpoints, with a separate
+perspective/orthographic projection toggle. **Object visuals**, next to **Audio settings**, groups
+element numbers (IDs), object loudness (LVL), and fading persistently silent objects. All three
+switches are independent, enabled by default, and remembered across restarts. The scene draws at most 20 objects at once
 and says at the bottom left how many it left out. With element numbers enabled, black numbers identify scene-relative
 objects and white numbers identify head-locked objects. Live counts for both reference frames appear above the scene in fixed square badges with centered numbers.
 
@@ -90,13 +92,14 @@ decibel scale. A wide ring around a small core is an object that was positioned 
 almost no signal in it — something gain alone cannot show. Loudness is measured before rendering,
 A small nameplate also floats above each object, reporting dBFS and nothing else: its width is
 fixed and the sign and digits each own a cell, so nothing shifts sideways as the level crosses
--10 dB, and a plate below the silence floor fades out. **Element numbers stay printed on the cube's
+-10 dB. **Element numbers stay printed on the cube's
 six faces and never move with `LVL`** — identity uses the depth buffer, the readout uses the screen,
-and each has one home. Trail breadcrumbs are sized by the loudness recorded when each was taken. An object with no signal
+and each has one home. Trail breadcrumbs are sized by the loudness recorded when each was taken. With **Fade persistently silent objects** enabled, an object with no signal
 for about two seconds fades out of the scene — its nameplate goes entirely, its cube recedes to a
 ghost — but **its gain ring stays on the floor**, because "full gain, empty track" is itself
 persistently silent and hiding the ring would hide the very fault worth seeing. Sound returning
 restores it at once. A grey `Silent` count above the scene says how many have faded out.
+Disabling fading restores objects immediately and hides the `Silent` count; switching LVL does not affect fading.
 Loudness is measured before rendering, K-weighted per ITU-R BS.1770, and cross-checked against the
 reference implementation in the tests.
 

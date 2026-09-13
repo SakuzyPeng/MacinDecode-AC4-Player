@@ -48,6 +48,10 @@ impl DataDirectory {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent saved user preferences are not one state machine"
+)]
 pub struct AppPreferences {
     pub output: OutputSettings,
     pub volume: f32,
@@ -55,6 +59,7 @@ pub struct AppPreferences {
     pub camera: CameraState,
     pub object_numbers: bool,
     pub object_loudness: bool,
+    pub fade_silent_objects: bool,
     pub manual_head: [f32; 3],
     #[serde(with = "crate::playlist::native_path")]
     pub last_directory: PathBuf,
@@ -68,6 +73,7 @@ impl Default for AppPreferences {
             camera: Camera::default().state(),
             object_numbers: true,
             object_loudness: true,
+            fade_silent_objects: true,
             manual_head: [0.0; 3],
             last_directory: PathBuf::new(),
         }
