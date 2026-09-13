@@ -249,6 +249,15 @@ would freeze instead of falling. A bin therefore closes when it *holds* a bin's 
 on a clock, and ballistics live in `app::ObjectMeters` on the drawing side. The bins clear at the same
 two sites the trails do — key change, and a slot changing element or reference frame.
 
+How long an object has been silent is *not* in the mirror: that clock depends on the ballistics and
+on wall time, both of which live in `app::ObjectMeters`, and putting a display timer into a summary
+the audio side builds would push UI state back onto the audio thread. `ObjectMeters::presence` turns
+it into one number — the nameplate takes it as an opacity and disappears, the cube uses it to recede
+and stops at `SILENT_PRESENCE_FLOOR`. **The gain ring never fades**: an object with full gain and an
+empty track is itself persistently silent, so fading the ring would hide the exact fault the split
+footprint exists to expose. `scene3d::scene::a_faded_out_object_keeps_its_gain_ring_on_the_floor`
+pins that; keep it passing.
+
 Per-object loudness is not a standardised quantity (BS.1770 is defined over a channel-based
 programme; object audio is measured by rendering to a reference layout first). The arithmetic is
 pinned instead: `ebur128` is a **dev-dependency only**, and `backend::state`'s cross-check asserts

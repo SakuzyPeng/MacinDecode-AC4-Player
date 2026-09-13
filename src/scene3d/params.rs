@@ -185,9 +185,34 @@ pub const NAMEPLATE_TEXT_POINTS: f32 = 11.0;
 pub const NAMEPLATE_PAD_POINTS: f32 = 6.0;
 /// Height of the level strip along the plate's bottom edge, in screen points.
 pub const NAMEPLATE_STRIP_POINTS: f32 = 3.0;
-/// Opacity of a nameplate whose object has fallen below the silence floor.
-/// It recedes rather than disappearing, as the cube itself does.
-pub const NAMEPLATE_SILENT_ALPHA: f32 = 0.32;
+/// How long an object must stay below the silence floor before it starts
+/// fading out of the scene, in seconds.
+///
+/// Long enough to cross the things that are *supposed* to be quiet — the gap
+/// between phrases, a pause in dialogue, the decay tail of a percussive hit —
+/// and short enough that a track which is genuinely empty does not keep its
+/// place in a crowded room. Two seconds is also comfortably longer than the
+/// meter's own release, so the fade can never be triggered by the ballistics
+/// still settling.
+///
+/// **Recovery is immediate; only the disappearance is gradual.** A fade-in
+/// would delay the one event the view exists to show, while a fade-out only
+/// delays tidying up. Coming back is free, going away is not.
+pub const SILENCE_HOLD_SECONDS: f32 = 2.0;
+/// How long the fade itself takes once the hold has elapsed, in seconds.
+/// Slow enough to read as something leaving rather than something blinking out.
+pub const SILENCE_FADE_SECONDS: f32 = 0.6;
+
+/// How much of a fully faded object survives, as a fraction of its normal
+/// presence.
+///
+/// Not zero, and the reason is the whole point of the loudness channel: an
+/// object with full gain and an empty track *is* persistently silent, so hiding
+/// it outright would hide exactly the fault the split footprint was built to
+/// reveal. The cube recedes to a ghost, and the gain ring on the floor does not
+/// fade at all — a wide empty ring is still saying that something here is
+/// asking for level and delivering none.
+pub const SILENT_PRESENCE_FLOOR: f32 = 0.10;
 
 /// Trail breadcrumbs kept per object, and how far apart in time they are taken.
 /// Forty at forty milliseconds is 1.6 seconds of history.

@@ -92,7 +92,11 @@ A small nameplate also floats above each object, reporting dBFS and nothing else
 fixed and the sign and digits each own a cell, so nothing shifts sideways as the level crosses
 -10 dB, and a plate below the silence floor fades out. **Element numbers stay printed on the cube's
 six faces and never move with `LVL`** — identity uses the depth buffer, the readout uses the screen,
-and each has one home. Trail breadcrumbs are sized by the loudness recorded when each was taken.
+and each has one home. Trail breadcrumbs are sized by the loudness recorded when each was taken. An object with no signal
+for about two seconds fades out of the scene — its nameplate goes entirely, its cube recedes to a
+ghost — but **its gain ring stays on the floor**, because "full gain, empty track" is itself
+persistently silent and hiding the ring would hide the very fault worth seeing. Sound returning
+restores it at once. A grey `Silent` count above the scene says how many have faded out.
 Loudness is measured before rendering, K-weighted per ITU-R BS.1770, and cross-checked against the
 reference implementation in the tests.
 

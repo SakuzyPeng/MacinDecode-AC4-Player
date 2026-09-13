@@ -41,6 +41,11 @@ pub struct SceneObject<'a> {
     /// already through the meter's ballistics. Read on the same decibel scale
     /// as `gain`, so it can never exceed it — see [`params::FOOTPRINT_RING_POINTS`].
     pub loudness: f32,
+    /// How present this object should read, `1.0` normally and `0.0` once it
+    /// has been silent long enough to fade out. Everything but the gain ring
+    /// recedes with it; see [`params::SILENT_PRESENCE_FLOOR`] for why the ring
+    /// is the one thing that stays.
+    pub presence: f32,
     /// Content reference frame: scene-relative numbers are black, head-locked numbers white.
     pub head_locked: bool,
     /// Where this object has been, oldest first, in the same normalized
@@ -242,19 +247,28 @@ fn add_object(
 ) {
     let [x, y, z] = object_world_position(object.position);
     let edge = params::OBJECT_EDGE;
-    mesh.add_box([x, y, z], [edge; 3], object_colour(object, view), view);
+    mesh.add_box(
+        [x, y, z],
+        [edge; 3],
+        receded(object_colour(object, view), object, view),
+        view,
+    );
     if show_label {
         add_box_number(
             mesh,
             object.display_number,
             [x, y, z],
             [edge; 3],
-            number_colour(object.head_locked),
+            receded(number_colour(object.head_locked), object, view),
             view,
         );
     }
 
-    let drop = Rgb::from_color32(theme::MUTED).lerp(Rgb::from_color32(theme::BORDER), 0.35);
+    let drop = receded(
+        Rgb::from_color32(theme::MUTED).lerp(Rgb::from_color32(theme::BORDER), 0.35),
+        object,
+        view,
+    );
     mesh.add_line(
         Layer::Line,
         [x, y - edge / 2.0, z],
@@ -278,7 +292,7 @@ fn add_object(
             params::FOOTPRINT_RING_POINTS,
             view,
         );
-        mesh.add_floor_mark(x, z, level_edge, FLOOR_Y, mark, view);
+        mesh.add_floor_mark(x, z, level_edge, FLOOR_Y, receded(mark, object, view), view);
     } else {
         mesh.add_floor_mark(x, z, gain_edge, FLOOR_Y, mark, view);
     }
@@ -435,6 +449,18 @@ fn face_label_point(
     ]
 }
 
+/// Push a colour toward the stage by how far an object has faded out.
+///
+/// The fade stops short of the ground: a persistently silent object is exactly
+/// the case the split footprint exists to expose, so it recedes to a ghost
+/// rather than vanishing. Applied on top of, not instead of, the gain-driven
+/// silent fade — one says the metadata asks for no level, the other says no
+/// level has arrived for a while, and they are different statements.
+fn receded(colour: Rgb, object: &SceneObject<'_>, view: &ViewContext) -> Rgb {
+    let missing = (1.0 - object.presence.clamp(0.0, 1.0)) * (1.0 - params::SILENT_PRESENCE_FLOOR);
+    colour.lerp(view.stage, missing)
+}
+
 /// An object's base colour: accent while it is audible, faded toward the stage
 /// once it drops below the silence floor. Fading toward the ground is the same
 /// recession air perspective uses, so silence does not need a second language.
@@ -513,7 +539,11 @@ fn add_trail(
         // trail a direction without needing an arrowhead.
         let freshness = f32::from(u16::try_from(index).unwrap_or(u16::MAX).saturating_add(1))
             / f32::from(count);
-        let faded = colour.lerp(view.stage, params::TRAIL_FADE * (1.0 - freshness));
+        let faded = receded(
+            colour.lerp(view.stage, params::TRAIL_FADE * (1.0 - freshness)),
+            object,
+            view,
+        );
         let mark = if show_loudness {
             edge * trail_loudness_scale(object.trail_loudness.get(index).copied())
         } else {
@@ -661,6 +691,7 @@ mod tests {
             active: true,
             gain: 1.0,
             loudness: 1.0,
+            presence: 1.0,
             head_locked: false,
             trail: &[],
             trail_jumps: &[],
@@ -720,6 +751,78 @@ mod tests {
         let grid = empty_decal_vertices();
         assert_eq!(plain.decal.len(), grid + 6);
         assert_eq!(split.decal.len(), grid + 6 + 4 * 6);
+    }
+
+    #[test]
+    fn a_faded_out_object_keeps_its_gain_ring_on_the_floor() {
+        // The load-bearing test for the fade. An object with full gain and no
+        // signal is *persistently silent*, so it is exactly the case the fade
+        // would hide — and exactly the fault the split footprint exists to
+        // expose. The ring has to survive the object it belongs to.
+        let object = SceneObject {
+            gain: 1.0,
+            loudness: 0.0,
+            presence: 0.0,
+            ..sounding([0.0, 0.0, 0.0])
+        };
+        let objects = [object];
+        let faded = with_input(SceneInput {
+            objects: &objects,
+            show_loudness: true,
+            ..SceneInput::default()
+        });
+        let present = with_input(SceneInput {
+            objects: &[SceneObject {
+                presence: 1.0,
+                ..object
+            }],
+            show_loudness: true,
+            ..SceneInput::default()
+        });
+        // Same decal geometry either way: the ring's four hairlines are emitted
+        // whatever the object's presence is.
+        assert_eq!(faded.decal.len(), present.decal.len());
+        assert!(faded.decal.len() > built(&[]).decal.len());
+    }
+
+    #[test]
+    fn presence_only_recedes_an_object_and_never_removes_its_geometry() {
+        let objects = [SceneObject {
+            presence: 0.0,
+            ..sounding([0.2, 0.1, -0.3])
+        }];
+        let faded = with_input(SceneInput {
+            objects: &objects,
+            show_element_numbers: true,
+            show_loudness: true,
+            ..SceneInput::default()
+        });
+        let present = with_input(SceneInput {
+            objects: &[SceneObject {
+                presence: 1.0,
+                ..objects[0]
+            }],
+            show_element_numbers: true,
+            show_loudness: true,
+            ..SceneInput::default()
+        });
+        // A ghost is still drawn: the vertex counts match and only the colours
+        // differ, so nothing about where the object is has been thrown away.
+        assert_eq!(faded.solid.len(), present.solid.len());
+        assert_eq!(faded.line.len(), present.line.len());
+        let positions_match = faded.solid.iter().zip(&present.solid).all(|(left, right)| {
+            left.position.map(f32::to_bits) == right.position.map(f32::to_bits)
+        });
+        let colours_differ = faded
+            .solid
+            .iter()
+            .zip(&present.solid)
+            .any(|(left, right)| left.colour != right.colour);
+        assert!(
+            positions_match,
+            "the fade moved geometry instead of tinting it"
+        );
+        assert!(colours_differ, "a fully faded object was drawn unchanged");
     }
 
     fn built(objects: &[SceneObject]) -> MeshBuilder {
