@@ -1682,12 +1682,12 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 [[package]]
 name = "macindecode-ac4-bitstream"
 version = "0.1.0"
-source = "git+https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git?rev=987605c5f964c6f630c389edb4258e80fc351c73#987605c5f964c6f630c389edb4258e80fc351c73"
+source = "git+https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git?rev=9673e1ef445e7e2ab218cc1b7b79f484fa92135f#9673e1ef445e7e2ab218cc1b7b79f484fa92135f"
 
 [[package]]
 name = "macindecode-ac4-decode"
 version = "0.1.0"
-source = "git+https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git?rev=987605c5f964c6f630c389edb4258e80fc351c73#987605c5f964c6f630c389edb4258e80fc351c73"
+source = "git+https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git?rev=9673e1ef445e7e2ab218cc1b7b79f484fa92135f#9673e1ef445e7e2ab218cc1b7b79f484fa92135f"
 dependencies = [
  "libm",
  "macindecode-ac4-bitstream",
@@ -1696,7 +1696,7 @@ dependencies = [
 [[package]]
 name = "macindecode-ac4-inspect"
 version = "0.1.0"
-source = "git+https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git?rev=987605c5f964c6f630c389edb4258e80fc351c73#987605c5f964c6f630c389edb4258e80fc351c73"
+source = "git+https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git?rev=9673e1ef445e7e2ab218cc1b7b79f484fa92135f#9673e1ef445e7e2ab218cc1b7b79f484fa92135f"
 dependencies = [
  "macindecode-ac4-bitstream",
  "macindecode-ac4-metadata",
@@ -1708,7 +1708,7 @@ dependencies = [
 [[package]]
 name = "macindecode-ac4-metadata"
 version = "0.1.0"
-source = "git+https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git?rev=987605c5f964c6f630c389edb4258e80fc351c73#987605c5f964c6f630c389edb4258e80fc351c73"
+source = "git+https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git?rev=9673e1ef445e7e2ab218cc1b7b79f484fa92135f#9673e1ef445e7e2ab218cc1b7b79f484fa92135f"
 dependencies = [
  "macindecode-ac4-bitstream",
  "macindecode-ac4-decode",
@@ -1717,7 +1717,7 @@ dependencies = [
 [[package]]
 name = "macindecode-ac4-mp4"
 version = "0.1.0"
-source = "git+https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git?rev=987605c5f964c6f630c389edb4258e80fc351c73#987605c5f964c6f630c389edb4258e80fc351c73"
+source = "git+https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git?rev=9673e1ef445e7e2ab218cc1b7b79f484fa92135f#9673e1ef445e7e2ab218cc1b7b79f484fa92135f"
 dependencies = [
  "macindecode-ac4-bitstream",
 ]
@@ -1747,7 +1747,7 @@ dependencies = [
 [[package]]
 name = "macindecode-ac4-scene"
 version = "0.1.0"
-source = "git+https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git?rev=987605c5f964c6f630c389edb4258e80fc351c73#987605c5f964c6f630c389edb4258e80fc351c73"
+source = "git+https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git?rev=9673e1ef445e7e2ab218cc1b7b79f484fa92135f#9673e1ef445e7e2ab218cc1b7b79f484fa92135f"
 dependencies = [
  "macindecode-ac4-bitstream",
  "macindecode-ac4-decode",
