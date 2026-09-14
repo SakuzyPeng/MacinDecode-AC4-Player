@@ -185,6 +185,20 @@ pub const NAMEPLATE_TEXT_POINTS: f32 = 11.0;
 pub const NAMEPLATE_PAD_POINTS: f32 = 6.0;
 /// Height of the level strip along the plate's bottom edge, in screen points.
 pub const NAMEPLATE_STRIP_POINTS: f32 = 3.0;
+
+/// The opacity a nameplate rests at once its object has fallen below the
+/// silence floor.
+///
+/// A plate reading `-∞` is the least informative thing on the stage: it is
+/// correct, it never changes, and at full strength it competes with the objects
+/// that are actually doing something. Stepping back is not the same as leaving,
+/// though — the fade switch decides that, and this is where a silent plate
+/// waits when the fade is off.
+///
+/// It is reached at the instant the readout itself turns to `-∞`, so the plate
+/// takes on no boundary it did not already have at that level.
+pub const NAMEPLATE_SILENT_ALPHA: f32 = 0.32;
+
 /// How long an object must stay below the silence floor before it starts
 /// fading out of the scene, in seconds.
 ///

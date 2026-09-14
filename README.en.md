@@ -89,19 +89,20 @@ objects and white numbers identify head-locked objects. Live counts for both ref
 With `LVL` enabled the floor footprint carries two readings instead of one: the hairline ring is the
 gain the metadata asks for, and the filled core is the level actually measured, both read on the same
 decibel scale. A wide ring around a small core is an object that was positioned and gained but has
-almost no signal in it — something gain alone cannot show. Loudness is measured before rendering,
-A small nameplate also floats above each object, reporting dBFS and nothing else: its width is
-fixed and the sign and digits each own a cell, so nothing shifts sideways as the level crosses
--10 dB. **Element numbers stay printed on the cube's
-six faces and never move with `LVL`** — identity uses the depth buffer, the readout uses the screen,
-and each has one home. Trail breadcrumbs are sized by the loudness recorded when each was taken. With **Fade persistently silent objects** enabled, an object with no signal
-for about two seconds fades out of the scene — its nameplate goes entirely, its cube recedes to a
+almost no signal in it — something gain alone cannot show. A small nameplate also floats above each
+object, reporting dBFS and nothing else: its width is fixed and the sign and digits each own a cell,
+so nothing shifts sideways as the level crosses -10 dB, and a plate that has dropped to `-∞` steps
+back to a dim that stays readable without crowding the view. **Element numbers stay printed on the
+cube's six faces and never move with `LVL`** — identity uses the depth buffer, the readout uses the
+screen, and each has one home. Trail breadcrumbs are sized by the loudness recorded when each was
+taken. With **Fade persistently silent objects** enabled, an object with no signal for about two
+seconds fades out of the scene — its nameplate goes from that dim to nothing, its cube recedes to a
 ghost — but **its gain ring stays on the floor**, because "full gain, empty track" is itself
 persistently silent and hiding the ring would hide the very fault worth seeing. Sound returning
-restores it at once. A grey `Silent` count above the scene says how many have faded out.
-Disabling fading restores objects immediately and hides the `Silent` count; switching LVL does not affect fading.
-Loudness is measured before rendering, K-weighted per ITU-R BS.1770, and cross-checked against the
-reference implementation in the tests.
+restores it at once. A grey `Silent` count above the scene says how many have faded out. Disabling
+fading keeps every object on screen and hides the `Silent` count, leaving a silent plate resting at
+its dim; switching `LVL` does not affect fading. Loudness is measured before rendering, K-weighted
+per ITU-R BS.1770, and cross-checked against the reference implementation in the tests.
 
 **For more detail:** **Details…** on the file card opens the bitstream details window, and the
 **`...`** button next to the scene heading opens diagnostics.

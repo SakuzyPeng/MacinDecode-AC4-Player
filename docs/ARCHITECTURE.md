@@ -161,14 +161,21 @@ MacinRender 路径的能量存在 `MetadataFrame` 里、**从 block 偏移 0 起
 不会被两次发布重复计入。
 
 **持续静音的对象会淡出**：`app::ObjectMeters` 另外记每个槽位连续低于静音底的秒数，
-保持约 2 秒后再用约 0.6 秒淡到零，导出一个 `presence`（0..1）。铭牌把它当不透明度用，所以会
-彻底消失；方块、编号、掉线和 trail 用它向 `STAGE` 再退一层，停在 `SILENT_PRESENCE_FLOOR`。
-**声音一回来立刻恢复**——消失可以慢，出现不能慢。
+保持约 2 秒后再用约 0.6 秒淡到零，导出一个 `presence`（0..1）。方块、编号、掉线和 trail 用它向
+`STAGE` 再退一层，停在 `SILENT_PRESENCE_FLOOR`。**声音一回来立刻恢复**——消失可以慢，出现不能慢。
+
+铭牌的不透明度由 `app::plate_alpha` 给出，是**两句话相乘**：电平一掉到静音底就退到
+`NAMEPLATE_SILENT_ALPHA`（说"这块牌没有东西可报了"，和读数变成 `−∞` 同一瞬间，不引入新的边界），
+`presence` 再决定它退多远——淡出开着就一路到零并跳过整块绘制，关着就停在那档暗色。
+所以"关掉淡出"恢复的是**对象**，不是让一块永远 `−∞` 的牌重新占满亮度。
 
 音频设置旁的 **Object visuals** 窗口统一提供编号、响度显示和持续静音淡出三个独立开关。
 `AppPreferences::fade_silent_objects` 默认开启，并沿用设置工作线程保存、恢复；旧设置缺少该字段时
-使用默认值。淡出和 Silent 计数仅受这个开关控制，不再依赖 `object_loudness`。
-关闭淡出时传给场景的 `presence` 固定为 1，测量和静音计时继续推进，重新开启时立即反映当前状态。
+使用默认值。淡出和 Silent 计数仅受这个开关控制，不再依赖 `object_loudness`——
+`ObjectMeters::drawn_presence` 只收淡出开关，签名里根本没有响度开关。
+关闭淡出时传给场景的 `presence` 固定为 1，但测量和静音计时继续推进，重新开启时立即反映当前状态
+（`app::turning_the_fade_off_restores_presence_without_stopping_the_silence_clock`）。
+三个开关的持久化往返由 `app::library_integration::the_object_visual_switches_survive_a_restart` 钉住。
 
 这个时钟**不在镜子里**：它依赖弹道和墙钟，是显示侧的状态，塞进音频侧构建的 `TrackingSummary`
 等于把 UI 计时器推回音频线程。场景上方那条统计条因此多出的"Silent"徽章也在 `app` 侧数，

@@ -662,6 +662,31 @@ fn pending_audio_settings_do_not_replace_committed_preferences() {
 }
 
 #[test]
+fn the_object_visual_switches_survive_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut app, context) = open(dir.path());
+    settle(&mut app, &context);
+    // All three ship on, so each one has to be flipped for the assertions below
+    // to mean that a value made the round trip rather than that a default
+    // happened to agree with it.
+    assert!(app.object_numbers_visible);
+    assert!(app.object_loudness_visible);
+    assert!(app.fade_silent_objects);
+    app.object_numbers_visible = false;
+    app.object_loudness_visible = false;
+    app.fade_silent_objects = false;
+    app.flush_persistence();
+    app.library.shutdown();
+    drop(app);
+
+    let (mut restored, context) = open(dir.path());
+    settle(&mut restored, &context);
+    assert!(!restored.object_numbers_visible);
+    assert!(!restored.object_loudness_visible);
+    assert!(!restored.fade_silent_objects);
+}
+
+#[test]
 fn retry_keeps_the_error_until_pending_preferences_are_actually_saved() {
     let dir = tempfile::tempdir().unwrap();
     let (mut app, context) = open(dir.path());

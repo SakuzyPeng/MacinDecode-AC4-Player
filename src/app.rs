@@ -232,6 +232,19 @@ impl ObjectMeters {
         (remaining / scene3d::params::SILENCE_FADE_SECONDS).clamp(0.0, 1.0)
     }
 
+    /// Presence as the scene should draw it, given the fade switch.
+    ///
+    /// With the fade off every object is fully present, but the clock
+    /// underneath keeps running: the switch decides what is *drawn*, never what
+    /// is measured, so turning it back on shows the state the objects are
+    /// actually in instead of restarting every hold from zero. It is also
+    /// deliberately blind to whether the loudness readout is on — that is a
+    /// third, independent switch, and an object worth hiding is worth hiding
+    /// whether or not its level is being printed.
+    fn drawn_presence(&self, slot: usize, fading: bool) -> f32 {
+        if fading { self.presence(slot) } else { 1.0 }
+    }
+
     /// Slots that have faded out completely.
     fn faded_out(&self, objects: usize) -> usize {
         (0..objects.min(crate::scene_view::MAX_VIEW_OBJECTS))
@@ -246,6 +259,24 @@ fn loudness_fraction(loudness: f32) -> f32 {
     let quiet =
         (loudness.max(0.0).log10() / scene3d::params::OBJECT_SILENT_GAIN.log10()).clamp(0.0, 1.0);
     1.0 - quiet
+}
+
+/// A nameplate's opacity: the dim it rests at, scaled by how present it is.
+///
+/// Two statements, deliberately kept apart. Dropping to
+/// [`NAMEPLATE_SILENT_ALPHA`](scene3d::params::NAMEPLATE_SILENT_ALPHA) says
+/// "this readout has nothing left to report", and happens the moment the level
+/// crosses the floor — the same instant the digits themselves turn to `-∞`.
+/// Presence then says how long that has been true, and takes the plate the rest
+/// of the way: to nothing while the fade is switched on, or no further than the
+/// dim while it is off.
+fn plate_alpha(silent: bool, presence: f32) -> f32 {
+    let rest = if silent {
+        scene3d::params::NAMEPLATE_SILENT_ALPHA
+    } else {
+        1.0
+    };
+    rest * presence.clamp(0.0, 1.0)
 }
 
 /// A theme colour at a given opacity.
@@ -1806,11 +1837,9 @@ impl PlayerApp {
                     active: object.active,
                     gain: object.gain,
                     loudness: levels.get(slot).copied().unwrap_or(0.0),
-                    presence: if self.fade_silent_objects {
-                        self.object_meters.presence(slot)
-                    } else {
-                        1.0
-                    },
+                    presence: self
+                        .object_meters
+                        .drawn_presence(slot, self.fade_silent_objects),
                     head_locked: object.tracking.head_locked(),
                     trail: mirrored.trail(slot),
                     trail_jumps: mirrored.trail_jumps(slot),
@@ -1928,15 +1957,16 @@ impl PlayerApp {
                 ],
                 stage,
             );
-            // The plate takes presence as a plain opacity, so it leaves
-            // altogether rather than resting at some low alpha: a readout that
-            // says nothing but -∞ forever is what crowds the view, and the
-            // count above the stage is where that object is accounted for now.
-            let alpha = object.presence.clamp(0.0, 1.0);
+            // A plate that says nothing but -∞ forever is what crowds the
+            // view, so it steps back as soon as it has nothing to report and,
+            // once the fade has carried it all the way out, is not laid out at
+            // all. The count above the stage is where that object is accounted
+            // for from then on.
+            let silent = object.loudness < scene3d::params::OBJECT_SILENT_GAIN;
+            let alpha = plate_alpha(silent, object.presence);
             if alpha <= 0.0 {
                 continue;
             }
-            let silent = object.loudness < scene3d::params::OBJECT_SILENT_GAIN;
             let plate = egui::Rect::from_min_size(
                 egui::pos2(anchor.x - plate_width / 2.0, anchor.y - plate_height),
                 egui::vec2(plate_width, plate_height),
@@ -3599,6 +3629,49 @@ mod tests {
         meters.silent_for[5] = gone;
         assert_eq!(meters.faded_out(4), 2);
         assert_eq!(meters.faded_out(6), 3);
+    }
+
+    #[test]
+    fn turning_the_fade_off_restores_presence_without_stopping_the_silence_clock() {
+        let mut meters = ObjectMeters::default();
+        meters.silent_for[0] =
+            scene3d::params::SILENCE_HOLD_SECONDS + scene3d::params::SILENCE_FADE_SECONDS;
+        assert!(meters.drawn_presence(0, true).abs() < f32::EPSILON);
+
+        // Switching the fade off is a drawing decision, so the object is back
+        // at once and at full strength.
+        assert!((meters.drawn_presence(0, false) - 1.0).abs() < f32::EPSILON);
+
+        // The clock it came back from is still running underneath, so switching
+        // the fade on again finds the object where it actually is instead of
+        // handing it a fresh hold. Nothing here reads the loudness switch: the
+        // readout and the fade are separate controls.
+        assert!(meters.presence(0).abs() < f32::EPSILON);
+        assert!(meters.drawn_presence(0, true).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn a_silent_nameplate_rests_at_a_dim_of_its_own_and_only_the_fade_takes_it_away() {
+        // A plate with something to report is at full strength, however long
+        // its object has been playing.
+        assert!((plate_alpha(false, 1.0) - 1.0).abs() < f32::EPSILON);
+
+        // With the fade off, presence is pinned at 1.0, so this is where a plate
+        // reading -∞ spends the entire session. It has to be a step back rather
+        // than a disappearance: the readout is still correct, it just has
+        // nothing left to say.
+        let resting = plate_alpha(true, 1.0);
+        assert!(
+            (resting - scene3d::params::NAMEPLATE_SILENT_ALPHA).abs() < f32::EPSILON,
+            "a silent plate rested at {resting}"
+        );
+        assert!(resting > 0.0, "resting is a dim, not a disappearance");
+
+        // With the fade on, the same dim is only where the plate starts. Only
+        // presence takes it to nothing, which is where the draw loop stops
+        // laying it out at all.
+        assert!(plate_alpha(true, 0.5) < resting);
+        assert!(plate_alpha(true, 0.0).abs() < f32::EPSILON);
     }
 
     #[test]

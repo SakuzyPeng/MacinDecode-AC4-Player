@@ -252,11 +252,15 @@ two sites the trails do — key change, and a slot changing element or reference
 How long an object has been silent is *not* in the mirror: that clock depends on the ballistics and
 on wall time, both of which live in `app::ObjectMeters`, and putting a display timer into a summary
 the audio side builds would push UI state back onto the audio thread. `ObjectMeters::presence` turns
-it into one number — the nameplate takes it as an opacity and disappears, the cube uses it to recede
-and stops at `SILENT_PRESENCE_FLOOR`. **The gain ring never fades**: an object with full gain and an
-empty track is itself persistently silent, so fading the ring would hide the exact fault the split
-footprint exists to expose. `scene3d::scene::a_faded_out_object_keeps_its_gain_ring_on_the_floor`
-pins that; keep it passing.
+it into one number — the cube uses it to recede and stops at `SILENT_PRESENCE_FLOOR`, and the
+nameplate multiplies it into `app::plate_alpha`, whose other half is the dim a plate steps back to
+the instant its readout turns to `-∞`. Whether it recedes at all is a third switch,
+`fade_silent_objects`, independent of the loudness readout: `ObjectMeters::drawn_presence` takes
+that one and no other, and the silence clock keeps running while it is off so switching it back on
+finds each object where it is rather than restarting its hold. **The gain ring never fades**: an
+object with full gain and an empty track is itself persistently silent, so fading the ring would hide
+the exact fault the split footprint exists to expose.
+`scene3d::scene::a_faded_out_object_keeps_its_gain_ring_on_the_floor` pins that; keep it passing.
 
 Per-object loudness is not a standardised quantity (BS.1770 is defined over a channel-based
 programme; object audio is measured by rendering to a reference layout first). The arithmetic is
