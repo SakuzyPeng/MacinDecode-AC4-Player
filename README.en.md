@@ -104,6 +104,18 @@ fading keeps every object on screen and hides the `Silent` count, leaving a sile
 its dim; switching `LVL` does not affect fading. Loudness is measured before rendering, K-weighted
 per ITU-R BS.1770, and cross-checked against the reference implementation in the tests.
 
+**The meter bank** is the fourth switch in **Object visuals**, and the only one that is off by
+default because it is the only one that takes width from the scene. It opens a strip to the right of
+the 3D view with one row per object: the level as a bar, the gain the metadata asked for as a tick on
+the same scale, a peak marker that holds and then slides, and a red segment at full scale when a
+sample clipped. A fill far short of the tick is that "positioned, gained, and nothing in the track"
+case again, read exactly rather than by eye. The button in its header switches the unit between
+`dBFS` — the same fast reading the scene draws — and `LUFS-M`, the ITU-R BS.1770 momentary loudness
+over the full 400 ms window, which is the standard's own quantity and carries no meter ballistics.
+Clipping is the one reading that is not weighted at all, because a converter does not clip according
+to a model of hearing. The bank answers which objects are sounding and by how much; the scene answers
+where they are. Neither is a smaller copy of the other.
+
 **For more detail:** **Details…** on the file card opens the bitstream details window, and the
 **`...`** button next to the scene heading opens diagnostics.
 

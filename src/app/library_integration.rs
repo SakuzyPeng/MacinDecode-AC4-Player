@@ -105,6 +105,8 @@ impl PlayerApp {
                     self.object_numbers_visible = self.preferences.object_numbers;
                     self.object_loudness_visible = self.preferences.object_loudness;
                     self.fade_silent_objects = self.preferences.fade_silent_objects;
+                    self.meter_bank_open = self.preferences.meter_bank;
+                    self.meter_readout = self.preferences.meter_readout;
                     self.preferences_observed = self.preferences.clone();
                     self.cursor.clone_from(&session.cursor);
                     self.checkpoint = session.clone();
@@ -552,6 +554,8 @@ impl PlayerApp {
         prefs.object_numbers = self.object_numbers_visible;
         prefs.object_loudness = self.object_loudness_visible;
         prefs.fade_silent_objects = self.fade_silent_objects;
+        prefs.meter_bank = self.meter_bank_open;
+        prefs.meter_readout = self.meter_readout;
         prefs
     }
     fn save_checkpoint(&mut self) {

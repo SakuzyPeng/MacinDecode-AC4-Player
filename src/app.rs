@@ -6,6 +6,7 @@ use std::task::{Context, Poll, Wake, Waker};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use eframe::egui::{self, Align, Align2, Color32, Layout, RichText, Stroke};
+use serde::{Deserialize, Serialize};
 
 use crate::backend::{
     OutputDeviceSelection, OutputPhase, OutputSettings, OutputSnapshot, OutputStreamConfig,
@@ -89,6 +90,10 @@ pub struct PlayerApp {
     object_loudness_visible: bool,
     /// Whether sustained silence dims objects, independently of loudness display.
     fade_silent_objects: bool,
+    /// Whether the meter bank occupies a strip to the right of the scene.
+    meter_bank_open: bool,
+    /// Which quantity that strip reads out.
+    meter_readout: MeterReadout,
     /// Meter ballistics, the one part of the loudness picture that depends on
     /// time rather than on the current frame.
     object_meters: ObjectMeters,
@@ -137,15 +142,123 @@ fn object_display_number(slot: usize) -> u64 {
 struct ObjectMeters {
     /// Linear level per slot, after attack and release.
     level: [f32; crate::scene_view::MAX_VIEW_OBJECTS],
+    /// The momentary loudness of the same slot as a linear RMS: the whole
+    /// 400 ms ring, with no ballistics at all.
+    ///
+    /// Ballistics are a feel, and BS.1770's momentary loudness is a
+    /// measurement — putting an attack and a release on it would make it a
+    /// different quantity that merely resembled the standard's. The bank draws
+    /// this one exactly as measured and lets the fast meter above be the one
+    /// that moves.
+    momentary: [f32; crate::scene_view::MAX_VIEW_OBJECTS],
     /// How long each slot has been continuously below the silence floor, in
     /// seconds. Reset to zero the instant a level comes back, because coming
     /// back is what the view exists to show: only the disappearance is allowed
     /// to take time.
     silent_for: [f32; crate::scene_view::MAX_VIEW_OBJECTS],
+    /// Peak markers for both readings, kept in step whichever one is on screen
+    /// so that switching the bank's unit does not make a marker lurch.
+    peaks: [[PeakHold; crate::scene_view::MAX_VIEW_OBJECTS]; 2],
+    /// Seconds of clip indication still owed to each slot.
+    clip_held: [f32; crate::scene_view::MAX_VIEW_OBJECTS],
     /// The playback these levels belong to. A superseded one starts silent
     /// rather than releasing from the previous stream's last reading.
     key: Option<crate::decoder::PlaybackKey>,
     last_advanced: Option<Instant>,
+}
+
+/// Which quantity the meter bank reads out.
+///
+/// Both are measured from the same K-weighted energy the mirror carries; they
+/// differ in how much of it they take, and that is not a detail. The fast meter
+/// answers "is this object making a sound right now", the momentary one answers
+/// "how loud is it, by the standard's definition" — and the second question has
+/// an answer that other tools can be held to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum MeterReadout {
+    /// The `METER_WINDOW_MILLISECONDS` meter with attack and release, the same
+    /// reading the scene draws. Reported as dBFS.
+    #[default]
+    Fast,
+    /// BS.1770 momentary loudness: the whole 400 ms window, unballistic.
+    /// Reported as LUFS-M.
+    Momentary,
+}
+
+impl MeterReadout {
+    /// The unit this reads in, which is also the button's whole label.
+    const fn unit(self) -> &'static str {
+        match self {
+            Self::Fast => "dBFS",
+            Self::Momentary => "LUFS-M",
+        }
+    }
+    const fn description(self) -> &'static str {
+        match self {
+            Self::Fast => {
+                "dBFS, a 30 ms window with meter ballistics — the same reading the scene draws."
+            }
+            Self::Momentary => {
+                "LUFS-M, the BS.1770 momentary loudness: the full 400 ms window, unballistic."
+            }
+        }
+    }
+    const fn other(self) -> Self {
+        match self {
+            Self::Fast => Self::Momentary,
+            Self::Momentary => Self::Fast,
+        }
+    }
+    /// Index into `ObjectMeters::peaks`.
+    const fn lane(self) -> usize {
+        match self {
+            Self::Fast => 0,
+            Self::Momentary => 1,
+        }
+    }
+    /// The decibel offset from a K-weighted mean square to this unit.
+    ///
+    /// BS.1770-4 defines loudness as `-0.691 + 10*log10(mean square)`; the
+    /// scene's dBFS reading is the same mean square without that offset. Naming
+    /// the difference here is what keeps the two columns from being quietly
+    /// the same number under two labels.
+    const fn offset_decibels(self) -> f32 {
+        match self {
+            Self::Fast => 0.0,
+            Self::Momentary => -0.691,
+        }
+    }
+}
+
+/// A meter's peak marker: hold it still, then let it fall.
+#[derive(Debug, Clone, Copy, Default)]
+struct PeakHold {
+    level: f32,
+    held_for: f32,
+}
+
+impl PeakHold {
+    /// Take a new reading `elapsed` seconds after the last one.
+    fn advance(&mut self, level: f32, elapsed: f32) {
+        if level >= self.level {
+            self.level = level;
+            self.held_for = 0.0;
+            return;
+        }
+        self.held_for += elapsed;
+        // Only the part of this step that lands past the hold counts as fall
+        // time. Charging the whole step would make the first frame after a long
+        // hold drop the marker by the length of the hold.
+        let falling = (self.held_for - scene3d::params::PEAK_HOLD_SECONDS).min(elapsed);
+        if falling <= 0.0 {
+            return;
+        }
+        // A fixed number of decibels per second, so the slide looks the same
+        // wherever on the scale it starts. Never below the live level, which
+        // would put the marker inside the bar it is supposed to lead.
+        let fall = 10.0_f32.powf(-scene3d::params::PEAK_FALL_DECIBELS_PER_SECOND * falling / 20.0);
+        self.level = (self.level * fall).max(level);
+    }
 }
 
 impl ObjectMeters {
@@ -159,10 +272,15 @@ impl ObjectMeters {
     ) {
         if self.key != Some(key) {
             self.level = [0.0; crate::scene_view::MAX_VIEW_OBJECTS];
+            self.momentary = [0.0; crate::scene_view::MAX_VIEW_OBJECTS];
             // A fresh playback starts fully present rather than inheriting the
             // previous stream's silence: nothing has been measured yet, and
             // "not measured" is not "quiet".
             self.silent_for = [0.0; crate::scene_view::MAX_VIEW_OBJECTS];
+            // Peaks and clips are statements about audio that was played. None
+            // of it belongs to the stream that starts here.
+            self.peaks = [[PeakHold::default(); crate::scene_view::MAX_VIEW_OBJECTS]; 2];
+            self.clip_held = [0.0; crate::scene_view::MAX_VIEW_OBJECTS];
             self.key = Some(key);
             self.last_advanced = None;
         }
@@ -172,38 +290,61 @@ impl ObjectMeters {
         self.last_advanced = Some(now);
 
         let window = window_frames(sample_rate);
-        for (slot, level) in self.level.iter_mut().enumerate() {
-            let (mean_square, frames) = frame.mean_square(slot, window);
+        let momentary_window = momentary_window_frames(sample_rate);
+        for slot in 0..crate::scene_view::MAX_VIEW_OBJECTS {
             // No audio measured yet is not the same as silence: leave the
             // meter where it is rather than releasing from a reading that was
             // never taken.
-            let target = if frames == 0 {
-                *level
-            } else {
-                #[allow(
-                    clippy::cast_possible_truncation,
-                    reason = "a mean square is a display value; f32 carries it well past the -36 dB floor"
-                )]
-                let target = mean_square.sqrt() as f32;
-                target
-            };
-            let tau = if target > *level {
+            let mut level = self.level[slot];
+            let target = root_mean_square(frame.mean_square(slot, window)).unwrap_or(level);
+            let tau = if target > level {
                 scene3d::params::METER_ATTACK_MILLISECONDS
             } else {
                 scene3d::params::METER_RELEASE_MILLISECONDS
             };
             // The same one-pole form the head tracker eases with.
             let alpha = 1.0 - (-elapsed * 1000.0 / tau).exp();
-            *level += (target - *level) * alpha.clamp(0.0, 1.0);
+            level += (target - level) * alpha.clamp(0.0, 1.0);
+            self.level[slot] = level;
 
-            if let Some(silent_for) = self.silent_for.get_mut(slot) {
-                if *level < scene3d::params::OBJECT_SILENT_GAIN {
-                    *silent_for += elapsed;
-                } else {
-                    *silent_for = 0.0;
-                }
+            if level < scene3d::params::OBJECT_SILENT_GAIN {
+                self.silent_for[slot] += elapsed;
+            } else {
+                self.silent_for[slot] = 0.0;
+            }
+
+            // The momentary reading takes the whole ring and no ballistics, so
+            // "not measured yet" is the only state it has to hold through.
+            if let Some(momentary) = root_mean_square(frame.mean_square(slot, momentary_window)) {
+                self.momentary[slot] = momentary;
+            }
+            let momentary = self.momentary[slot];
+            self.peaks[MeterReadout::Fast.lane()][slot].advance(level, elapsed);
+            self.peaks[MeterReadout::Momentary.lane()][slot].advance(momentary, elapsed);
+
+            // Clipping is about the samples the renderer was handed, not about
+            // how loud they sounded, so it reads the unweighted peak and keeps
+            // a clock of its own.
+            if frame.sample_peak(slot) >= 1.0 {
+                self.clip_held[slot] = scene3d::params::CLIP_HOLD_SECONDS;
+            } else {
+                self.clip_held[slot] = (self.clip_held[slot] - elapsed).max(0.0);
             }
         }
+    }
+
+    /// What the bank should draw for `slot`: the reading, its peak marker and
+    /// whether the object clipped recently.
+    fn bank_row(&self, slot: usize, readout: MeterReadout) -> (f32, f32, bool) {
+        let level = match readout {
+            MeterReadout::Fast => self.level[slot],
+            MeterReadout::Momentary => self.momentary[slot],
+        };
+        (
+            level,
+            self.peaks[readout.lane()][slot].level,
+            self.clip_held[slot] > 0.0,
+        )
     }
 
     /// Linear level per slot, as the meter currently reads it.
@@ -261,6 +402,114 @@ fn loudness_fraction(loudness: f32) -> f32 {
     1.0 - quiet
 }
 
+/// One meter row's track: the level, the gain it was asked for, the peak
+/// marker and a clip.
+fn draw_meter_track(
+    painter: &egui::Painter,
+    track: egui::Rect,
+    level: f32,
+    gain: f32,
+    peak: f32,
+    clipped: bool,
+) {
+    /// The sliver of track at full scale that a clip lights up.
+    const CLIP_SEGMENT: f32 = 3.0;
+
+    painter.rect_filled(track, 1.0, theme::HOVER);
+    let filled = track.width() * loudness_fraction(level);
+    painter.rect_filled(
+        egui::Rect::from_min_size(track.min, egui::vec2(filled, track.height())),
+        1.0,
+        theme::ACCENT,
+    );
+    // Gain on the same scale as the level, which is the whole point of putting
+    // them on one track: a fill far short of the tick is an object that was
+    // positioned and gained and has nothing in its track.
+    let gain_x = track.left() + track.width() * loudness_fraction(gain);
+    painter.line_segment(
+        [
+            egui::pos2(gain_x, track.top()),
+            egui::pos2(gain_x, track.bottom()),
+        ],
+        Stroke::new(1.0, theme::MUTED),
+    );
+    if peak > 0.0 {
+        let peak_x = track.left() + track.width() * loudness_fraction(peak);
+        painter.line_segment(
+            [
+                egui::pos2(peak_x, track.top()),
+                egui::pos2(peak_x, track.bottom()),
+            ],
+            Stroke::new(1.5, theme::INK),
+        );
+    }
+    if clipped {
+        // At the right end, because that is where full scale is.
+        painter.rect_filled(
+            egui::Rect::from_min_size(
+                egui::pos2(track.right() - CLIP_SEGMENT, track.top()),
+                egui::vec2(CLIP_SEGMENT, track.height()),
+            ),
+            1.0,
+            theme::WARNING,
+        );
+    }
+}
+
+/// What a meter row says when the pointer rests on it: the things the row draws
+/// as marks rather than as numbers.
+fn meter_row_tooltip(
+    slot: usize,
+    object: &crate::scene_view::ObjectView,
+    peak: f32,
+    clipped: bool,
+    readout: MeterReadout,
+) -> String {
+    let floor = scene3d::params::OBJECT_SILENT_GAIN;
+    let (peak_sign, peak_magnitude) =
+        decibel_cells((peak >= floor).then(|| readout_decibels(peak, readout)));
+    let (gain_sign, gain_magnitude) = decibel_cells(
+        (object.gain >= floor).then(|| readout_decibels(object.gain, MeterReadout::Fast)),
+    );
+    format!(
+        "Object {} · element {}\npeak {}{} {} · gain {}{} dB{}",
+        object_display_number(slot),
+        object.element_id,
+        peak_sign.trim(),
+        peak_magnitude,
+        readout.unit(),
+        gain_sign.trim(),
+        gain_magnitude,
+        if clipped {
+            "\nclipped: a sample reached full scale"
+        } else {
+            ""
+        }
+    )
+}
+
+/// A linear level in decibels, on the unit `readout` reads in.
+fn readout_decibels(level: f32, readout: MeterReadout) -> f32 {
+    20.0f32.mul_add(level.max(0.0).log10(), readout.offset_decibels())
+}
+
+/// The two cells a decibel readout occupies: a sign and a magnitude.
+///
+/// `None` is the silence floor, which has no finite reading. The nameplate and
+/// the meter bank both lay the result out the same way — the sign owns one
+/// cell, the magnitude is right-aligned against the last — so the same level
+/// reads character for character the same in both places, and a reader
+/// comparing the two is comparing values rather than typography.
+fn decibel_cells(decibels: Option<f32>) -> (&'static str, String) {
+    match decibels {
+        None => ("−", "∞".to_owned()),
+        // Just under zero is still zero once rounded, and "−0.0" reads as a
+        // fault rather than as full scale.
+        Some(value) if value > -0.05 => (" ", format!("{:.1}", value.abs())),
+        Some(value) => ("−", format!("{:.1}", value.abs())),
+    }
+}
+
 /// A nameplate's opacity: the dim it rests at, scaled by how present it is.
 ///
 /// Two statements, deliberately kept apart. Dropping to
@@ -291,6 +540,30 @@ fn fade(colour: Color32, alpha: f32) -> Color32 {
 }
 
 /// Frames the fast meter averages before the ballistics see them.
+/// A mean square from the mirror as a linear RMS, or `None` when the window
+/// carried no audio at all — which is not the same as measuring silence.
+fn root_mean_square((mean_square, frames): (f64, u32)) -> Option<f32> {
+    if frames == 0 {
+        return None;
+    }
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "a mean square is a display value; f32 carries it well past the -36 dB floor"
+    )]
+    let rms = mean_square.sqrt() as f32;
+    Some(rms)
+}
+
+/// The BS.1770 momentary window in frames, which is the mirror's whole ring.
+///
+/// Derived from the ring rather than restated as milliseconds: the ring was
+/// sized to be exactly this window, and a second definition of the same 400 ms
+/// is a second thing to keep in step.
+fn momentary_window_frames(sample_rate: u32) -> u32 {
+    let bins = u32::try_from(crate::scene_view::LOUDNESS_BINS).unwrap_or(u32::MAX);
+    crate::scene_view::loudness_bin_frames(sample_rate).saturating_mul(bins)
+}
+
 fn window_frames(sample_rate: u32) -> u32 {
     (u64::from(sample_rate) * u64::from(scene3d::params::METER_WINDOW_MILLISECONDS) / 1000)
         .try_into()
@@ -575,6 +848,8 @@ impl PlayerApp {
             object_numbers_visible: true,
             object_loudness_visible: true,
             fade_silent_objects: true,
+            meter_bank_open: false,
+            meter_readout: MeterReadout::default(),
             object_meters: ObjectMeters::default(),
             figure: scene3d::figure::Figure::default(),
             scene_mesh: scene3d::mesh::MeshBuilder::default(),
@@ -1531,8 +1806,230 @@ impl PlayerApp {
                         .small()
                         .color(theme::MUTED),
                 );
+                ui.separator();
+                ui.checkbox(&mut self.meter_bank_open, "Meter bank (side panel)")
+                    .on_hover_text(
+                        "A row per object beside the scene: level, the gain the metadata asks for, a peak marker and clipping.",
+                    );
+                ui.label(
+                    RichText::new("Off by default because it takes width from the scene; the measurement runs either way.")
+                        .small()
+                        .color(theme::MUTED),
+                );
             });
         self.object_visual_settings_open = open;
+    }
+
+    /// The meter bank: one row per object, beside the scene rather than in it.
+    ///
+    /// The scene answers "where is the sound", and everything it draws has to
+    /// survive being rotated, occluded and shared with nineteen other objects.
+    /// This panel answers the questions that do not fit in there — exactly how
+    /// loud, how loud was the peak, did it clip, and how does the level compare
+    /// with the gain the metadata asked for — by giving up position entirely
+    /// and taking a fixed row instead. Neither view is a smaller copy of the
+    /// other.
+    ///
+    /// It is off by default: it costs the scene 240 points of width, which on a
+    /// narrow window is the difference between a room and a corridor. The
+    /// measurement itself runs regardless, so opening the panel mid-stream
+    /// shows the objects as they are rather than starting from nothing.
+    fn draw_meter_bank(
+        &mut self,
+        root: &mut egui::Ui,
+        mirror_frame: Option<&crate::scene_view::SceneViewFrame>,
+    ) {
+        if !self.meter_bank_open {
+            return;
+        }
+        let readout = self.meter_readout;
+        egui::Panel::right("meter-bank")
+            .exact_size(240.0)
+            .resizable(false)
+            .frame(
+                egui::Frame::NONE
+                    .fill(theme::SURFACE)
+                    .stroke(Stroke::new(1.0, theme::BORDER))
+                    .inner_margin(egui::Margin::same(18)),
+            )
+            .show(root, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("METER BANK")
+                            .size(10.0)
+                            .strong()
+                            .color(theme::MUTED),
+                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        // The unit is the whole button: there are two of them,
+                        // and the one not shown is the one a click gives you.
+                        if ui
+                            .add_sized(
+                                [58.0, 22.0],
+                                egui::Button::new(
+                                    RichText::new(readout.unit())
+                                        .size(10.0)
+                                        .strong()
+                                        .color(theme::TEXT),
+                                ),
+                            )
+                            .on_hover_text(format!(
+                                "Showing {}\n\nClick for {}",
+                                readout.description(),
+                                readout.other().description()
+                            ))
+                            .clicked()
+                        {
+                            self.meter_readout = readout.other();
+                        }
+                    });
+                });
+                // Both ends of the scale, in the unit on screen and through the
+                // same two functions the rows use, so the legend cannot come to
+                // describe a scale the bars are not drawn on.
+                let (floor_sign, floor) = decibel_cells(Some(readout_decibels(
+                    scene3d::params::OBJECT_SILENT_GAIN,
+                    readout,
+                )));
+                let (top_sign, top) = decibel_cells(Some(readout_decibels(1.0, readout)));
+                // Two lines on purpose. Left to wrap on its own this breaks in
+                // the middle of "line = peak", which reads as three marks named
+                // badly rather than as a scale and a key.
+                ui.label(
+                    RichText::new(format!(
+                        "{}{floor} → {}{top} {}",
+                        floor_sign.trim(),
+                        top_sign.trim(),
+                        readout.unit(),
+                    ))
+                    .size(10.0)
+                    .color(theme::MUTED),
+                );
+                ui.label(
+                    RichText::new("tick = gain · line = peak · red = clip")
+                        .size(10.0)
+                        .color(theme::MUTED),
+                );
+                ui.add_space(10.0);
+
+                let objects =
+                    mirror_frame.map_or(&[][..], crate::scene_view::SceneViewFrame::objects);
+                if objects.is_empty() {
+                    ui.label(
+                        RichText::new("Nothing playing")
+                            .size(11.0)
+                            .color(theme::MUTED),
+                    );
+                    return;
+                }
+                self.draw_meter_rows(ui, objects, readout);
+                let hidden =
+                    mirror_frame.map_or(0, crate::scene_view::SceneViewFrame::hidden_objects);
+                if hidden > 0 {
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new(format!("+{hidden} beyond the view limit"))
+                            .size(10.0)
+                            .color(theme::MUTED),
+                    );
+                }
+            });
+    }
+
+    /// One row per object: number, track, readout.
+    fn draw_meter_rows(
+        &self,
+        ui: &mut egui::Ui,
+        objects: &[crate::scene_view::ObjectView],
+        readout: MeterReadout,
+    ) {
+        /// Row pitch in points. Twenty of them plus the header fit a laptop
+        /// window without scrolling.
+        const ROW_HEIGHT: f32 = 18.0;
+        /// Width reserved for the row number, wide enough for two digits.
+        const NUMBER_CELL: f32 = 16.0;
+        const GAP: f32 = 8.0;
+
+        let font = egui::FontId::monospace(scene3d::params::NAMEPLATE_TEXT_POINTS);
+        let measure = |text: String| {
+            ui.painter()
+                .layout_no_wrap(text, font.clone(), theme::TEXT)
+                .rect
+                .width()
+        };
+        // Measured from the widest readout the scale can produce, exactly as
+        // the nameplate is, so the two columns of digits line up.
+        let cell = measure("0".to_owned());
+        let readout_width = measure("0".repeat(scene3d::params::NAMEPLATE_CELLS));
+
+        for (slot, object) in objects.iter().enumerate() {
+            let (level, peak, clipped) = self.object_meters.bank_row(slot, readout);
+            let (rect, response) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width(), ROW_HEIGHT),
+                egui::Sense::hover(),
+            );
+            let silent = level < scene3d::params::OBJECT_SILENT_GAIN;
+            let decibels = readout_decibels(level, readout);
+            let (sign, magnitude) = decibel_cells((!silent).then_some(decibels));
+
+            let painter = ui.painter();
+            painter.text(
+                egui::pos2(rect.left() + NUMBER_CELL, rect.center().y),
+                Align2::RIGHT_CENTER,
+                object_display_number(slot).to_string(),
+                font.clone(),
+                // An inactive element has metadata the renderer would not
+                // spatialize; its level is still real, its identity is not.
+                if object.active {
+                    theme::TEXT
+                } else {
+                    theme::MUTED
+                },
+            );
+
+            let track = egui::Rect::from_min_max(
+                egui::pos2(rect.left() + NUMBER_CELL + GAP, rect.top() + 3.0),
+                egui::pos2(rect.right() - readout_width - GAP, rect.bottom() - 3.0),
+            );
+            draw_meter_track(painter, track, level, object.gain, peak, clipped);
+
+            let colour = if clipped {
+                theme::WARNING
+            } else if silent {
+                theme::MUTED
+            } else {
+                theme::TEXT
+            };
+            painter.text(
+                egui::pos2(rect.right() - readout_width, rect.center().y),
+                Align2::LEFT_CENTER,
+                sign,
+                font.clone(),
+                colour,
+            );
+            // Infinity has no decimal point to align, so it sits against the
+            // sign instead of against the last cell — the same rule the
+            // nameplate follows, for the same reason.
+            if silent {
+                painter.text(
+                    egui::pos2(rect.right() - readout_width + cell, rect.center().y),
+                    Align2::LEFT_CENTER,
+                    magnitude,
+                    font.clone(),
+                    colour,
+                );
+            } else {
+                painter.text(
+                    egui::pos2(rect.right(), rect.center().y),
+                    Align2::RIGHT_CENTER,
+                    magnitude,
+                    font.clone(),
+                    colour,
+                );
+            }
+
+            response.on_hover_text(meter_row_tooltip(slot, object, peak, clipped, readout));
+        }
     }
 
     fn draw_source_sidebar(&mut self, root: &mut egui::Ui) {
@@ -1696,7 +2193,11 @@ impl PlayerApp {
         }
     }
 
-    fn draw_scene(&mut self, root: &mut egui::Ui) {
+    fn draw_scene(
+        &mut self,
+        root: &mut egui::Ui,
+        mirror_frame: Option<&crate::scene_view::SceneViewFrame>,
+    ) {
         let decoder = self.decoder.snapshot().clone();
         egui::CentralPanel::default()
             .frame(
@@ -1729,7 +2230,7 @@ impl PlayerApp {
                 self.draw_tracking_status(ui);
 
                 ui.add_space(16.0);
-                self.draw_stage(ui, &decoder);
+                self.draw_stage(ui, &decoder, mirror_frame);
             });
     }
 
@@ -1777,34 +2278,19 @@ impl PlayerApp {
     /// no seam, and it deliberately gets no darker "viewport" backdrop of its
     /// own — that is the surest way to break the paper metaphor.
     ///
-    fn draw_stage(&mut self, ui: &mut egui::Ui, decoder: &DecoderSnapshot) {
-        // Counts and geometry share the same presentation-clock snapshot.
-        let mirror_frame = self
-            .output
-            .scene_view()
-            .read(self.decoder.playback_key())
-            .map(|frame| frame.in_world_space(self.output.head_snapshot().pose));
-        // Ballistics ride the same snapshot as the geometry, so the meter, the
-        // object it sits under and the silent count above them can never be a
-        // frame apart. This has to run before the counts are drawn, because the
-        // silence clock it advances is what the third badge reports.
-        if let Some(mirrored) = mirror_frame.as_ref() {
-            self.object_meters.advance(
-                mirrored,
-                self.decoder.playback_key(),
-                decoder.metrics().map_or(48_000, DecodeMetrics::sample_rate),
-                Instant::now(),
-            );
-        }
-        let silent_objects = mirror_frame.as_ref().and_then(|mirrored| {
+    fn draw_stage(
+        &mut self,
+        ui: &mut egui::Ui,
+        decoder: &DecoderSnapshot,
+        mirror_frame: Option<&crate::scene_view::SceneViewFrame>,
+    ) {
+        let silent_objects = mirror_frame.and_then(|mirrored| {
             self.fade_silent_objects
                 .then(|| self.object_meters.faded_out(mirrored.objects().len()))
         });
         draw_tracking_counts(
             ui,
-            mirror_frame
-                .as_ref()
-                .map(crate::scene_view::SceneViewFrame::tracking),
+            mirror_frame.map(crate::scene_view::SceneViewFrame::tracking),
             silent_objects,
         );
         ui.add_space(6.0);
@@ -1828,7 +2314,7 @@ impl PlayerApp {
         let mut hidden_objects = 0usize;
         let mut object_count = 0usize;
         let levels = *self.object_meters.levels();
-        if let Some(mirrored) = mirror_frame.as_ref() {
+        if let Some(mirrored) = mirror_frame {
             hidden_objects = mirrored.hidden_objects();
             for (slot, object) in mirrored.objects().iter().enumerate() {
                 objects[slot] = scene3d::scene::SceneObject {
@@ -1978,20 +2464,14 @@ impl PlayerApp {
             // Infinity has no decimal point to align, so it sits next to the
             // sign instead — which is what keeps the sign itself still in every
             // state the readout has.
-            let decibels = 20.0 * object.loudness.max(0.0).log10();
+            let decibels = readout_decibels(object.loudness, MeterReadout::Fast);
             let baseline = plate.top() + (plate.height() - strip) / 2.0;
             let text_colour = if decibels > -0.5 && !silent {
                 fade(theme::WARNING, alpha)
             } else {
                 fade(theme::BACKGROUND, alpha)
             };
-            let (sign, magnitude) = if silent {
-                ("−", "∞".to_owned())
-            } else if decibels > -0.05 {
-                (" ", format!("{:.1}", decibels.abs()))
-            } else {
-                ("−", format!("{:.1}", decibels.abs()))
-            };
+            let (sign, magnitude) = decibel_cells((!silent).then_some(decibels));
             painter.text(
                 egui::pos2(plate.left() + pad, baseline),
                 Align2::LEFT_CENTER,
@@ -2782,10 +3262,34 @@ impl eframe::App for PlayerApp {
         // frozen at the last shown pass, so re-reading the drop list there would
         // append the same files again on every tick.
         self.accept_dropped_files(&context);
+        // Read once for the whole pass. The bank, the counts and the geometry
+        // then describe the same presentation-clock instant instead of racing
+        // the audio side for three separate snapshots — and the ballistics
+        // advance once, which they must, because a second call would charge the
+        // same wall time to the meters twice.
+        let mirror_frame = self
+            .output
+            .scene_view()
+            .read(self.decoder.playback_key())
+            .map(|frame| frame.in_world_space(self.output.head_snapshot().pose));
+        if let Some(mirrored) = mirror_frame.as_ref() {
+            let sample_rate = self
+                .decoder
+                .snapshot()
+                .metrics()
+                .map_or(48_000, DecodeMetrics::sample_rate);
+            self.object_meters.advance(
+                mirrored,
+                self.decoder.playback_key(),
+                sample_rate,
+                Instant::now(),
+            );
+        }
         self.draw_header(root);
         self.draw_source_sidebar(root);
         self.draw_transport(root);
-        self.draw_scene(root);
+        self.draw_meter_bank(root, mirror_frame.as_ref());
+        self.draw_scene(root, mirror_frame.as_ref());
         self.draw_bitstream_details_window(&context);
         self.draw_diagnostics_window(&context);
         self.draw_output_settings(&context);
@@ -3672,6 +4176,185 @@ mod tests {
         // laying it out at all.
         assert!(plate_alpha(true, 0.5) < resting);
         assert!(plate_alpha(true, 0.0).abs() < f32::EPSILON);
+    }
+
+    /// A published object whose window measured `mean_square`, peaking at `peak`.
+    fn measured(mean_square: f64, frames: u32, peak: f32) -> crate::scene_view::ObjectView {
+        crate::scene_view::ObjectView {
+            active: true,
+            gain: 1.0,
+            energy: crate::scene_view::ObjectEnergy {
+                weighted_sum_squares: mean_square * f64::from(frames),
+                frames,
+                peak,
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_peak_marker_rises_at_once_holds_still_and_then_falls_at_a_fixed_rate() {
+        let mut peak = PeakHold::default();
+        peak.advance(0.5, 0.1);
+        assert!(
+            (peak.level - 0.5).abs() < f32::EPSILON,
+            "a marker that lags the level it marks is not a peak marker"
+        );
+
+        // Through the hold it does not move, however far the level has fallen.
+        peak.advance(0.001, scene3d::params::PEAK_HOLD_SECONDS - 0.05);
+        assert!((peak.level - 0.5).abs() < f32::EPSILON);
+
+        // Crossing the end of the hold charges only the part of the step that
+        // is past it, so a long hold does not buy a long fall in one frame.
+        peak.advance(0.001, 0.1);
+        let crossed = 20.0 * (0.5_f32 / peak.level).log10();
+        assert!(
+            (crossed - scene3d::params::PEAK_FALL_DECIBELS_PER_SECOND * 0.05).abs() < 0.01,
+            "the step across the boundary fell {crossed} dB"
+        );
+
+        // Past it, a fixed number of decibels per second.
+        let before = peak.level;
+        peak.advance(0.001, 0.5);
+        let fallen = 20.0 * (before / peak.level).log10();
+        assert!(
+            (fallen - scene3d::params::PEAK_FALL_DECIBELS_PER_SECOND * 0.5).abs() < 0.01,
+            "the marker fell {fallen} dB in half a second"
+        );
+
+        // And never below the live level: a marker inside the bar it is meant
+        // to lead would be reporting the present as the past.
+        peak.advance(0.3, 10.0);
+        assert!(peak.level >= 0.3);
+    }
+
+    #[test]
+    fn a_clip_latches_long_enough_to_be_seen_and_then_expires_on_its_own() {
+        let mirror = crate::scene_view::SceneViewMirror::new();
+        let key = crate::decoder::PlaybackKey::new(1, 1);
+        let bin = crate::scene_view::loudness_bin_frames(48_000);
+        let mut meters = ObjectMeters::default();
+        let start = Instant::now();
+
+        mirror.write(key, [measured(0.25, bin, 1.0)], 0, 48_000);
+        meters.advance(&mirror.read(key).unwrap(), key, 48_000, start);
+        assert!(
+            meters.bank_row(0, MeterReadout::Fast).2,
+            "a sample at full scale has to light the indicator on the frame it lands"
+        );
+
+        // Push the clipping bin out of the ring with quiet audio. Until it is
+        // gone the indication is simply still true.
+        let bins = u32::try_from(crate::scene_view::LOUDNESS_BINS).unwrap();
+        for step in 1..=bins {
+            let at = i64::from(step) * i64::from(bin);
+            mirror.write(key, [measured(0.0, bin, 0.0)], at, 48_000);
+        }
+        let quiet = mirror.read(key).unwrap();
+        assert!(quiet.sample_peak(0).abs() < f32::EPSILON);
+
+        // The hold outlives the ring, so the indicator is still lit ...
+        meters.advance(&quiet, key, 48_000, start + Duration::from_secs_f32(0.5));
+        assert!(meters.bank_row(0, MeterReadout::Fast).2);
+        // ... and then goes out by itself, because twenty objects is too many
+        // to ask anyone to reset by hand.
+        meters.advance(
+            &quiet,
+            key,
+            48_000,
+            start + Duration::from_secs_f32(scene3d::params::CLIP_HOLD_SECONDS + 0.6),
+        );
+        assert!(!meters.bank_row(0, MeterReadout::Fast).2);
+    }
+
+    #[test]
+    fn the_bank_reads_whichever_window_its_unit_names() {
+        let mirror = crate::scene_view::SceneViewMirror::new();
+        let key = crate::decoder::PlaybackKey::new(1, 1);
+        let bin = crate::scene_view::loudness_bin_frames(48_000);
+        let bins = u32::try_from(crate::scene_view::LOUDNESS_BINS).unwrap();
+        // Fill the ring with full-scale audio, then let the newest few bins go
+        // quiet: the fast window sees only the silence, the momentary window
+        // still holds most of what came before.
+        for step in 0..bins {
+            let at = i64::from(step) * i64::from(bin);
+            mirror.write(key, [measured(1.0, bin, 0.0)], at, 48_000);
+        }
+        for step in bins..bins + 4 {
+            let at = i64::from(step) * i64::from(bin);
+            mirror.write(key, [measured(0.0, bin, 0.0)], at, 48_000);
+        }
+        let frame = mirror.read(key).unwrap();
+
+        let mut meters = ObjectMeters::default();
+        let start = Instant::now();
+        // Several long steps, so the ballistics have finished releasing and the
+        // reading under test is the window rather than the decay.
+        for step in 0..6 {
+            meters.advance(&frame, key, 48_000, start + Duration::from_secs(step));
+        }
+
+        let (fast, ..) = meters.bank_row(0, MeterReadout::Fast);
+        let (momentary, ..) = meters.bank_row(0, MeterReadout::Momentary);
+        assert!(
+            fast < scene3d::params::OBJECT_SILENT_GAIN,
+            "the fast meter should have released onto the silence, read {fast}"
+        );
+        let decibels = readout_decibels(momentary, MeterReadout::Momentary);
+        assert!(
+            (decibels + 1.15).abs() < 0.1,
+            "thirty-six bins of full scale in a forty-bin window read {decibels} LUFS-M"
+        );
+    }
+
+    #[test]
+    fn the_two_units_differ_by_the_offset_the_standard_defines() {
+        // Same energy, same window; only the unit changes. If these ever drift
+        // apart by anything else, one of the two columns is lying about what it
+        // measured rather than about how it labels it.
+        let fast = readout_decibels(0.25, MeterReadout::Fast);
+        let momentary = readout_decibels(0.25, MeterReadout::Momentary);
+        assert!((fast - momentary - 0.691).abs() < 1e-4);
+        assert_eq!(MeterReadout::Fast.other(), MeterReadout::Momentary);
+        assert_eq!(MeterReadout::Momentary.other(), MeterReadout::Fast);
+        assert_ne!(MeterReadout::Fast.lane(), MeterReadout::Momentary.lane());
+    }
+
+    #[test]
+    fn a_readout_never_outgrows_the_cells_reserved_for_it() {
+        // The nameplate and the bank both lay out a sign cell and a magnitude
+        // right-aligned against the last. That only aligns if no value on the
+        // scale, in either unit, needs more room than was reserved.
+        for readout in [MeterReadout::Fast, MeterReadout::Momentary] {
+            for step in 0..=40_u8 {
+                let level = scene3d::params::OBJECT_SILENT_GAIN.powf(f32::from(step) / 40.0);
+                let (sign, magnitude) = decibel_cells(Some(readout_decibels(level, readout)));
+                assert!(
+                    sign == "−" || sign == " ",
+                    "{readout:?} signed with {sign:?}"
+                );
+                // One cell goes to the sign, so the digits get the rest.
+                assert!(
+                    magnitude.chars().count() < scene3d::params::NAMEPLATE_CELLS,
+                    "{readout:?} rendered {sign}{magnitude} at level {level}"
+                );
+            }
+        }
+        // Silence is the one reading with no digits, and it still owns a sign.
+        let (sign, magnitude) = decibel_cells(None);
+        assert_eq!(sign, "−");
+        assert_eq!(magnitude, "∞");
+    }
+
+    #[test]
+    fn the_momentary_window_is_the_whole_ring_and_nothing_else() {
+        // Stated once, in the mirror. A second definition in milliseconds here
+        // would be a second thing to keep in step with the ring's size.
+        let expected = crate::scene_view::loudness_bin_frames(48_000)
+            * u32::try_from(crate::scene_view::LOUDNESS_BINS).unwrap();
+        assert_eq!(momentary_window_frames(48_000), expected);
+        assert_eq!(momentary_window_frames(48_000), 19_200);
     }
 
     #[test]

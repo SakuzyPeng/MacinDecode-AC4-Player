@@ -666,15 +666,19 @@ fn the_object_visual_switches_survive_a_restart() {
     let dir = tempfile::tempdir().unwrap();
     let (mut app, context) = open(dir.path());
     settle(&mut app, &context);
-    // All three ship on, so each one has to be flipped for the assertions below
-    // to mean that a value made the round trip rather than that a default
+    // Every one of them has to be moved off its default for the assertions
+    // below to mean that a value made the round trip rather than that a default
     // happened to agree with it.
     assert!(app.object_numbers_visible);
     assert!(app.object_loudness_visible);
     assert!(app.fade_silent_objects);
+    assert!(!app.meter_bank_open);
+    assert_eq!(app.meter_readout, crate::app::MeterReadout::Fast);
     app.object_numbers_visible = false;
     app.object_loudness_visible = false;
     app.fade_silent_objects = false;
+    app.meter_bank_open = true;
+    app.meter_readout = crate::app::MeterReadout::Momentary;
     app.flush_persistence();
     app.library.shutdown();
     drop(app);
@@ -684,6 +688,103 @@ fn the_object_visual_switches_survive_a_restart() {
     assert!(!restored.object_numbers_visible);
     assert!(!restored.object_loudness_visible);
     assert!(!restored.fade_silent_objects);
+    assert!(restored.meter_bank_open);
+    assert_eq!(
+        restored.meter_readout,
+        crate::app::MeterReadout::Momentary,
+        "the bank's unit is a preference, not a per-session mode"
+    );
+}
+
+#[test]
+fn every_meter_row_fits_inside_the_bank_and_reads_out_what_it_measured() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut app, context) = open(dir.path());
+    crate::theme::install(&context);
+    settle(&mut app, &context);
+    app.meter_bank_open = true;
+
+    // A full bank, with one object at full scale, one twelve decibels down,
+    // one that clipped, and the rest silent.
+    let key = app.decoder.playback_key();
+    let bin = crate::scene_view::loudness_bin_frames(48_000);
+    let objects: Vec<_> = (0..crate::scene_view::MAX_VIEW_OBJECTS)
+        .map(|slot| {
+            let mean_square = match slot {
+                0 => 1.0,
+                1 => 0.063_095_734,
+                _ => 0.0,
+            };
+            crate::scene_view::ObjectView {
+                element_id: u64::try_from(slot).unwrap() + 1,
+                active: true,
+                gain: 1.0,
+                energy: crate::scene_view::ObjectEnergy {
+                    weighted_sum_squares: mean_square * f64::from(bin),
+                    frames: bin,
+                    peak: if slot == 3 { 1.0 } else { 0.0 },
+                },
+                ..Default::default()
+            }
+        })
+        .collect();
+    app.output.scene_view().write(key, objects, 0, 48_000);
+    let frame = app
+        .output
+        .scene_view()
+        .read(key)
+        .expect("the mirror was just written");
+    // Several long steps, so the ballistics have arrived rather than started.
+    let start = Instant::now();
+    for step in 0..6 {
+        app.object_meters
+            .advance(&frame, key, 48_000, start + Duration::from_secs(step));
+    }
+
+    let size = egui::vec2(1180.0, 760.0);
+    let mut output = egui::FullOutput::default();
+    for _ in 0..2 {
+        output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                ..Default::default()
+            },
+            |ui| app.draw_meter_bank(ui, Some(&frame)),
+        );
+        output.textures_delta.clear();
+    }
+    let text = painted_text(&output);
+
+    // Every object has a row, numbered as its cube's faces are.
+    for slot in 0..crate::scene_view::MAX_VIEW_OBJECTS {
+        let number = (slot + 1).to_string();
+        assert!(
+            text.iter().any(|(value, ..)| *value == number),
+            "no row numbered {number}"
+        );
+    }
+    // And the readouts are the measurements, not placeholders.
+    for expected in ["0.0", "12.0", "∞"] {
+        assert!(
+            text.iter().any(|(value, ..)| value == expected),
+            "no row read {expected}; painted {:?}",
+            text.iter().map(|(value, ..)| value).collect::<Vec<_>>()
+        );
+    }
+
+    // Nothing the bank paints may leave the strip it was given. This is the
+    // check a screenshot cannot make for twenty rows at once: a readout that
+    // outgrew its cells, or a track sized from the wrong width, lands here.
+    let panel_left = size.x - 240.0;
+    // A blank sign cell paints a galley with no glyphs in it, and egui reports
+    // no visual bounds for that. It occupies its cell by position rather than
+    // by ink, which is the whole point of reserving the cell.
+    for (value, bounds, _) in text.iter().filter(|(value, ..)| !value.trim().is_empty()) {
+        assert!(
+            bounds.left() >= panel_left - 1.0 && bounds.right() <= size.x + 1.0,
+            "{value:?} painted at {bounds:?}, outside the bank"
+        );
+    }
 }
 
 #[test]

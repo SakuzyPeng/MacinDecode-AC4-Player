@@ -269,6 +269,22 @@ agreement with `EbuR128::loudness_momentary` within 0.01 LU. Keep that test pass
 loosening it, and keep the UI labelling the in-scene readout as dBFS. `scene3d` draws it through wgpu (real depth buffer, MSAA) with
 everything except `scene3d::gpu` unit-tested without an adapter.
 
+The same bins feed a second consumer, `app::draw_meter_bank` — an optional strip right of the scene,
+one row per object: level, the gain the metadata asked for as a tick on the same scale, a peak marker
+and a clip lit from `SceneViewFrame::sample_peak`, which is the one reading deliberately *not*
+K-weighted, because a converter does not clip according to a model of hearing. Its unit switches
+between the scene's fast 30 ms dBFS and BS.1770 momentary LUFS-M over the whole 400 ms ring, and the
+switch changes what the bar and the number both measure rather than relabelling one value — the
+momentary reading carries no ballistics, since an attack and a release would make it a different
+quantity that merely resembled the standard's. Both units keep **one silence floor**,
+`OBJECT_SILENT_GAIN`, shared with the nameplate and the footprint: the bank gets no longer scale of
+its own, because `app::the_nameplate_strip_and_the_footprint_share_one_decibel_floor` exists to stop
+two readings of one object from contradicting each other.
+
+`ui()` reads the mirror **once per pass** and advances `ObjectMeters` there, before any panel draws.
+The bank and the stage then share that frame: a second read could catch a different publication, and
+a second `advance` would charge the same wall time to the ballistics twice.
+
 ### Stream reuse vs rebuild
 
 `SceneSignature` (`decoder.rs`) locks sample rate, configuration generation, presentation, dynamic

@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::app::MeterReadout;
 use crate::backend::OutputSettings;
 use crate::scene3d::camera::{Camera, CameraState};
 
@@ -60,6 +61,8 @@ pub struct AppPreferences {
     pub object_numbers: bool,
     pub object_loudness: bool,
     pub fade_silent_objects: bool,
+    pub meter_bank: bool,
+    pub meter_readout: MeterReadout,
     pub manual_head: [f32; 3],
     #[serde(with = "crate::playlist::native_path")]
     pub last_directory: PathBuf,
@@ -74,6 +77,10 @@ impl Default for AppPreferences {
             object_numbers: true,
             object_loudness: true,
             fade_silent_objects: true,
+            // The one object visual that is off by default: it is the only one
+            // that takes width away from the scene.
+            meter_bank: false,
+            meter_readout: MeterReadout::Fast,
             manual_head: [0.0; 3],
             last_directory: PathBuf::new(),
         }

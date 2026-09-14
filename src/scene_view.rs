@@ -303,6 +303,21 @@ impl SceneViewFrame {
         }
         (sum / f64::from(frames), frames)
     }
+
+    /// Largest absolute sample `slot` produced over the whole ring, gain
+    /// included and K-weighting deliberately *not*.
+    ///
+    /// This is the one reading that is not a loudness: weighting is a model of
+    /// hearing, and a converter does not clip according to a model of hearing.
+    /// It answers whether the renderer was handed a sample it cannot carry,
+    /// which is a different question from how loud the object sounded, and the
+    /// meter bank reports the two side by side for exactly that reason.
+    #[must_use]
+    pub fn sample_peak(&self, slot: usize) -> f32 {
+        self.loudness_bins(slot)
+            .iter()
+            .fold(0.0_f32, |peak, bin| peak.max(bin.peak))
+    }
 }
 
 /// Breadcrumb spacing in presentation frames, at least one so the cadence can
@@ -628,6 +643,32 @@ mod tests {
         assert!((mean - 1.0).abs() < 1e-12, "mean square was {mean}");
         let (_, all) = frame.mean_square(0, bin * 10);
         assert_eq!(all, bin * 3);
+    }
+
+    #[test]
+    fn the_sample_peak_is_the_loudest_unweighted_sample_left_in_the_ring() {
+        let mirror = SceneViewMirror::new();
+        let key = PlaybackKey::new(1, 1);
+        let bin = loudness_bin_frames(48_000);
+        for (step, peak) in [0.2_f32, 0.9, 0.4].into_iter().enumerate() {
+            let clipping = ObjectView {
+                energy: ObjectEnergy {
+                    weighted_sum_squares: 0.0,
+                    frames: bin,
+                    peak,
+                },
+                ..object(7, 0.0)
+            };
+            let at = i64::try_from(step).unwrap() * i64::from(bin);
+            mirror.write(key, [clipping], at, 48_000);
+        }
+        let frame = mirror.read(key).unwrap();
+        // Quieter bins following it do not erase it: a clip is something that
+        // happened, and the reading has to survive long enough to be seen.
+        assert!((frame.sample_peak(0) - 0.9).abs() < f32::EPSILON);
+        // A slot that never measured anything has no peak rather than a quiet
+        // one, which is the same distinction `mean_square` draws with frames.
+        assert!(frame.sample_peak(5).abs() < f32::EPSILON);
     }
 
     #[test]

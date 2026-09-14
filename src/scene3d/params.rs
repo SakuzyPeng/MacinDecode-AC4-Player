@@ -164,6 +164,26 @@ pub const METER_ATTACK_MILLISECONDS: f32 = 10.0;
 /// number would make the picture lag the sound by a window length.
 pub const METER_RELEASE_MILLISECONDS: f32 = 300.0;
 
+/// How long the meter bank's peak marker sits still before it starts to fall,
+/// in seconds.
+///
+/// Long enough to read a transient that has already gone — which is the whole
+/// job of a peak hold — and short enough that the marker still describes the
+/// passage being played rather than one from a minute ago.
+pub const PEAK_HOLD_SECONDS: f32 = 1.6;
+/// How fast the peak marker falls once the hold has run out, in decibels per
+/// second. A fall, not a jump: the eye reads the slide itself as "that peak is
+/// older than this one".
+pub const PEAK_FALL_DECIBELS_PER_SECOND: f32 = 12.0;
+/// How long a clip indication stays lit after the sample that caused it, in
+/// seconds.
+///
+/// A clip is a single sample, so an indicator that told the truth frame by
+/// frame would be invisible. It latches instead — and it expires rather than
+/// waiting to be cleared, because there is no reset button on a meter that is
+/// watching twenty objects at once.
+pub const CLIP_HOLD_SECONDS: f32 = 2.0;
+
 /// How far above a cube's top face the loudness nameplate is anchored, in world
 /// units. Clear of the face label without floating free of the object.
 pub const NAMEPLATE_OFFSET: f32 = 0.055;
