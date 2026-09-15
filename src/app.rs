@@ -1846,6 +1846,9 @@ impl PlayerApp {
         egui::Panel::right("meter-bank")
             .exact_size(240.0)
             .resizable(false)
+            // The frame already provides a clipped border. The automatic
+            // separator is painted on the parent and can cross the transport.
+            .show_separator_line(false)
             .frame(
                 egui::Frame::NONE
                     .fill(theme::SURFACE)
@@ -1922,17 +1925,24 @@ impl PlayerApp {
                     );
                     return;
                 }
-                self.draw_meter_rows(ui, objects, readout);
-                let hidden =
-                    mirror_frame.map_or(0, crate::scene_view::SceneViewFrame::hidden_objects);
-                if hidden > 0 {
-                    ui.add_space(8.0);
-                    ui.label(
-                        RichText::new(format!("+{hidden} beyond the view limit"))
-                            .size(10.0)
-                            .color(theme::MUTED),
-                    );
-                }
+                egui::ScrollArea::vertical()
+                    .id_salt("meter-bank-rows")
+                    .max_height(ui.available_height().max(0.0))
+                    .min_scrolled_height(0.0)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        self.draw_meter_rows(ui, objects, readout);
+                        let hidden = mirror_frame
+                            .map_or(0, crate::scene_view::SceneViewFrame::hidden_objects);
+                        if hidden > 0 {
+                            ui.add_space(8.0);
+                            ui.label(
+                                RichText::new(format!("+{hidden} beyond the view limit"))
+                                    .size(10.0)
+                                    .color(theme::MUTED),
+                            );
+                        }
+                    });
             });
     }
 
@@ -1943,8 +1953,7 @@ impl PlayerApp {
         objects: &[crate::scene_view::ObjectView],
         readout: MeterReadout,
     ) {
-        /// Row pitch in points. Twenty of them plus the header fit a laptop
-        /// window without scrolling.
+        /// Row height in points, before the theme's inter-row spacing.
         const ROW_HEIGHT: f32 = 18.0;
         /// Width reserved for the row number, wide enough for two digits.
         const NUMBER_CELL: f32 = 16.0;

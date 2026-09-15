@@ -113,7 +113,8 @@ case again, read exactly rather than by eye. The button in its header switches t
 `dBFS` — the same fast reading the scene draws — and `LUFS-M`, the ITU-R BS.1770 momentary loudness
 over the full 400 ms window, which is the standard's own quantity and carries no meter ballistics.
 Clipping is the one reading that is not weighted at all, because a converter does not clip according
-to a model of hearing. The bank answers which objects are sounding and by how much; the scene answers
+to a model of hearing. In shorter windows, scroll vertically through the rows; the bank header and
+playback controls stay in place. The bank answers which objects are sounding and by how much; the scene answers
 where they are. Neither is a smaller copy of the other.
 
 **For more detail:** **Details…** on the file card opens the bitstream details window, and the

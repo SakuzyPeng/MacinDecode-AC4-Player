@@ -696,6 +696,72 @@ fn the_object_visual_switches_survive_a_restart() {
     );
 }
 
+fn meter_bank_frame(
+    app: &mut PlayerApp,
+    context: &egui::Context,
+    frame: &crate::scene_view::SceneViewFrame,
+    size: egui::Vec2,
+    scroll_delta: f32,
+) -> egui::FullOutput {
+    let mut bank_rect = egui::Rect::NOTHING;
+    let mut bank_shapes = Vec::new();
+    let mut events = vec![egui::Event::PointerMoved(egui::pos2(
+        size.x - 120.0,
+        size.y / 2.0,
+    ))];
+    if scroll_delta != 0.0 {
+        events.push(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, scroll_delta),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        });
+    }
+    let mut output = context.run_ui(
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+            events,
+            focused: true,
+            ..Default::default()
+        },
+        |ui| {
+            // Reserve space using the actual panels, including the bottom bar.
+            app.draw_header(ui);
+            app.draw_source_sidebar(ui);
+            app.draw_transport(ui);
+            bank_rect = ui.available_rect_before_wrap();
+            bank_rect.min.x = bank_rect.right() - 240.0;
+            let start = context.graphics(|layers| layers.get(ui.layer_id()).unwrap().next_idx().0);
+            app.draw_meter_bank(ui, Some(frame));
+            bank_shapes = context.graphics(|layers| {
+                layers
+                    .get(ui.layer_id())
+                    .unwrap()
+                    .all_entries()
+                    .skip(start)
+                    .cloned()
+                    .collect()
+            });
+        },
+    );
+    output.textures_delta.clear();
+    output.shapes = bank_shapes;
+    // Check all visible paint, including separators drawn on the parent layer.
+    for clipped in &output.shapes {
+        let visible = clipped
+            .shape
+            .visual_bounding_rect()
+            .intersect(clipped.clip_rect);
+        if visible.is_positive() {
+            assert!(
+                bank_rect.expand(0.5).contains_rect(visible),
+                "meter bank paints {visible:?} outside {bank_rect:?}"
+            );
+        }
+    }
+    output
+}
+
 #[test]
 fn every_meter_row_fits_inside_the_bank_and_reads_out_what_it_measured() {
     let dir = tempfile::tempdir().unwrap();
@@ -741,48 +807,56 @@ fn every_meter_row_fits_inside_the_bank_and_reads_out_what_it_measured() {
             .advance(&frame, key, 48_000, start + Duration::from_secs(step));
     }
 
-    let size = egui::vec2(1180.0, 760.0);
-    let mut output = egui::FullOutput::default();
-    for _ in 0..2 {
-        output = context.run_ui(
-            egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
-                ..Default::default()
-            },
-            |ui| app.draw_meter_bank(ui, Some(&frame)),
-        );
-        output.textures_delta.clear();
-    }
-    let text = painted_text(&output);
-
-    // Every object has a row, numbered as its cube's faces are.
-    for slot in 0..crate::scene_view::MAX_VIEW_OBJECTS {
-        let number = (slot + 1).to_string();
+    for size in [egui::vec2(1180.0, 760.0), egui::vec2(920.0, 620.0)] {
+        // Scroll to the start after resizing, allowing the scroll state to settle.
+        let mut output = egui::FullOutput::default();
+        for _ in 0..8 {
+            output = meter_bank_frame(&mut app, &context, &frame, size, 1000.0);
+        }
+        let text = painted_text(&output);
+        for slot in 0..crate::scene_view::MAX_VIEW_OBJECTS {
+            let number = (slot + 1).to_string();
+            assert!(
+                text.iter().any(|(value, ..)| *value == number),
+                "no row {number}"
+            );
+        }
+        for expected in ["0.0", "12.0", "∞"] {
+            assert!(
+                text.iter().any(|(value, ..)| value == expected),
+                "no readout {expected}"
+            );
+        }
+        // Even clipped rows must keep their readouts within the column width.
+        for (value, bounds, _) in text.iter().filter(|(value, ..)| !value.trim().is_empty()) {
+            assert!(
+                bounds.left() >= size.x - 241.0 && bounds.right() <= size.x + 1.0,
+                "{value:?} painted at {bounds:?}, outside the bank"
+            );
+        }
+        let header = text
+            .iter()
+            .find(|(value, ..)| value == "METER BANK")
+            .unwrap()
+            .1;
+        for _ in 0..8 {
+            output = meter_bank_frame(&mut app, &context, &frame, size, -1000.0);
+        }
+        let scrolled = painted_text(&output);
         assert!(
-            text.iter().any(|(value, ..)| *value == number),
-            "no row numbered {number}"
+            scrolled
+                .iter()
+                .any(|(value, bounds, clip)| value == "20" && clip.contains_rect(*bounds)),
+            "the last row cannot be reached at {size:?}"
         );
-    }
-    // And the readouts are the measurements, not placeholders.
-    for expected in ["0.0", "12.0", "∞"] {
-        assert!(
-            text.iter().any(|(value, ..)| value == expected),
-            "no row read {expected}; painted {:?}",
-            text.iter().map(|(value, ..)| value).collect::<Vec<_>>()
-        );
-    }
-
-    // Nothing the bank paints may leave the strip it was given. This is the
-    // check a screenshot cannot make for twenty rows at once: a readout that
-    // outgrew its cells, or a track sized from the wrong width, lands here.
-    let panel_left = size.x - 240.0;
-    // A blank sign cell paints a galley with no glyphs in it, and egui reports
-    // no visual bounds for that. It occupies its cell by position rather than
-    // by ink, which is the whole point of reserving the cell.
-    for (value, bounds, _) in text.iter().filter(|(value, ..)| !value.trim().is_empty()) {
-        assert!(
-            bounds.left() >= panel_left - 1.0 && bounds.right() <= size.x + 1.0,
-            "{value:?} painted at {bounds:?}, outside the bank"
+        assert_eq!(
+            scrolled
+                .iter()
+                .find(|(value, ..)| value == "METER BANK")
+                .unwrap()
+                .1,
+            header,
+            "scrolling the rows moved the bank header"
         );
     }
 }
