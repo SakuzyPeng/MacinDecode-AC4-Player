@@ -145,6 +145,32 @@ impl SceneRenderSource {
         }
 
         let end_of_stream = self.current.is_none() && self.reader.is_end_of_stream();
+        self.publish_scene_view(&objects, &jumped, written);
+        if let Some(pose) = self.pose.try_pose() {
+            self.last_pose = pose;
+        }
+        // The scene mirror stays in world coordinates; only the system submission
+        // is rotated into head space. Rotating both the room and avatar would double it.
+        for object in objects.values_mut() {
+            if !object.tracking.head_locked() {
+                object.audio.position = self.last_pose.rotate_listener(object.audio.position);
+            }
+        }
+        Ok(RenderQuantum {
+            objects: objects.into_values().map(|object| object.audio).collect(),
+            lfe: lfe.map(LfeQuantumAccumulator::finish),
+            frames_written: u32::try_from(written).unwrap_or(u32::MAX),
+            end_of_stream,
+            underrun,
+        })
+    }
+
+    fn publish_scene_view(
+        &mut self,
+        objects: &BTreeMap<u64, TrackedObject>,
+        jumped: &[bool; MAX_VIEW_OBJECTS],
+        frames_written: usize,
+    ) {
         // Mirror exactly what is about to be submitted rather than resolving the
         // OAMD state a second time. A parallel derivation would drift from the
         // audio under ramps, and these are already in the listener space the
@@ -164,7 +190,7 @@ impl SceneRenderSource {
             let Some(slot_energy) = energy.get_mut(slot) else {
                 break;
             };
-            let samples = &object.audio.samples[..written.min(object.audio.samples.len())];
+            let samples = &object.audio.samples[..frames_written.min(object.audio.samples.len())];
             *slot_energy = filter.measure(samples, object.audio.gain);
         }
 
@@ -185,23 +211,6 @@ impl SceneRenderSource {
             self.timeline_frame,
             self.sample_rate,
         );
-        if let Some(pose) = self.pose.try_pose() {
-            self.last_pose = pose;
-        }
-        // The scene mirror stays in world coordinates; only the system submission
-        // is rotated into head space. Rotating both the room and avatar would double it.
-        for object in objects.values_mut() {
-            if !object.tracking.head_locked() {
-                object.audio.position = self.last_pose.rotate_listener(object.audio.position);
-            }
-        }
-        Ok(RenderQuantum {
-            objects: objects.into_values().map(|object| object.audio).collect(),
-            lfe: lfe.map(LfeQuantumAccumulator::finish),
-            frames_written: u32::try_from(written).unwrap_or(u32::MAX),
-            end_of_stream,
-            underrun,
-        })
     }
 
     fn load_next_block(&mut self) -> Result<bool, String> {
