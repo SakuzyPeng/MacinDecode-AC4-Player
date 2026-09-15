@@ -23,6 +23,7 @@ pub struct SceneRenderer {
     solid: wgpu::RenderPipeline,
     line: wgpu::RenderPipeline,
     decal: wgpu::RenderPipeline,
+    transparent: wgpu::RenderPipeline,
     uniforms: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     vertices: wgpu::Buffer,
@@ -97,9 +98,19 @@ impl SceneRenderer {
             immediate_size: 0,
         });
 
-        let build = |label: &str, cull: Option<wgpu::Face>, bias: wgpu::DepthBiasState| {
-            build_pipeline(device, &layout, &module, target_format, label, cull, bias)
-        };
+        let build =
+            |label: &str, cull: Option<wgpu::Face>, bias: wgpu::DepthBiasState, transparent| {
+                build_pipeline(
+                    device,
+                    &layout,
+                    &module,
+                    target_format,
+                    label,
+                    cull,
+                    bias,
+                    transparent,
+                )
+            };
 
         let composite_layout = composite_bind_group_layout(device);
         let composite = composite_pipeline(device, &composite_layout, target_format);
@@ -108,11 +119,12 @@ impl SceneRenderer {
                 "scene3d_solid",
                 Some(wgpu::Face::Back),
                 wgpu::DepthBiasState::default(),
+                false,
             ),
             // Culling must be off for both of these. A camera-facing line quad's
             // winding flips with the view direction, and a floor decal only ever
             // faces one way.
-            line: build("scene3d_line", None, wgpu::DepthBiasState::default()),
+            line: build("scene3d_line", None, wgpu::DepthBiasState::default(), false),
             decal: build(
                 "scene3d_decal",
                 None,
@@ -125,6 +137,13 @@ impl SceneRenderer {
                     slope_scale: -1.0,
                     clamp: 0.0,
                 },
+                false,
+            ),
+            transparent: build(
+                "scene3d_transparent",
+                Some(wgpu::Face::Back),
+                wgpu::DepthBiasState::default(),
+                true,
             ),
             uniforms,
             bind_group,
@@ -291,8 +310,8 @@ fn composite_pipeline(
     })
 }
 
-/// The three scene pipelines share the scene target's format and sample count;
-/// they differ only in face culling and depth bias.
+/// The scene pipelines share the scene target's format and sample count;
+/// they differ in culling, depth bias and skin overlay blending.
 #[allow(
     clippy::too_many_arguments,
     reason = "a pipeline descriptor's inputs do not group into meaningful structs"
@@ -305,6 +324,7 @@ fn build_pipeline(
     label: &str,
     cull: Option<wgpu::Face>,
     bias: wgpu::DepthBiasState,
+    transparent: bool,
 ) -> wgpu::RenderPipeline {
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(label),
@@ -330,7 +350,7 @@ fn build_pipeline(
         },
         depth_stencil: Some(wgpu::DepthStencilState {
             format: DEPTH_FORMAT,
-            depth_write_enabled: Some(true),
+            depth_write_enabled: Some(!transparent),
             depth_compare: Some(wgpu::CompareFunction::Less),
             stencil: wgpu::StencilState::default(),
             bias,
@@ -349,11 +369,9 @@ fn build_pipeline(
             }),
             targets: &[Some(wgpu::ColorTargetState {
                 format: target_format,
-                // Every colour in this scene is opaque: the flat paper
-                // theme expresses fading by lerping toward STAGE, not
-                // with alpha. That keeps the depth buffer sufficient and
-                // leaves no transparency ordering to solve.
-                blend: None,
+                // Skin overlays may carry partial alpha; their quads are
+                // sorted and drawn after all opaque scene geometry.
+                blend: transparent.then_some(wgpu::BlendState::ALPHA_BLENDING),
                 write_mask: wgpu::ColorWrites::ALL,
             })],
             compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -371,10 +389,11 @@ pub struct SceneCallback {
     solid: Range<u32>,
     line: Range<u32>,
     decal: Range<u32>,
+    transparent: Range<u32>,
 }
 
 impl SceneCallback {
-    /// Flatten the three streams into one buffer, remembering where each starts.
+    /// Flatten the streams into one buffer, remembering where each starts.
     ///
     /// The ranges are computed here rather than in `prepare` because `paint`
     /// only gets `&self`, and they are just the stream lengths anyway.
@@ -383,12 +402,13 @@ impl SceneCallback {
         let solid = to_range(0, mesh.solid.len());
         let line = to_range(solid.end, mesh.line.len());
         let decal = to_range(line.end, mesh.decal.len());
+        let transparent = to_range(decal.end, mesh.transparent.len() * 6);
 
-        let mut vertices =
-            Vec::with_capacity(mesh.solid.len() + mesh.line.len() + mesh.decal.len());
+        let mut vertices = Vec::with_capacity(transparent.end as usize);
         vertices.extend_from_slice(&mesh.solid);
         vertices.extend_from_slice(&mesh.line);
         vertices.extend_from_slice(&mesh.decal);
+        vertices.extend(mesh.transparent.iter().flatten().copied());
 
         Self {
             rect: eframe::egui::Rect::NOTHING,
@@ -397,6 +417,7 @@ impl SceneCallback {
             solid,
             line,
             decal,
+            transparent,
         }
     }
 
@@ -490,6 +511,7 @@ impl CallbackTrait for SceneCallback {
                 (&renderer.solid, &self.solid),
                 (&renderer.line, &self.line),
                 (&renderer.decal, &self.decal),
+                (&renderer.transparent, &self.transparent),
             ] {
                 if !range.is_empty() {
                     pass.set_pipeline(pipeline);

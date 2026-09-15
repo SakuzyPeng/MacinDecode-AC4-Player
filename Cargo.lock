@@ -1757,6 +1757,7 @@ dependencies = [
  "ebur128",
  "eframe",
  "embed-resource",
+ "image",
  "macindecode-ac4-bitstream",
  "macindecode-ac4-inspect",
  "macindecode-ac4-mp4",

@@ -26,6 +26,7 @@ use crate::playlist::{
 use crate::playlist_ui;
 use crate::preferences::{AppPreferences, DataDirectory};
 mod library_integration;
+mod visual_settings;
 use crate::scene3d;
 use crate::theme;
 
@@ -37,6 +38,7 @@ pub struct PlayerApp {
     pub smoke: Option<crate::install_check::WindowSmoke>,
     about: crate::licenses::Window,
     sofa: crate::sofa_catalog::Catalog,
+    skins: crate::skin_library::Catalog,
     library: LibraryController,
     browse: BrowseState,
     cursor: Option<PlaybackCursor>,
@@ -77,10 +79,11 @@ pub struct PlayerApp {
     bitstream_details_open: bool,
     diagnostics_open: bool,
     output_settings_open: bool,
-    object_visual_settings_open: bool,
+    visual_settings_open: bool,
     pending_output_change: Option<OutputSettings>,
     audio_settings_error: Option<String>,
     sofa_picker: Option<Pin<Box<dyn Future<Output = Option<rfd::FileHandle>>>>>,
+    skin_picker: Option<Pin<Box<dyn Future<Output = Option<rfd::FileHandle>>>>>,
     camera: scene3d::camera::Camera,
     /// Whether zero-based LFE / one-based dynamic-object numbers are printed
     /// on every element face.
@@ -795,12 +798,14 @@ impl PlayerApp {
             ..Default::default()
         };
         let sofa = crate::sofa_catalog::Catalog::new(directory.path.join("sofa"));
+        let skins = crate::skin_library::Catalog::new(directory.path.join("skins"));
         let library = LibraryController::new(directory, preferences.clone(), context.clone());
         Self {
             library,
             smoke: None,
             about: crate::licenses::Window::default(),
             sofa,
+            skins,
             browse: BrowseState::default(),
             cursor: None,
             playlist_ui: playlist_ui::State::default(),
@@ -840,10 +845,11 @@ impl PlayerApp {
             bitstream_details_open: false,
             diagnostics_open: false,
             output_settings_open: false,
-            object_visual_settings_open: false,
+            visual_settings_open: false,
             pending_output_change: None,
             audio_settings_error: None,
             sofa_picker: None,
+            skin_picker: None,
             camera,
             object_numbers_visible: true,
             object_loudness_visible: true,
@@ -1356,7 +1362,7 @@ impl PlayerApp {
                     });
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui.button("About").clicked() { self.about.open = true; }
-                        if ui.button("Object visuals").clicked() { self.object_visual_settings_open = true; }
+                        if ui.button("Visual settings").clicked() { self.visual_settings_open = true; }
                         if ui.button("Audio settings").clicked() { show_settings = true; }
                         ui.add_enabled_ui(!system_output, |ui| {
                         egui::ComboBox::from_id_salt("output-device")
@@ -1785,41 +1791,6 @@ impl PlayerApp {
             self.output.recenter_head();
             self.preferences.manual_head = [0.0; 3];
         }
-    }
-
-    fn draw_object_visual_settings(&mut self, context: &egui::Context) {
-        if !self.object_visual_settings_open {
-            return;
-        }
-        let mut open = true;
-        egui::Window::new("Object visual settings")
-            .open(&mut open)
-            .resizable(false)
-            .default_width(320.0)
-            .show(context, |ui| {
-                ui.checkbox(&mut self.object_numbers_visible, "Element numbers (IDs)")
-                    .on_hover_text("Show numbers on scene objects and the LFE.");
-                ui.checkbox(&mut self.object_loudness_visible, "Object loudness (LVL)")
-                    .on_hover_text("Show measured levels above objects, in their footprints and along their trails.");
-                ui.separator();
-                ui.checkbox(&mut self.fade_silent_objects, "Fade persistently silent objects");
-                ui.label(
-                    RichText::new("Quiet objects fade after about two seconds and return when sound resumes.")
-                        .small()
-                        .color(theme::MUTED),
-                );
-                ui.separator();
-                ui.checkbox(&mut self.meter_bank_open, "Meter bank (side panel)")
-                    .on_hover_text(
-                        "A row per object beside the scene: level, the gain the metadata asks for, a peak marker and clipping.",
-                    );
-                ui.label(
-                    RichText::new("Off by default because it takes width from the scene; the measurement runs either way.")
-                        .small()
-                        .color(theme::MUTED),
-                );
-            });
-        self.object_visual_settings_open = open;
     }
 
     /// The meter bank: one row per object, beside the scene rather than in it.
@@ -2377,6 +2348,7 @@ impl PlayerApp {
                         // and the slot should be drawn correctly from then on.
                         has_lfe: decoder.metrics().is_some_and(DecodeMetrics::has_lfe),
                         figure: self.figure,
+                        skin: self.skins.active.as_ref(),
                     },
                 );
                 let matrix = self.camera.view_projection(rect.width() / rect.height());
@@ -3304,7 +3276,7 @@ impl eframe::App for PlayerApp {
         self.draw_bitstream_details_window(&context);
         self.draw_diagnostics_window(&context);
         self.draw_output_settings(&context);
-        self.draw_object_visual_settings(&context);
+        self.draw_visual_settings(&context);
         self.about.draw(&context);
         if let Some(smoke) = &mut self.smoke {
             smoke.frame(

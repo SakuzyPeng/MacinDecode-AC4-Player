@@ -63,6 +63,7 @@ pub struct AppPreferences {
     pub fade_silent_objects: bool,
     pub meter_bank: bool,
     pub meter_readout: MeterReadout,
+    pub skins: crate::skin_library::Preferences,
     pub manual_head: [f32; 3],
     #[serde(with = "crate::playlist::native_path")]
     pub last_directory: PathBuf,
@@ -81,6 +82,7 @@ impl Default for AppPreferences {
             // that takes width away from the scene.
             meter_bank: false,
             meter_readout: MeterReadout::Fast,
+            skins: crate::skin_library::Preferences::default(),
             manual_head: [0.0; 3],
             last_directory: PathBuf::new(),
         }

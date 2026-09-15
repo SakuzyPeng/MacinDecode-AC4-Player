@@ -22,3 +22,4 @@ pub mod gpu;
 pub mod mesh;
 pub mod params;
 pub mod scene;
+pub mod skin;

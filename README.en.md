@@ -80,7 +80,7 @@ the checksum and build information attachments do not need to be installed. You 
 
 **The 3D scene** (center of the window): drag to orbit, `Shift` + drag to pan, scroll to zoom. The
 `ISO` / `TOP` / `BACK` / `SIDE` / `RESET` buttons jump to fixed viewpoints, with a separate
-perspective/orthographic projection toggle. **Object visuals**, next to **Audio settings**, groups
+perspective/orthographic projection toggle. **Visual settings**, next to **Audio settings**, groups
 element numbers (IDs), object loudness (LVL), and fading persistently silent objects. All three
 switches are independent, enabled by default, and remembered across restarts. The scene draws at most 20 objects at once
 and says at the bottom left how many it left out. With element numbers enabled, black numbers identify scene-relative
@@ -104,7 +104,15 @@ fading keeps every object on screen and hides the `Silent` count, leaving a sile
 its dim; switching `LVL` does not affect fading. Loudness is measured before rendering, K-weighted
 per ITU-R BS.1770, and cross-checked against the reference implementation in the tests.
 
-**The meter bank** is the fourth switch in **Object visuals**, and the only one that is off by
+**Listener skins** are selected in **Visual settings → Listener skin**. Use **Import skin PNG…**
+to import a standard 64×64 Minecraft skin. Transparent arm margins identify Steve (4 px arms)
+or Alex (3 px arms) automatically; the body selector also allows an override for images whose
+editor filled those margins. Skins include separate left/right limbs, transparent clothing layers
+and the existing head pose. Legacy 64×32 Steve skins are supported too. Imports are copied to
+`skins/` in the data directory, so moving the original is safe. The list, selected skin and body
+override survive restarts. Choose **Default figure** to restore the original listener.
+
+**The meter bank** is the fourth switch in **Visual settings**, and the only one that is off by
 default because it is the only one that takes width from the scene. It opens a strip to the right of
 the 3D view with one row per object: the level as a bar, the gain the metadata asked for as a tick on
 the same scale, a peak marker that holds and then slides, and a red segment at full scale when a
@@ -218,7 +226,7 @@ the other devices back one at a time — that separates chain latency from head-
 - Linux: `${XDG_DATA_HOME:-~/.local/share}/com.macinrender.macindecode-ac4-player/`
 
 That folder holds the playlist database (`library.sqlite3`), settings (`settings.json`), window state
-(`app.ron`) and your SOFA files (`sofa/`). Deleting it resets the app. Starting with
+(`app.ron`), SOFA files (`sofa/`) and imported skins (`skins/`). Deleting it resets the app. Starting with
 `--data-dir <path>` uses a separate data directory instead.
 
 **A file was renamed or moved — now what?**

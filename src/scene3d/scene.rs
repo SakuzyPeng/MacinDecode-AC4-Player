@@ -71,6 +71,7 @@ pub struct SceneInput<'a> {
     /// way; only its occupancy changes.
     pub has_lfe: bool,
     pub figure: Figure,
+    pub skin: Option<&'a super::skin::Skin>,
 }
 
 /// Build one frame of geometry into `mesh`, which is cleared first.
@@ -91,7 +92,11 @@ pub fn build(
 
     add_room(mesh, &view);
     add_floor_grid(mesh, &view);
-    add_figure(mesh, input.figure, &view);
+    if let Some(skin) = input.skin {
+        skin.draw(mesh, input.figure, FLOOR_Y, &view);
+    } else {
+        add_figure(mesh, input.figure, &view);
+    }
     add_lfe_slot(mesh, input.has_lfe, input.show_element_numbers, &view);
     // An inactive element is one whose metadata is absent or incomplete, so the
     // only coordinate available for it is the origin — the listener's own head.
@@ -108,6 +113,7 @@ pub fn build(
             &view,
         );
     }
+    mesh.sort_transparent(view.direction);
 }
 
 /// The listener.

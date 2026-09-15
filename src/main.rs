@@ -23,6 +23,7 @@ mod playlist_ui;
 mod preferences;
 mod scene3d;
 mod scene_view;
+mod skin_library;
 mod sofa_catalog;
 mod theme;
 

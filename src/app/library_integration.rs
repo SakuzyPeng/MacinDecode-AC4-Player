@@ -25,6 +25,7 @@ impl PlayerApp {
     pub(super) fn tick(&mut self, context: &egui::Context, showing: bool) {
         self.poll_library(context);
         self.poll_sofa_picker(context);
+        self.poll_skin_picker(context);
         self.sync_inspection(context);
         self.sync_decoder(context);
         if !self.restore_session_seek(context) {
@@ -107,6 +108,7 @@ impl PlayerApp {
                     self.fade_silent_objects = self.preferences.fade_silent_objects;
                     self.meter_bank_open = self.preferences.meter_bank;
                     self.meter_readout = self.preferences.meter_readout;
+                    self.restore_skin(context);
                     self.preferences_observed = self.preferences.clone();
                     self.cursor.clone_from(&session.cursor);
                     self.checkpoint = session.clone();

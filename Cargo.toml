@@ -23,6 +23,7 @@ eframe = { version = "=0.36.1", default-features = false, features = [
 # Already in the tree via wgpu, so taking it as a direct dependency costs no
 # extra compilation. Used only for the scene vertex cast in `scene3d::gpu`.
 bytemuck = { version = "1", features = ["derive"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
 macindecode-ac4-inspect = { git = "https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git", rev = "9673e1ef445e7e2ab218cc1b7b79f484fa92135f" }
 # Core decode. Not platform-gated: these crates carry no `target_os` of their
 # own and Core's release CI builds `audio-decode` for Linux, macOS and Windows

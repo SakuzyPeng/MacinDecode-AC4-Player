@@ -170,7 +170,7 @@ impl Figure {
     }
 
     /// Local X/Y/Z axes after applying the head's pitch then yaw.
-    fn head_axes(self) -> [[f32; 3]; 3] {
+    pub(super) fn head_axes(self) -> [[f32; 3]; 3] {
         let pitch = self.head_pitch.to_radians();
         let yaw = self.head_yaw.to_radians();
         let (pitch_sin, pitch_cos) = pitch.sin_cos();
@@ -191,7 +191,12 @@ impl Figure {
 
     /// Take a point given in model units relative to the neck, apply the head's
     /// basis, and return it in world space.
-    fn about_neck(local: [f32; 3], unit: f32, neck: f32, axes: [[f32; 3]; 3]) -> [f32; 3] {
+    pub(super) fn about_neck(
+        local: [f32; 3],
+        unit: f32,
+        neck: f32,
+        axes: [[f32; 3]; 3],
+    ) -> [f32; 3] {
         let rotated = [
             axes[0][0] * local[0] + axes[1][0] * local[1] + axes[2][0] * local[2],
             axes[0][1] * local[0] + axes[1][1] * local[1] + axes[2][1] * local[2],

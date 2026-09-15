@@ -91,6 +91,7 @@ fn ui_frame(
             app.draw_header(ui);
             app.draw_source_sidebar(ui);
             app.draw_transport(ui);
+            app.draw_visual_settings(context);
             for action in crate::playlist_ui::management(
                 context,
                 &app.library.summaries,
@@ -694,6 +695,101 @@ fn the_object_visual_switches_survive_a_restart() {
         crate::app::MeterReadout::Momentary,
         "the bank's unit is a preference, not a per-session mode"
     );
+}
+
+#[test]
+fn skin_import_switch_override_and_restore_use_the_visual_settings_widgets() {
+    use crate::scene3d::skin::{
+        BodyType,
+        tests::{png, sample_image},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (mut app, context) = open(dir.path());
+    crate::theme::install(&context);
+    settle(&mut app, &context);
+    for model in [BodyType::Steve, BodyType::Alex] {
+        let path = dir.path().join(format!("{model:?} test.png"));
+        std::fs::write(&path, png(&sample_image(model, false))).unwrap();
+        app.skins.import(path.clone(), &context);
+        until(&mut app, &context, |app| !app.skins.busy());
+        assert_eq!(app.skins.active.as_ref().unwrap().model, model);
+        std::fs::remove_file(path).unwrap();
+    }
+    assert_eq!(app.preferences.skins.entries.len(), 2);
+    let selected = app.preferences.skins.selected.clone();
+    app.skins.import(dir.path().join("missing.png"), &context);
+    until(&mut app, &context, |app| !app.skins.busy());
+    assert!(app.skins.error.is_some());
+    assert_eq!(app.preferences.skins.selected, selected);
+    assert_eq!(app.skins.active.as_ref().unwrap().model, BodyType::Alex);
+
+    let _ = ui_frame(&mut app, &context, 0.0, vec![]);
+    let output = ui_frame(&mut app, &context, 0.1, vec![]);
+    let widget = |output: &egui::FullOutput, label: &str| {
+        painted_text(output)
+            .into_iter()
+            .find(|(text, _, _)| text == label)
+            .unwrap_or_else(|| panic!("missing widget {label}: {:?}", painted_text(output)))
+            .1
+            .center()
+    };
+    let _ = click_widget(&mut app, &context, widget(&output, "Visual settings"), 1.0);
+    assert!(app.visual_settings_open);
+    let output = ui_frame(&mut app, &context, 1.2, vec![]);
+    assert!(
+        painted_text(&output)
+            .iter()
+            .any(|(text, _, _)| text == "Import skin PNG…")
+    );
+    let _ = click_widget(&mut app, &context, widget(&output, "Alex test"), 2.0);
+    let output = ui_frame(&mut app, &context, 2.2, vec![]);
+    let _ = click_widget(&mut app, &context, widget(&output, "Steve test"), 3.0);
+    until(&mut app, &context, |app| !app.skins.busy());
+    assert_eq!(app.skins.active.as_ref().unwrap().model, BodyType::Steve);
+    assert!(app.skins.error.is_none());
+    let output = ui_frame(&mut app, &context, 3.2, vec![]);
+    let (_, meter_label, clip) = painted_text(&output)
+        .into_iter()
+        .find(|(text, _, _)| text == "Meter bank (side panel)")
+        .unwrap_or_else(|| panic!("missing meter switch: {:?}", painted_text(&output)));
+    assert!(
+        clip.contains_rect(meter_label),
+        "the last visual switch must fit at the default window size"
+    );
+    let _ = click_widget(
+        &mut app,
+        &context,
+        widget(&output, "Auto: Steve (classic, 4 px arms)"),
+        4.0,
+    );
+    let output = ui_frame(&mut app, &context, 4.2, vec![]);
+    let _ = click_widget(
+        &mut app,
+        &context,
+        widget(&output, "Alex (slim, 3 px arms)"),
+        5.0,
+    );
+    assert_eq!(app.skins.active.as_ref().unwrap().model, BodyType::Alex);
+    app.flush_persistence();
+    app.library.shutdown();
+    drop(app);
+
+    let (mut app, context) = open(dir.path());
+    settle(&mut app, &context);
+    until(&mut app, &context, |app| !app.skins.busy());
+    let skin = app.skins.active.as_ref().unwrap();
+    assert_eq!(skin.detected, BodyType::Steve);
+    assert_eq!(skin.model, BodyType::Alex);
+    assert_eq!(app.preferences.skins.entries.len(), 2);
+    app.visual_settings_open = true;
+    let _ = ui_frame(&mut app, &context, 0.0, vec![]);
+    let output = ui_frame(&mut app, &context, 0.1, vec![]);
+    let _ = click_widget(&mut app, &context, widget(&output, "Steve test"), 1.0);
+    let output = ui_frame(&mut app, &context, 1.2, vec![]);
+    let _ = click_widget(&mut app, &context, widget(&output, "Default figure"), 2.0);
+    assert!(app.skins.active.is_none());
+    assert!(app.preferences.skins.selected.is_none());
+    assert_eq!(app.preferences.skins.entries.len(), 2);
 }
 
 fn meter_bank_frame(

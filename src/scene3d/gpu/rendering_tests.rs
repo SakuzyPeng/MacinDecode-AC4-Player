@@ -1,6 +1,10 @@
 //! Compare scene-only MSAA compositing against the former full-window MSAA pass
 //! on an actual GPU, without a window or audio device.
 use super::*;
+use crate::scene3d::skin::{
+    BodyType, Skin,
+    tests::{png, sample_image},
+};
 use crate::scene3d::{
     camera::Camera,
     scene::{self, SceneInput, SceneObject},
@@ -32,7 +36,7 @@ fn texture(device: &wgpu::Device, format: wgpu::TextureFormat, samples: u32) -> 
     })
 }
 
-fn callback(rect: Rect) -> SceneCallback {
+fn callback(rect: Rect, skin: Option<&crate::scene3d::skin::Skin>) -> SceneCallback {
     let camera = Camera::default();
     let mut mesh = MeshBuilder::default();
     let objects = [
@@ -58,6 +62,7 @@ fn callback(rect: Rect) -> SceneCallback {
         rect.height(),
         SceneInput {
             objects: &objects,
+            skin,
             show_element_numbers: true,
             has_lfe: true,
             ..Default::default()
@@ -102,6 +107,7 @@ fn render(
     format: wgpu::TextureFormat,
     rect: Rect,
     reference: bool,
+    skin: Option<&crate::scene3d::skin::Skin>,
 ) -> Vec<u8> {
     let screen = ScreenDescriptor {
         size_in_pixels: [WIDTH, HEIGHT],
@@ -113,7 +119,7 @@ fn render(
         pixels_per_point: screen.pixels_per_point,
         screen_size_px: screen.size_in_pixels,
     };
-    let callback = callback(rect);
+    let callback = callback(rect, skin);
     let mut resources = CallbackResources::default();
     resources.insert(SceneRenderer::new(device, format));
     let output = texture(device, format, 1);
@@ -170,6 +176,7 @@ fn render(
             (&renderer.solid, &callback.solid),
             (&renderer.line, &callback.line),
             (&renderer.decal, &callback.decal),
+            (&renderer.transparent, &callback.transparent),
         ] {
             pass.set_pipeline(pipeline);
             pass.draw(range.clone(), 0..1);
@@ -251,37 +258,48 @@ fn composite_preserves_scene_colours_occlusion_and_antialiasing() {
     eprintln!("GPU scene regression: {:?}", adapter.get_info());
     let (device, queue) =
         pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
-    for format in [
-        wgpu::TextureFormat::Rgba8Unorm,
-        wgpu::TextureFormat::Rgba8UnormSrgb,
-    ] {
-        for rect in [
-            Rect::from_min_max(pos2(12.25, 8.4), pos2(148.8, 121.9)),
-            Rect::from_min_max(pos2(-12.0, -5.0), pos2(125.0, 115.0)),
-            Rect::from_min_max(pos2(60.0, 40.0), pos2(185.0, 145.0)),
+    let skins = [BodyType::Steve, BodyType::Alex].map(|model| {
+        let mut image = sample_image(model, false);
+        for y in 8..16 {
+            for x in 40..48 {
+                image.put_pixel(x, y, image::Rgba([240, 30, 70, 128]));
+            }
+        }
+        Skin::decode(&png(&image)).unwrap()
+    });
+    for skin in [None, Some(&skins[0]), Some(&skins[1])] {
+        for format in [
+            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
         ] {
-            let before = render(&device, &queue, format, rect, true);
-            let after = render(&device, &queue, format, rect, false);
-            let maximum = before
-                .iter()
-                .zip(&after)
-                .map(|(&a, &b)| a.abs_diff(b))
-                .max()
-                .unwrap();
-            // An extra 8-bit resolve can round a channel by one level. Larger
-            // changes indicate a colour-space, alpha, viewport, or depth error.
-            assert!(
-                maximum <= 2,
-                "{format:?}, {rect:?}: maximum channel error {maximum}"
-            );
-            assert!(
-                after
-                    .as_chunks::<4>()
-                    .0
+            for rect in [
+                Rect::from_min_max(pos2(12.25, 8.4), pos2(148.8, 121.9)),
+                Rect::from_min_max(pos2(-12.0, -5.0), pos2(125.0, 115.0)),
+                Rect::from_min_max(pos2(60.0, 40.0), pos2(185.0, 145.0)),
+            ] {
+                let before = render(&device, &queue, format, rect, true, skin);
+                let after = render(&device, &queue, format, rect, false, skin);
+                let maximum = before
                     .iter()
-                    .any(|pixel| pixel.as_slice() != &after[..4]),
-                "scene must contain visible geometry"
-            );
+                    .zip(&after)
+                    .map(|(&a, &b)| a.abs_diff(b))
+                    .max()
+                    .unwrap();
+                // An extra 8-bit resolve can round a channel by one level. Larger
+                // changes indicate a colour-space, alpha, viewport, or depth error.
+                assert!(
+                    maximum <= 2,
+                    "{format:?}, {rect:?}: maximum channel error {maximum}"
+                );
+                assert!(
+                    after
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .any(|pixel| pixel.as_slice() != &after[..4]),
+                    "scene must contain visible geometry"
+                );
+            }
         }
     }
 }

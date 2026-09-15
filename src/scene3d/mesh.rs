@@ -83,7 +83,7 @@ pub struct ViewContext {
     pub stage: Rgb,
 }
 
-/// The three vertex streams, one per pipeline. They are separate because the
+/// The vertex streams, one per pipeline. They are separate because the
 /// pipelines differ in face culling and depth bias, not because the geometry
 /// differs in kind.
 #[derive(Debug, Default)]
@@ -95,6 +95,8 @@ pub struct MeshBuilder {
     pub line: Vec<Vertex>,
     /// Geometry coplanar with the floor; culling off and depth-biased.
     pub decal: Vec<Vertex>,
+    /// Translucent skin texel quads, sorted far to near after posing.
+    pub transparent: Vec<[Vertex; 6]>,
 }
 
 /// An annotation arrow's proportions, all in screen points except the head
@@ -137,6 +139,7 @@ impl MeshBuilder {
         self.solid.clear();
         self.line.clear();
         self.decal.clear();
+        self.transparent.clear();
     }
 
     fn stream(&mut self, layer: Layer) -> &mut Vec<Vertex> {
@@ -237,6 +240,47 @@ impl MeshBuilder {
                 colour,
             );
         }
+    }
+
+    /// A skin texel run. Empty texels were removed when the skin was loaded;
+    /// opaque ones share the scene depth buffer, and partial alpha gets its own
+    /// sorted pass. Clothing is visible from inside its shell as well.
+    pub fn add_skin_quad(
+        &mut self,
+        corners: [[f32; 3]; 4],
+        normal: [f32; 3],
+        rgba: [u8; 4],
+        double_sided: bool,
+        view: &ViewContext,
+    ) {
+        let base = Rgb::from_color32(Color32::from_rgb(rgba[0], rgba[1], rgba[2]));
+        let mut colour = base.lerp(view.ink, 1.0 - face_tone(normal)).to_bytes();
+        colour[3] = rgba[3];
+        for indices in [[0, 1, 2, 0, 2, 3], [2, 1, 0, 3, 2, 0]]
+            .into_iter()
+            .take(if double_sided { 2 } else { 1 })
+        {
+            let vertices = indices.map(|index| Vertex {
+                position: corners[index],
+                colour,
+            });
+            if rgba[3] == 255 {
+                self.solid.extend_from_slice(&vertices);
+            } else {
+                self.transparent.push(vertices);
+            }
+        }
+    }
+
+    pub fn sort_transparent(&mut self, direction: [f32; 3]) {
+        let depth = |vertices: &[Vertex; 6]| {
+            vertices
+                .iter()
+                .map(|vertex| dot(vertex.position, direction))
+                .sum::<f32>()
+        };
+        self.transparent
+            .sort_unstable_by(|a, b| depth(a).total_cmp(&depth(b)));
     }
 
     /// A hairline, expanded into a camera-facing quad.
