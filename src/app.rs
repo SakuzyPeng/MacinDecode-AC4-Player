@@ -1695,7 +1695,9 @@ impl PlayerApp {
                             for file in &self.sofa.files {
                                 let full_path = self.sofa.root.join(&file.path);
                                 let selected = Path::new(&settings.sofa) == full_path;
-                                if ui.add_enabled(file.status == "unverified", egui::Button::selectable(selected, format!("{} · {}", file.path.display(), file.status))).clicked() {
+                                let active = self.output.active_sofa().is_some_and(|path| Path::new(path) == full_path);
+                                let status = file.display_status(active);
+                                if ui.add_enabled(file.selectable(), egui::Button::selectable(selected, format!("{} · {status}", file.path.display()))).clicked() {
                                     if let Some(path) = full_path.to_str() { path.clone_into(&mut settings.sofa); }
                                     else { self.audio_settings_error = Some("This renderer requires a Unicode SOFA path".into()); }
                                 }

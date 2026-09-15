@@ -108,6 +108,34 @@ impl SpatialOutputController {
     pub fn settings(&self) -> &OutputSettings {
         &self.settings
     }
+    /// The SOFA accepted by the current native binaural output. Preferences
+    /// alone are not evidence: they can be selected before any output exists.
+    #[cfg_attr(
+        not(macinrender_output),
+        allow(
+            clippy::unused_self,
+            reason = "no native HRTF can be active in inspection builds"
+        )
+    )]
+    pub fn active_sofa(&self) -> Option<&str> {
+        #[cfg(macinrender_output)]
+        if self.runtime.is_some()
+            && self.settings.mode.resolved() == SpatialBackendKind::SafBinaural
+            && !self.settings.sofa.is_empty()
+            && matches!(
+                self.snapshot.phase,
+                OutputPhase::Ready
+                    | OutputPhase::Playing
+                    | OutputPhase::Paused
+                    | OutputPhase::Ended
+            )
+        {
+            // Hot switches replace settings only after native acknowledgement;
+            // on failure the previous SOFA remains the active one.
+            return Some(&self.settings.sofa);
+        }
+        None
+    }
     pub fn install_settings(&mut self, settings: OutputSettings) {
         self.settings = settings.validated();
         self.legacy
@@ -653,6 +681,96 @@ mod tests {
             OutputDeviceSelection::SystemDefault,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn selected_sofa_is_not_active_without_a_native_runtime() {
+        let mut output = SpatialOutputController::new();
+        output.hot_settings(OutputSettings {
+            mode: SpatialBackendKind::SafBinaural,
+            sofa: "selected-before-playback.sofa".into(),
+            ..Default::default()
+        });
+        assert_eq!(output.take_settings_result(), Some(Ok(())));
+        assert!(output.active_sofa().is_none());
+        // A ready legacy/preview snapshot cannot prove a native HRTF was loaded.
+        output.snapshot.phase = OutputPhase::Ready;
+        assert!(output.active_sofa().is_none());
+    }
+
+    #[test]
+    #[ignore = "requires MACINDECODE_AC4_TEST_SOFA; checks real native HRTF activation"]
+    fn active_sofa_follows_successful_native_loading_and_preserves_failed_switches() {
+        let path = std::env::var("MACINDECODE_AC4_TEST_SOFA").expect("set SOFA path");
+        let key = PlaybackKey::new(41, 1);
+        let (queue, reader) = scene_queue_pair(key);
+        let signature = SceneSignature::from_block(&tone(0));
+        queue.try_push(key, tone(0)).unwrap();
+        queue.mark_end_of_stream(key);
+        let settings = OutputSettings {
+            null_output: true,
+            mode: SpatialBackendKind::SafBinaural,
+            sofa: path.clone(),
+            ..Default::default()
+        };
+        let mut output = SpatialOutputController::new();
+        output.hot_settings(settings.clone());
+        assert_eq!(output.take_settings_result(), Some(Ok(())));
+        assert!(output.active_sofa().is_none());
+        output.ensure_configured(&output_config(signature), reader);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while output.active_sofa().is_none() {
+            output.poll();
+            assert_ne!(
+                output.snapshot().phase(),
+                OutputPhase::Failed,
+                "{:?}",
+                output.snapshot().error()
+            );
+            assert!(
+                Instant::now() < deadline,
+                "native HRTF did not become active"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(output.active_sofa(), Some(path.as_str()));
+
+        let wait_for_switch = |output: &mut SpatialOutputController| {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            loop {
+                output.poll();
+                if let Some(result) = output.take_settings_result() {
+                    break result;
+                }
+                assert!(Instant::now() < deadline, "native HRTF switch timed out");
+                thread::sleep(Duration::from_millis(5));
+            }
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let invalid = directory.path().join("invalid.sofa");
+        std::fs::write(&invalid, b"not a SOFA file").unwrap();
+        output.hot_settings(OutputSettings {
+            sofa: invalid.to_str().unwrap().into(),
+            ..settings.clone()
+        });
+        assert!(output.settings_pending());
+        assert_eq!(output.active_sofa(), Some(path.as_str()));
+        assert!(wait_for_switch(&mut output).is_err());
+        assert_eq!(output.active_sofa(), Some(path.as_str()));
+        assert_eq!(output.settings(), &settings);
+
+        // Switching to the built-in HRTF must remove the file's active status.
+        output.hot_settings(OutputSettings {
+            sofa: String::new(),
+            ..settings.clone()
+        });
+        wait_for_switch(&mut output).unwrap();
+        assert!(output.active_sofa().is_none());
+        output.hot_settings(settings);
+        wait_for_switch(&mut output).unwrap();
+        assert_eq!(output.active_sofa(), Some(path.as_str()));
+        output.reset();
+        assert!(output.active_sofa().is_none());
     }
 
     #[test]

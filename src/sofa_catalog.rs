@@ -22,6 +22,19 @@ pub struct Entry {
     pub sha256: Option<String>,
     pub status: String,
 }
+impl Entry {
+    pub fn selectable(&self) -> bool {
+        self.status == "unverified"
+    }
+
+    pub fn display_status(&self, active: bool) -> &str {
+        if self.selectable() {
+            if active { "in use" } else { "available" }
+        } else {
+            &self.status
+        }
+    }
+}
 
 pub struct Catalog {
     pub root: PathBuf,
@@ -87,10 +100,7 @@ impl Catalog {
         match result {
             Ok((entries, imported)) => {
                 self.files.clone_from(&entries);
-                self.message = format!(
-                    "{} SOFA entries; format validation occurs when loading audio",
-                    entries.len()
-                );
+                self.message = format!("{} SOFA entries", entries.len());
                 Some((entries, imported))
             }
             Err(error) => {
@@ -247,13 +257,21 @@ mod tests {
         assert_eq!(fs::read(&first).unwrap(), b"first");
         let files = scan(&root, Vec::new(), &cancelled).unwrap();
         assert_eq!(files.len(), 2);
+        for file in &files {
+            assert!(file.selectable());
+            assert_eq!(file.display_status(false), "available");
+            assert_eq!(file.display_status(true), "in use");
+        }
         fs::remove_file(first).unwrap();
-        assert!(
-            scan(&root, files, &cancelled)
-                .unwrap()
-                .iter()
-                .any(|file| file.status == "missing")
-        );
+        let rescanned = scan(&root, files, &cancelled).unwrap();
+        let missing = rescanned
+            .iter()
+            .find(|file| file.status == "missing")
+            .unwrap();
+        assert!(!missing.selectable());
+        assert_eq!(missing.display_status(true), "missing");
+        let available = rescanned.iter().find(|file| file.selectable()).unwrap();
+        assert_eq!(available.display_status(true), "in use");
         cancelled.store(true, Ordering::Relaxed);
         assert!(import_file(&root, &source, &cancelled).is_err());
         assert!(fs::read_dir(&root).unwrap().all(|entry| {

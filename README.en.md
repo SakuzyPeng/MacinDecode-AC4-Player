@@ -148,7 +148,9 @@ live and do not interrupt decoding of the current track.
   and everything else uses manual orientation — drag the pad in the settings window or type the
   angles. In system spatial audio mode, head tracking is the operating system's job.
 - **Custom HRTFs:** a SOFA file you pick is copied into the `sofa/` folder in the app's data
-  directory, so later you can select it straight from the list.
+  directory, so later you can select it straight from the list. **available** means it can be
+  selected; **in use** means the current binaural renderer has successfully loaded it.
+  Loading failures show a specific error.
 
 ## Platform support
 
