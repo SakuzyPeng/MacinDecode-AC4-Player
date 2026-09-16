@@ -22,19 +22,34 @@ pub(super) struct Change {
 }
 
 impl Store {
-    pub fn sofa_index(&self) -> Result<Vec<crate::sofa_catalog::Entry>> {
+    /// Each managed folder keeps its own versioned derived index beside the
+    /// others; `sofa-index-v1` is what earlier versions already wrote.
+    fn index_key(kind: crate::file_catalog::Kind) -> String {
+        format!("{}-index-v1", kind.slug)
+    }
+    pub fn file_index(
+        &self,
+        kind: crate::file_catalog::Kind,
+    ) -> Result<Vec<crate::file_catalog::Entry>> {
         let value: Option<String> = self
             .connection
             .query_row(
-                "SELECT value FROM metadata WHERE key='sofa-index-v1'",
-                [],
+                "SELECT value FROM metadata WHERE key=?1",
+                [Self::index_key(kind)],
                 |row| row.get(0),
             )
             .optional()?;
         value.map_or_else(|| Ok(Vec::new()), |value| Ok(serde_json::from_str(&value)?))
     }
-    pub fn save_sofa_index(&self, files: &[crate::sofa_catalog::Entry]) -> Result<()> {
-        self.connection.execute("INSERT INTO metadata(key,value) VALUES ('sofa-index-v1',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [serde_json::to_string(files)?])?;
+    pub fn save_file_index(
+        &self,
+        kind: crate::file_catalog::Kind,
+        files: &[crate::file_catalog::Entry],
+    ) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO metadata(key,value) VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            rusqlite::params![Self::index_key(kind), serde_json::to_string(files)?],
+        )?;
         Ok(())
     }
     pub fn open(path: &Path) -> Result<Self> {

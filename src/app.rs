@@ -37,7 +37,8 @@ use crate::theme;
 pub struct PlayerApp {
     pub smoke: Option<crate::install_check::WindowSmoke>,
     about: crate::licenses::Window,
-    sofa: crate::sofa_catalog::Catalog,
+    sofa: crate::file_catalog::Catalog,
+    hptf: crate::file_catalog::Catalog,
     skins: crate::skin_library::Catalog,
     library: LibraryController,
     browse: BrowseState,
@@ -84,7 +85,6 @@ pub struct PlayerApp {
     audio_settings_error: Option<String>,
     sofa_picker: Option<Pin<Box<dyn Future<Output = Option<rfd::FileHandle>>>>>,
     hptf_picker: Option<Pin<Box<dyn Future<Output = Option<rfd::FileHandle>>>>>,
-    hptf_picked: Option<String>,
     skin_picker: Option<Pin<Box<dyn Future<Output = Option<rfd::FileHandle>>>>>,
     camera: scene3d::camera::Camera,
     /// Whether zero-based LFE / one-based dynamic-object numbers are printed
@@ -799,7 +799,14 @@ impl PlayerApp {
             camera: camera.state(),
             ..Default::default()
         };
-        let sofa = crate::sofa_catalog::Catalog::new(directory.path.join("sofa"));
+        let sofa = crate::file_catalog::Catalog::new(
+            crate::file_catalog::SOFA,
+            directory.path.join(crate::file_catalog::SOFA.slug),
+        );
+        let hptf = crate::file_catalog::Catalog::new(
+            crate::file_catalog::HPTF,
+            directory.path.join(crate::file_catalog::HPTF.slug),
+        );
         let skins = crate::skin_library::Catalog::new(directory.path.join("skins"));
         let library = LibraryController::new(directory, preferences.clone(), context.clone());
         Self {
@@ -807,6 +814,7 @@ impl PlayerApp {
             smoke: None,
             about: crate::licenses::Window::default(),
             sofa,
+            hptf,
             skins,
             browse: BrowseState::default(),
             cursor: None,
@@ -852,7 +860,6 @@ impl PlayerApp {
             audio_settings_error: None,
             sofa_picker: None,
             hptf_picker: None,
-            hptf_picked: None,
             skin_picker: None,
             camera,
             object_numbers_visible: true,
@@ -1564,14 +1571,8 @@ impl PlayerApp {
             return;
         };
         self.hptf_picker = None;
-        let Some(path) = path else {
-            return;
-        };
-        if let Some(path) = path.path().to_str() {
-            self.hptf_picked = Some(path.to_owned());
-        } else {
-            self.audio_settings_error =
-                Some("This renderer requires a Unicode profile path".into());
+        if let Some(path) = path {
+            self.hptf.refresh(Some(path.path().to_path_buf()), context);
         }
     }
 
@@ -1624,9 +1625,6 @@ impl PlayerApp {
         }
         let mut open = true;
         let mut settings = self.output.settings().clone();
-        if let Some(path) = self.hptf_picked.take() {
-            settings.hptf = path;
-        }
         let head = self.output.head_snapshot();
         let mut manual = None;
         let mut recenter = false;
@@ -1644,7 +1642,8 @@ impl PlayerApp {
                 ui.add_enabled_ui(
                     !self.output.settings_pending()
                         && self.pending_output_change.is_none()
-                        && self.sofa_picker.is_none() && !self.sofa.busy(),
+                        && self.sofa_picker.is_none() && !self.sofa.busy()
+                        && self.hptf_picker.is_none() && !self.hptf.busy(),
                     |ui| {
                         ui.horizontal(|ui| {
                             ui.label("Playback mode");
@@ -1754,6 +1753,7 @@ impl PlayerApp {
                                 if ui.button("Choose AutoEq profile…").clicked() {
                                     self.hptf_picker = Some(Box::pin(
                                         rfd::AsyncFileDialog::new()
+                                            .set_directory(&self.hptf.root)
                                             .add_filter("AutoEq ParametricEQ", &["txt"])
                                             .pick_file(),
                                     ));
@@ -1762,7 +1762,39 @@ impl PlayerApp {
                                 if ui.button("Turn off").clicked() {
                                     settings.hptf.clear();
                                 }
+                                if ui.button("Refresh profile folder").clicked() {
+                                    self.hptf.refresh(None, context);
+                                }
                             });
+                            ui.label(self.hptf.root.display().to_string());
+                            ui.label(&self.hptf.message);
+                            for file in &self.hptf.files {
+                                let full_path = self.hptf.root.join(&file.path);
+                                let selected = Path::new(&settings.hptf) == full_path;
+                                let active = self
+                                    .output
+                                    .active_hptf()
+                                    .is_some_and(|path| Path::new(path) == full_path);
+                                let status = file.display_status(active);
+                                if ui
+                                    .add_enabled(
+                                        file.selectable(),
+                                        egui::Button::selectable(
+                                            selected,
+                                            format!("{} · {status}", file.path.display()),
+                                        ),
+                                    )
+                                    .clicked()
+                                {
+                                    if let Some(path) = full_path.to_str() {
+                                        path.clone_into(&mut settings.hptf);
+                                    } else {
+                                        self.audio_settings_error = Some(
+                                            "This renderer requires a Unicode profile path".into(),
+                                        );
+                                    }
+                                }
+                            }
                             ui.checkbox(
                                 &mut settings.hptf_auto_trim,
                                 "Trim further if the curve still peaks above 0 dB",
@@ -3299,8 +3331,13 @@ impl eframe::App for PlayerApp {
             self.sofa.files = self.library.sofa_index.take().unwrap_or_default();
             self.sofa.refresh(None, context);
         }
+        if self.library.ready && !self.hptf.started {
+            self.hptf.files = self.library.hptf_index.take().unwrap_or_default();
+            self.hptf.refresh(None, context);
+        }
         if let Some((files, imported)) = self.sofa.poll() {
-            self.library.save_sofa_index(files);
+            self.library
+                .save_file_index(crate::file_catalog::SOFA, files);
             if let Some(path) = imported {
                 if let Some(path) = path.to_str() {
                     let mut settings = self.output.settings().clone();
@@ -3309,6 +3346,20 @@ impl eframe::App for PlayerApp {
                 } else {
                     self.audio_settings_error =
                         Some("This renderer requires a Unicode SOFA path".into());
+                }
+            }
+        }
+        if let Some((files, imported)) = self.hptf.poll() {
+            self.library
+                .save_file_index(crate::file_catalog::HPTF, files);
+            if let Some(path) = imported {
+                if let Some(path) = path.to_str() {
+                    let mut settings = self.output.settings().clone();
+                    path.clone_into(&mut settings.hptf);
+                    self.change_output_settings(settings, context);
+                } else {
+                    self.audio_settings_error =
+                        Some("This renderer requires a Unicode profile path".into());
                 }
             }
         }
@@ -3389,6 +3440,7 @@ impl eframe::App for PlayerApp {
 
     fn on_exit(&mut self) {
         self.sofa.shutdown();
+        self.hptf.shutdown();
         self.flush_persistence();
         self.library.shutdown();
         if let Some(error) = &self.library.error {

@@ -44,7 +44,7 @@ enum Command {
     Browse(PlaylistId, SavedBrowse),
     Session(SessionState),
     Preferences(Box<AppPreferences>),
-    SofaIndex(Vec<crate::sofa_catalog::Entry>),
+    FileIndex(crate::file_catalog::Kind, Vec<crate::file_catalog::Entry>),
     Retry,
     Shutdown,
 }
@@ -66,7 +66,7 @@ enum Event {
         error: Option<String>,
     },
     Recovered,
-    SofaIndex(Vec<crate::sofa_catalog::Entry>),
+    FileIndex(crate::file_catalog::Kind, Vec<crate::file_catalog::Entry>),
     Done,
 }
 pub enum Notice {
@@ -93,7 +93,8 @@ pub struct LibraryController {
     pub ready: bool,
     pub error: Option<String>,
     pub message: String,
-    pub sofa_index: Option<Vec<crate::sofa_catalog::Entry>>,
+    pub sofa_index: Option<Vec<crate::file_catalog::Entry>>,
+    pub hptf_index: Option<Vec<crate::file_catalog::Entry>>,
 }
 impl LibraryController {
     pub fn new(
@@ -129,6 +130,7 @@ impl LibraryController {
             error,
             message: "Loading library…".into(),
             sofa_index: None,
+            hptf_index: None,
         }
     }
     fn send(&mut self, command: Command) {
@@ -154,8 +156,23 @@ impl LibraryController {
     pub fn save_preferences(&mut self, prefs: AppPreferences) {
         self.send(Command::Preferences(Box::new(prefs)));
     }
-    pub fn save_sofa_index(&mut self, files: Vec<crate::sofa_catalog::Entry>) {
-        self.send(Command::SofaIndex(files));
+    pub fn save_file_index(
+        &mut self,
+        kind: crate::file_catalog::Kind,
+        files: Vec<crate::file_catalog::Entry>,
+    ) {
+        self.send(Command::FileIndex(kind, files));
+    }
+    /// The one place that has to know which folder an index belongs to.
+    fn index_slot(
+        &mut self,
+        kind: crate::file_catalog::Kind,
+    ) -> &mut Option<Vec<crate::file_catalog::Entry>> {
+        if kind == crate::file_catalog::HPTF {
+            &mut self.hptf_index
+        } else {
+            &mut self.sofa_index
+        }
     }
     pub fn retry(&mut self) {
         self.send(Command::Retry);
@@ -225,7 +242,7 @@ impl LibraryController {
                         self.message = message;
                     }
                 }
-                Event::SofaIndex(files) => self.sofa_index = Some(files),
+                Event::FileIndex(kind, files) => *self.index_slot(kind) = Some(files),
                 Event::Error(error) => self.error = Some(error),
                 Event::MediaError {
                     revision,
@@ -335,12 +352,15 @@ fn run(
     let mut requested_preferences = prefs.clone();
     let mut requested_session = session.clone();
     emit(Event::Boot(Box::new(prefs), session));
-    emit(Event::SofaIndex(
-        store
-            .as_ref()
-            .and_then(|store| store.sofa_index().ok())
-            .unwrap_or_default(),
-    ));
+    for kind in [crate::file_catalog::SOFA, crate::file_catalog::HPTF] {
+        emit(Event::FileIndex(
+            kind,
+            store
+                .as_ref()
+                .and_then(|store| store.file_index(kind).ok())
+                .unwrap_or_default(),
+        ));
+    }
     if let Some(store) = &store {
         match watch.snapshot(store) {
             Ok(s) => emit(Event::Snapshot(s)),
@@ -353,11 +373,11 @@ fn run(
         }
         let result = (|| -> store::Result<bool> {
             match command {
-                Command::SofaIndex(files) => {
+                Command::FileIndex(kind, files) => {
                     store
                         .as_ref()
                         .ok_or("Library is unavailable")?
-                        .save_sofa_index(&files)?;
+                        .save_file_index(kind, &files)?;
                     Ok(false)
                 }
                 Command::Preferences(prefs) => {
@@ -432,7 +452,7 @@ fn run(
                             Ok(false)
                         }
                         Command::Preferences(_)
-                        | Command::SofaIndex(_)
+                        | Command::FileIndex(..)
                         | Command::Retry
                         | Command::Shutdown => {
                             unreachable!()

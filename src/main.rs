@@ -11,6 +11,7 @@ mod app_icon;
 mod backend;
 mod bitstream_ui;
 pub mod decoder;
+mod file_catalog;
 mod head_tracking;
 mod inspection;
 mod install_check;
@@ -24,7 +25,6 @@ mod preferences;
 mod scene3d;
 mod scene_view;
 mod skin_library;
-mod sofa_catalog;
 mod theme;
 
 fn main() {

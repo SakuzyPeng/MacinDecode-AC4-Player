@@ -41,8 +41,10 @@ impl DataDirectory {
                 path.display()
             )
         })?;
-        fs::create_dir_all(path.join("sofa"))
-            .map_err(|e| format!("Cannot create SOFA directory: {e}"))?;
+        for kind in [crate::file_catalog::SOFA, crate::file_catalog::HPTF] {
+            fs::create_dir_all(path.join(kind.slug))
+                .map_err(|e| format!("Cannot create the {} directory: {e}", kind.noun))?;
+        }
         Ok(Arc::new(Self { path, _lock: lock }))
     }
 }

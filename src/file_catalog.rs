@@ -1,4 +1,7 @@
-//! Derived SOFA inventory; no renderer or database connection enters this worker.
+//! Derived inventory of a managed folder; no renderer or database connection
+//! enters this worker. One folder per [`Kind`]: the rules differ only in what a
+//! file is called and which extension counts, so scanning, hashing, atomic
+//! import and the missing/unreadable states are shared rather than copied.
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{Read, Write};
@@ -14,6 +17,30 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+/// One managed folder's rules.
+///
+/// `slug` names the derived things so they cannot drift apart: the worker thread
+/// is `<slug>-catalog`, a staged import is `.<slug>-import-`, and the versioned
+/// index in the library's `metadata` table is `<slug>-index-v1`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Kind {
+    pub slug: &'static str,
+    /// Matched case-insensitively.
+    pub extension: &'static str,
+    /// What one file is called, in the messages a user reads.
+    pub noun: &'static str,
+}
+pub const SOFA: Kind = Kind {
+    slug: "sofa",
+    extension: "sofa",
+    noun: "SOFA",
+};
+pub const HPTF: Kind = Kind {
+    slug: "hptf",
+    extension: "txt",
+    noun: "AutoEq profile",
+};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Entry {
@@ -37,6 +64,7 @@ impl Entry {
 }
 
 pub struct Catalog {
+    pub kind: Kind,
     pub root: PathBuf,
     pub files: Vec<Entry>,
     pub message: String,
@@ -47,9 +75,10 @@ pub struct Catalog {
     cancelled: Arc<AtomicBool>,
 }
 impl Catalog {
-    pub fn new(root: PathBuf) -> Self {
+    pub fn new(kind: Kind, root: PathBuf) -> Self {
         let (sender, receiver) = mpsc::channel();
         Self {
+            kind,
             root,
             files: Vec::new(),
             message: String::new(),
@@ -68,8 +97,9 @@ impl Catalog {
             return;
         }
         self.started = true;
-        self.message = "Scanning / importing SOFA…".into();
-        let (root, previous, sender, cancelled, context) = (
+        self.message = format!("Scanning / importing {}…", self.kind.noun);
+        let (kind, root, previous, sender, cancelled, context) = (
+            self.kind,
             self.root.clone(),
             self.files.clone(),
             self.sender.clone(),
@@ -77,13 +107,13 @@ impl Catalog {
             context.clone(),
         );
         match std::thread::Builder::new()
-            .name("sofa-catalog".into())
+            .name(format!("{}-catalog", kind.slug))
             .spawn(move || {
                 let result = (|| {
                     let imported = import
-                        .map(|source| import_file(&root, &source, &cancelled))
+                        .map(|source| import_file(kind, &root, &source, &cancelled))
                         .transpose()?;
-                    Ok((scan(&root, previous, &cancelled)?, imported))
+                    Ok((scan(kind, &root, previous, &cancelled)?, imported))
                 })();
                 let _ = sender.send(result);
                 context.request_repaint();
@@ -100,7 +130,7 @@ impl Catalog {
         match result {
             Ok((entries, imported)) => {
                 self.files.clone_from(&entries);
-                self.message = format!("{} SOFA entries", entries.len());
+                self.message = format!("{} {} entries", entries.len(), self.kind.noun);
                 Some((entries, imported))
             }
             Err(error) => {
@@ -124,7 +154,7 @@ impl Drop for Catalog {
 
 fn check(cancelled: &AtomicBool) -> Result<()> {
     if cancelled.load(Ordering::Relaxed) {
-        return Err("SOFA operation cancelled".into());
+        return Err("Managed folder operation cancelled".into());
     }
     Ok(())
 }
@@ -149,9 +179,13 @@ fn copy_hash(
 fn fingerprint(path: &Path, cancelled: &AtomicBool) -> Result<String> {
     copy_hash(&mut File::open(path)?, &mut std::io::sink(), cancelled)
 }
-fn scan(root: &Path, old: Vec<Entry>, cancelled: &AtomicBool) -> Result<Vec<Entry>> {
+fn scan(kind: Kind, root: &Path, old: Vec<Entry>, cancelled: &AtomicBool) -> Result<Vec<Entry>> {
     if !fs::symlink_metadata(root)?.is_dir() {
-        return Err("SOFA root must be a directory, not a symlink".into());
+        return Err(format!(
+            "The {} folder must be a directory, not a symlink",
+            kind.noun
+        )
+        .into());
     }
     let mut files: BTreeMap<_, _> = old
         .into_iter()
@@ -165,15 +199,15 @@ fn scan(root: &Path, old: Vec<Entry>, cancelled: &AtomicBool) -> Result<Vec<Entr
         for entry in fs::read_dir(directory)? {
             check(cancelled)?;
             let entry = entry?;
-            let kind = entry.file_type()?;
-            if kind.is_dir() {
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
                 directories.push(entry.path());
             }
-            if !kind.is_file()
+            if !file_type.is_file()
                 || !entry
                     .path()
                     .extension()
-                    .is_some_and(|e| e.eq_ignore_ascii_case("sofa"))
+                    .is_some_and(|e| e.eq_ignore_ascii_case(kind.extension))
             {
                 continue;
             }
@@ -197,19 +231,19 @@ fn scan(root: &Path, old: Vec<Entry>, cancelled: &AtomicBool) -> Result<Vec<Entr
     check(cancelled)?;
     Ok(files.into_values().collect())
 }
-fn import_file(root: &Path, source: &Path, cancelled: &AtomicBool) -> Result<PathBuf> {
+fn import_file(kind: Kind, root: &Path, source: &Path, cancelled: &AtomicBool) -> Result<PathBuf> {
     if !fs::symlink_metadata(root)?.is_dir() || !fs::symlink_metadata(source)?.is_file() {
-        return Err("Select a regular SOFA file and directory".into());
+        return Err(format!("Select a regular {} file and directory", kind.noun).into());
     }
     let name = source.file_name().ok_or("Missing file name")?;
     if !source
         .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("sofa"))
+        .is_some_and(|e| e.eq_ignore_ascii_case(kind.extension))
     {
-        return Err("Select a .sofa file".into());
+        return Err(format!("Select a .{} file", kind.extension).into());
     }
     let mut staged = tempfile::Builder::new()
-        .prefix(".sofa-import-")
+        .prefix(format!(".{}-import-", kind.slug).as_str())
         .suffix(".tmp")
         .tempfile_in(root)?;
     let hash = copy_hash(&mut File::open(source)?, &mut staged, cancelled)?;
@@ -233,7 +267,7 @@ fn import_file(root: &Path, source: &Path, cancelled: &AtomicBool) -> Result<Pat
             }
         }
         let mut next = source.file_stem().unwrap_or(name).to_os_string();
-        next.push(format!("-{}-{index}.sofa", &hash[..12]));
+        next.push(format!("-{}-{index}.{}", &hash[..12], kind.extension));
         target = root.join(next);
     }
     Err("Too many file name collisions".into())
@@ -250,12 +284,18 @@ mod tests {
         let source = directory.path().join("个人.sofa");
         fs::write(&source, b"first").unwrap();
         let cancelled = AtomicBool::new(false);
-        let first = import_file(&root, &source, &cancelled).unwrap();
-        assert_eq!(first, import_file(&root, &source, &cancelled).unwrap());
+        let first = import_file(SOFA, &root, &source, &cancelled).unwrap();
+        assert_eq!(
+            first,
+            import_file(SOFA, &root, &source, &cancelled).unwrap()
+        );
         fs::write(&source, b"second").unwrap();
-        assert_ne!(first, import_file(&root, &source, &cancelled).unwrap());
+        assert_ne!(
+            first,
+            import_file(SOFA, &root, &source, &cancelled).unwrap()
+        );
         assert_eq!(fs::read(&first).unwrap(), b"first");
-        let files = scan(&root, Vec::new(), &cancelled).unwrap();
+        let files = scan(SOFA, &root, Vec::new(), &cancelled).unwrap();
         assert_eq!(files.len(), 2);
         for file in &files {
             assert!(file.selectable());
@@ -263,7 +303,7 @@ mod tests {
             assert_eq!(file.display_status(true), "in use");
         }
         fs::remove_file(first).unwrap();
-        let rescanned = scan(&root, files, &cancelled).unwrap();
+        let rescanned = scan(SOFA, &root, files, &cancelled).unwrap();
         let missing = rescanned
             .iter()
             .find(|file| file.status == "missing")
@@ -273,7 +313,7 @@ mod tests {
         let available = rescanned.iter().find(|file| file.selectable()).unwrap();
         assert_eq!(available.display_status(true), "in use");
         cancelled.store(true, Ordering::Relaxed);
-        assert!(import_file(&root, &source, &cancelled).is_err());
+        assert!(import_file(SOFA, &root, &source, &cancelled).is_err());
         assert!(fs::read_dir(&root).unwrap().all(|entry| {
             !entry
                 .unwrap()
@@ -281,5 +321,35 @@ mod tests {
                 .to_string_lossy()
                 .starts_with(".sofa-import-")
         }));
+    }
+
+    #[test]
+    fn each_folder_takes_only_its_own_extension_and_stages_under_its_own_slug() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("hptf");
+        fs::create_dir(&root).unwrap();
+        let cancelled = AtomicBool::new(false);
+
+        let profile = directory.path().join("Sony MDR-MV1 ParametricEQ.txt");
+        fs::write(&profile, b"Preamp: -4.1 dB").unwrap();
+        let imported = import_file(HPTF, &root, &profile, &cancelled).unwrap();
+        assert_eq!(imported.extension().unwrap(), "txt");
+        // A SOFA dropped into the profile folder is not a profile, and the
+        // reverse holds too: neither folder silently adopts the other's files.
+        let hrir = directory.path().join("personal.sofa");
+        fs::write(&hrir, b"hrir").unwrap();
+        assert!(import_file(HPTF, &root, &hrir, &cancelled).is_err());
+        assert!(import_file(SOFA, &root, &profile, &cancelled).is_err());
+        fs::copy(&hrir, root.join("personal.sofa")).unwrap();
+        let files = scan(HPTF, &root, Vec::new(), &cancelled).unwrap();
+        assert_eq!(files.len(), 1, "only the profile is inventoried");
+
+        // A second, differing profile of the same name takes the slug's suffix
+        // rather than overwriting the first.
+        fs::write(&profile, b"Preamp: -3.0 dB").unwrap();
+        let second = import_file(HPTF, &root, &profile, &cancelled).unwrap();
+        assert_ne!(imported, second);
+        assert_eq!(fs::read(&imported).unwrap(), b"Preamp: -4.1 dB");
+        assert_eq!(scan(HPTF, &root, Vec::new(), &cancelled).unwrap().len(), 2);
     }
 }

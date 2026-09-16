@@ -166,7 +166,8 @@ live and do not interrupt decoding of the current track.
   compensation sits upstream of the output limiter, so a boosted band is still caught by the peak
   ceiling, and switching profiles crossfades without interrupting playback. The settings window
   reports the bands and preamp actually running, and can trim further when a curve still peaks above
-  0 dBFS.
+  0 dBFS. A profile you pick is copied into the `hptf/` folder in the app's data directory and
+  listed with the same **available** / **in use** states as a SOFA.
 
 ## Platform support
 
@@ -234,7 +235,8 @@ the other devices back one at a time — that separates chain latency from head-
 - Linux: `${XDG_DATA_HOME:-~/.local/share}/com.macinrender.macindecode-ac4-player/`
 
 That folder holds the playlist database (`library.sqlite3`), settings (`settings.json`), window state
-(`app.ron`), SOFA files (`sofa/`) and imported skins (`skins/`). Deleting it resets the app. Starting with
+(`app.ron`), SOFA files (`sofa/`), headphone compensation profiles (`hptf/`) and imported
+skins (`skins/`). Deleting it resets the app. Starting with
 `--data-dir <path>` uses a separate data directory instead.
 
 **A file was renamed or moved — now what?**

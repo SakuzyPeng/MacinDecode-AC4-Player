@@ -125,6 +125,7 @@ objects** 时，持续约两秒没有信号的对象会淡出场景——铭牌�
   `ParametricEQ.txt`，把耳机自身的频响从双耳监听里补掉。仅在 **SAF binaural** 下可用——
   系统空间音频和 Windows 对象直通把多声道床交给操作系统，最终两声道不在播放器这一侧生成。
   补偿加在输出限幅之前，被抬高的频段仍受峰值保护；换档位走短交叉淡化，不中断播放。
+  选中的文件会复制到数据目录的 `hptf/` 中统一管理，和 SOFA 一样按 **available** / **in use** 列出。
   设置里会显示实际生效的段数和 preamp；曲线仍然高于 0 dBFS 时可以让播放器再压一点。
 
 ## 平台支持
@@ -182,7 +183,7 @@ objects** 时，持续约两秒没有信号的对象会淡出场景——铭牌�
 - Windows：`%APPDATA%\com.macinrender.macindecode-ac4-player\data\`
 - Linux：`${XDG_DATA_HOME:-~/.local/share}/com.macinrender.macindecode-ac4-player/`
 
-里面是播放列表数据库（`library.sqlite3`）、设置（`settings.json`）、窗口状态（`app.ron`）、SOFA 文件（`sofa/`）和已导入皮肤（`skins/`）。
+里面是播放列表数据库（`library.sqlite3`）、设置（`settings.json`）、窗口状态（`app.ron`）、SOFA 文件（`sofa/`）、耳机补偿曲线（`hptf/`）和已导入皮肤（`skins/`）。
 删掉整个目录就能恢复初始状态。加 `--data-dir <路径>` 启动可以使用独立的数据目录。
 
 **文件改名或移动之后怎么办？**

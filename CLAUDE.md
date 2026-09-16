@@ -26,7 +26,7 @@ that builds without the ETSI spec tables.
 Design docs (Chinese) carry the authoritative contracts; keep them in sync when changing the boundary
 they describe: `docs/ARCHITECTURE.md`, `docs/MACINRENDER.md` (output, Atmos label assist, head
 control, native build), `docs/WINDOWS_DECODE.md`, `docs/WINDOWS_SPATIAL_AUDIO.md`,
-`docs/PLAYLISTS.md` (persistence), `docs/STORAGE.md` (data directory, SOFA), `docs/PACKAGING.md`
+`docs/PLAYLISTS.md` (persistence), `docs/STORAGE.md` (data directory, managed folders), `docs/PACKAGING.md`
 (installers, CI). `README.md` (Chinese) and `README.en.md` (English) are a pair — a user-visible
 change lands in both.
 
@@ -146,7 +146,10 @@ each frame.
 - `backend::SpatialOutputController` (`backend/controller.rs`) — mode/device policy, settings hot
   swap, head control, and whichever output exists: the Windows `NativeOutputController`
   (`backend.rs`, `backend/windows.rs`) and/or the MacinRender producer (`backend/macinrender.rs`).
-- `sofa_catalog` — background scan and atomic import of the managed `sofa/` folder.
+- `file_catalog` — background scan and atomic import of a managed folder, one instance per
+  `Kind`: `sofa/` for HRIRs and `hptf/` for AutoEq headphone profiles. The `slug` derives the
+  worker thread, the staged import prefix and the `<slug>-index-v1` key in SQLite `metadata`,
+  so those three cannot drift apart.
 - `head_tracking::HeadTracker` — its own clock, independent of egui repainting.
 
 ### Worker threads
@@ -158,7 +161,7 @@ Every one of these is named; keep new ones named too.
 | `ac4-core-decode`, `ac4-seek-index` | `decoder/worker.rs` |
 | `ac4-inspection` | `inspection.rs` |
 | `player-library` | `library.rs` |
-| `sofa-catalog` | `sofa_catalog.rs` |
+| `sofa-catalog`, `hptf-catalog` | `file_catalog.rs` |
 | `listener-orientation` | `head_tracking.rs` |
 | `macinrender-scene-producer`, `hrtf-preparation`, `hptf-preparation`, `pcm-device-catalog`, `discard-prepared-output` | `backend/macinrender.rs` |
 | `prepare-audio-output` | `backend/controller.rs` |
