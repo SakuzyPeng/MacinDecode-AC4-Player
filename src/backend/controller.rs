@@ -207,6 +207,7 @@ impl SpatialOutputController {
             return HptfReadout {
                 enabled: status.enabled,
                 bands: status.bands,
+                rate: status.rate,
                 preamp_db: status.preamp_db,
                 auto_trim_db: status.auto_trim_db,
                 max_response_db: status.max_response_db,

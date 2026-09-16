@@ -85,6 +85,8 @@ pub struct PlayerApp {
     audio_settings_error: Option<String>,
     sofa_picker: Option<Pin<Box<dyn Future<Output = Option<rfd::FileHandle>>>>>,
     hptf_picker: Option<Pin<Box<dyn Future<Output = Option<rfd::FileHandle>>>>>,
+    /// The drawn profile, read once per path and design rate.
+    hptf_drawing: Option<(String, u32, Result<crate::hptf_profile::Curve, String>)>,
     skin_picker: Option<Pin<Box<dyn Future<Output = Option<rfd::FileHandle>>>>>,
     camera: scene3d::camera::Camera,
     /// Whether zero-based LFE / one-based dynamic-object numbers are printed
@@ -860,6 +862,7 @@ impl PlayerApp {
             audio_settings_error: None,
             sofa_picker: None,
             hptf_picker: None,
+            hptf_drawing: None,
             skin_picker: None,
             camera,
             object_numbers_visible: true,
@@ -1615,6 +1618,31 @@ impl PlayerApp {
         }
     }
 
+    /// The curve for `path`, read from disk only when the profile or the rate it
+    /// must be designed at changes.
+    fn hptf_curve(
+        &mut self,
+        path: &str,
+        rate: u32,
+    ) -> Option<&Result<crate::hptf_profile::Curve, String>> {
+        if path.is_empty() {
+            self.hptf_drawing = None;
+            return None;
+        }
+        if self
+            .hptf_drawing
+            .as_ref()
+            .is_none_or(|(cached, at, _)| cached != path || *at != rate)
+        {
+            self.hptf_drawing = Some((
+                path.to_owned(),
+                rate,
+                crate::hptf_profile::Curve::read(path, rate),
+            ));
+        }
+        self.hptf_drawing.as_ref().map(|(_, _, curve)| curve)
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "audio settings share a single transactional update"
@@ -1810,7 +1838,29 @@ impl PlayerApp {
                                 "Off uses the profile's own Preamp line verbatim. This bounds the frequency response, not transient peaks.",
                             );
                             let hptf = self.output.hptf_readout();
-                            if self.output.active_hptf().is_some() {
+                            let running = self.output.active_hptf().is_some();
+                            // The renderer designs at the rate its output runs;
+                            // 48 kHz is what a Scene output is created with, so
+                            // that is the curve to draw before one exists.
+                            let rate = if hptf.rate == 0 { 48_000 } else { hptf.rate };
+                            let profile = settings.hptf.clone();
+                            match self.hptf_curve(&profile, rate) {
+                                Some(Ok(curve)) => {
+                                    let curve = curve.clone();
+                                    draw_hptf_curve(ui, &curve);
+                                    if running && let Some(note) = hptf_disagreement(&curve, &hptf) {
+                                        ui.colored_label(theme::WARNING, note);
+                                    }
+                                }
+                                Some(Err(error)) => {
+                                    ui.colored_label(
+                                        theme::WARNING,
+                                        format!("Cannot read this profile: {error}"),
+                                    );
+                                }
+                                None => {}
+                            }
+                            if running {
                                 ui.label(format!(
                                     "In use · {} bands · preamp {:+.1} dB{}",
                                     hptf.bands,
@@ -3500,6 +3550,143 @@ enum StatusKind {
     Idle,
     Ready,
     Warning,
+}
+
+/// The response a profile's cascade applies to the headphone feed.
+///
+/// Drawn with the preamp folded in, so the top rule is full scale and the height
+/// of the curve below it is the headroom the preamp bought. The axis is fixed at
+/// +3 to -12 dB rather than fitted to the data: two profiles looked at a minute
+/// apart have to stay comparable by eye, which a rescaling axis quietly
+/// destroys. A curve that runs past either end extends the axis instead.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "the index is bounded by the stored curve's length, far inside \
+              what f32 represents exactly"
+)]
+fn draw_hptf_curve(ui: &mut egui::Ui, curve: &crate::hptf_profile::Curve) {
+    const LABELS: f32 = 13.0;
+    const COLUMNS: usize = 512;
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), 104.0),
+        egui::Sense::hover(),
+    );
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 2.0, theme::STAGE);
+    painter.rect_stroke(
+        rect,
+        2.0,
+        Stroke::new(1.0, theme::BORDER),
+        egui::StrokeKind::Inside,
+    );
+
+    let plot = egui::Rect::from_min_max(rect.min, egui::pos2(rect.max.x, rect.max.y - LABELS));
+    let top = 3.0_f32.max(curve.max_response_db.ceil());
+    let bottom = (-12.0_f32).min(curve.floor().floor());
+    let y = |db: f32| plot.top() + (top - db) / (top - bottom) * plot.height();
+    let x = |hz: f64| plot.left() + crate::hptf_profile::Curve::position(hz) * plot.width();
+
+    for (hz, label) in [(100.0, "100"), (1000.0, "1k"), (10_000.0, "10k")] {
+        painter.line_segment(
+            [
+                egui::pos2(x(hz), plot.top()),
+                egui::pos2(x(hz), plot.bottom()),
+            ],
+            Stroke::new(1.0, theme::BORDER),
+        );
+        painter.text(
+            egui::pos2(x(hz), rect.max.y - 1.0),
+            Align2::CENTER_BOTTOM,
+            label,
+            egui::FontId::monospace(8.0),
+            theme::MUTED,
+        );
+    }
+    for (hz, align, label) in [
+        (crate::hptf_profile::MIN_HZ, Align2::LEFT_BOTTOM, "20 Hz"),
+        (crate::hptf_profile::MAX_HZ, Align2::RIGHT_BOTTOM, "20k"),
+    ] {
+        painter.text(
+            egui::pos2(x(hz), rect.max.y - 1.0),
+            align,
+            label,
+            egui::FontId::monospace(8.0),
+            theme::MUTED,
+        );
+    }
+    for (db, colour, label) in [
+        (-6.0_f32, theme::BORDER, "-6"),
+        (0.0, theme::MUTED, "0 dBFS"),
+    ] {
+        painter.line_segment(
+            [
+                egui::pos2(plot.left(), y(db)),
+                egui::pos2(plot.right(), y(db)),
+            ],
+            Stroke::new(1.0, colour),
+        );
+        painter.text(
+            egui::pos2(plot.left() + 3.0, y(db) - 1.0),
+            Align2::LEFT_BOTTOM,
+            label,
+            egui::FontId::monospace(8.0),
+            theme::MUTED,
+        );
+    }
+
+    // The stored curve is far denser than any panel is wide, and the extra
+    // vertices only cost tessellation. COLUMNS still leaves more than one sample
+    // per pixel at the settings window's width.
+    let last = curve.points.len().saturating_sub(1);
+    let step = curve.points.len().div_ceil(COLUMNS).max(1);
+    let points: Vec<_> = (0..curve.points.len())
+        .step_by(step)
+        .chain(std::iter::once(last))
+        .map(|index| {
+            let across = index as f32 / last.max(1) as f32;
+            egui::pos2(plot.left() + across * plot.width(), y(curve.points[index]))
+        })
+        .collect();
+    painter.add(egui::Shape::line(points, Stroke::new(1.5, theme::ACCENT)));
+    painter.circle_filled(
+        egui::pos2(x(f64::from(curve.peak_hz)), y(curve.max_response_db)),
+        2.5,
+        theme::ACCENT,
+    );
+}
+
+/// Where our reading of a profile and the renderer's disagree.
+///
+/// Two independent parses of one documented format: when they differ, the
+/// running cascade is the truth and the drawing is the thing to distrust, so say
+/// so rather than let a wrong picture stand.
+fn hptf_disagreement(
+    curve: &crate::hptf_profile::Curve,
+    readout: &crate::backend::HptfReadout,
+) -> Option<String> {
+    if readout.bands != curve.bands {
+        return Some(format!(
+            "Showing {} bands, but the renderer is running {}.",
+            curve.bands, readout.bands
+        ));
+    }
+    if (readout.preamp_db - curve.preamp_db).abs() > 0.01 {
+        return Some(format!(
+            "Showing a preamp of {:+.2} dB, but the renderer read {:+.2} dB.",
+            curve.preamp_db, readout.preamp_db
+        ));
+    }
+    // With auto-trim on, the renderer's peak is the one it measured before
+    // attenuating, which this curve has no way to know about. Compare only where
+    // the two describe the same cascade.
+    if readout.auto_trim_db == 0.0 && (readout.max_response_db - curve.max_response_db).abs() > 0.1
+    {
+        return Some(format!(
+            "Showing a peak of {:+.2} dB, but the renderer measured {:+.2} dB.",
+            curve.max_response_db, readout.max_response_db
+        ));
+    }
+    None
 }
 
 fn is_reconfigurable_scene_error(error: &str) -> bool {

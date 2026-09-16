@@ -13,6 +13,7 @@ mod bitstream_ui;
 pub mod decoder;
 mod file_catalog;
 mod head_tracking;
+mod hptf_profile;
 mod inspection;
 mod install_check;
 mod library;

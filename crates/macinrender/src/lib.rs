@@ -77,6 +77,9 @@ pub struct HptfSettings {
 pub struct HptfStatus {
     pub enabled: bool,
     pub bands: u32,
+    /// The rate the sections were designed at. A biquad's response depends
+    /// on it, so a caller drawing the curve has to use this one.
+    pub rate: u32,
     pub preamp_db: f32,
     pub auto_trim_db: f32,
     /// Peak of the designed response over 20 Hz-20 kHz, preamp included. Above
@@ -542,6 +545,7 @@ impl Control {
         Ok(HptfStatus {
             enabled: info.enabled != 0,
             bands: info.band_count,
+            rate: info.sample_rate,
             preamp_db: info.preamp_db,
             auto_trim_db: info.auto_trim_db,
             max_response_db: info.max_response_db,

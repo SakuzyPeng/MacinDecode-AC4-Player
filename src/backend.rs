@@ -176,6 +176,8 @@ enum OutputClock {
 pub struct HptfReadout {
     pub enabled: bool,
     pub bands: u32,
+    /// The rate the renderer designed the sections at; zero when nothing runs.
+    pub rate: u32,
     pub preamp_db: f32,
     pub auto_trim_db: f32,
     /// Peak of the designed response over the audible band, preamp included.
