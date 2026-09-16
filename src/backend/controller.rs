@@ -5,7 +5,7 @@ use std::time::Instant;
 #[cfg(macinrender_output)]
 use super::OutputPhase;
 use super::{
-    NativeOutputController, OutputDeviceInfo, OutputDeviceSelection, OutputSettings,
+    HptfReadout, NativeOutputController, OutputDeviceInfo, OutputDeviceSelection, OutputSettings,
     OutputSnapshot, OutputStreamConfig, SpatialBackendKind,
 };
 use crate::decoder::SceneQueueReader;
@@ -51,6 +51,13 @@ pub struct SpatialOutputController {
     preparation: Option<Preparation>,
     #[cfg(macinrender_output)]
     prepared_session: Option<super::macinrender::PreparedSession>,
+    /// What was last handed to the current output, so reconciling is idempotent.
+    /// A new output starts with no compensation, so this resets with it.
+    #[cfg(macinrender_output)]
+    hptf_sent: Option<macindecode_macinrender::HptfSettings>,
+    #[cfg(macinrender_output)]
+    hptf_revision: u64,
+    hptf_error: Option<String>,
     update_result: Option<Result<(), String>>,
     playing: bool,
     gain: f32,
@@ -92,6 +99,11 @@ impl SpatialOutputController {
             preparation: None,
             #[cfg(macinrender_output)]
             prepared_session: None,
+            #[cfg(macinrender_output)]
+            hptf_sent: None,
+            #[cfg(macinrender_output)]
+            hptf_revision: 0,
+            hptf_error: None,
             update_result: None,
             playing: false,
             gain: 1.0,
@@ -136,10 +148,81 @@ impl SpatialOutputController {
         }
         None
     }
+    /// Hand the current output the compensation the settings ask for, once.
+    ///
+    /// Called wherever settings or the output itself change, because a freshly
+    /// built output starts with none: the renderer carries a profile across its
+    /// own backend and device switches, but not across an output we replaced.
+    #[cfg(macinrender_output)]
+    fn sync_hptf(&mut self) {
+        let Some(runtime) = &self.runtime else {
+            return;
+        };
+        let wanted = self.settings.hptf();
+        // An output that never took a profile needs no request to stay without
+        // one, which also keeps the unsupported answer below meaningful.
+        if self.hptf_sent.as_ref() == Some(&wanted)
+            || (self.hptf_sent.is_none() && wanted.profile.is_empty())
+        {
+            return;
+        }
+        self.hptf_revision += 1;
+        runtime.set_hptf(wanted.clone(), self.hptf_revision);
+        self.hptf_sent = Some(wanted);
+    }
+    /// The profile the current output is actually running, on the same terms as
+    /// [`Self::active_sofa`]: selected is not applied, and a swap only counts
+    /// once the audio callback has taken up that revision.
+    #[cfg_attr(
+        not(macinrender_output),
+        allow(
+            clippy::unused_self,
+            reason = "no native headphone feed exists in inspection builds"
+        )
+    )]
+    pub fn active_hptf(&self) -> Option<&str> {
+        #[cfg(macinrender_output)]
+        if let Some(runtime) = &self.runtime
+            && self.settings.hptf_applicable()
+            && !self.settings.hptf.is_empty()
+        {
+            let status = runtime.hptf_status();
+            if status.enabled && status.applied_revision == self.hptf_revision {
+                return Some(&self.settings.hptf);
+            }
+        }
+        None
+    }
+    #[cfg_attr(
+        not(macinrender_output),
+        allow(
+            clippy::unused_self,
+            reason = "no native headphone feed exists in inspection builds"
+        )
+    )]
+    pub fn hptf_readout(&self) -> HptfReadout {
+        #[cfg(macinrender_output)]
+        if let Some(runtime) = &self.runtime {
+            let status = runtime.hptf_status();
+            return HptfReadout {
+                enabled: status.enabled,
+                bands: status.bands,
+                preamp_db: status.preamp_db,
+                auto_trim_db: status.auto_trim_db,
+                max_response_db: status.max_response_db,
+            };
+        }
+        HptfReadout::default()
+    }
+    pub fn take_hptf_error(&mut self) -> Option<String> {
+        self.hptf_error.take()
+    }
     pub fn install_settings(&mut self, settings: OutputSettings) {
         self.settings = settings.validated();
         self.legacy
             .set_preferred_device(self.settings.native_device.clone());
+        #[cfg(macinrender_output)]
+        self.sync_hptf();
         self.configure_head();
         #[cfg(all(target_os = "macos", macinrender_output))]
         self.poll_atmos();
@@ -296,6 +379,7 @@ impl SpatialOutputController {
             self.atmos.reset();
             self.legacy.reset();
             self.runtime = None;
+            self.hptf_sent = None;
             self.head.set_target(None);
             match super::macinrender::Runtime::spawn_prepared(
                 config.clone(),
@@ -319,6 +403,7 @@ impl SpatialOutputController {
                     self.snapshot.error = Some(error);
                 }
             }
+            self.sync_hptf();
             self.revision += 1;
             self.configure_head();
             return;
@@ -333,6 +418,7 @@ impl SpatialOutputController {
         {
             self.head.set_target(None);
             self.runtime = None;
+            self.hptf_sent = None;
             self.config = None;
             self.pending_hot = None;
             self.preparation = None;
@@ -367,6 +453,19 @@ impl SpatialOutputController {
                     self.install_settings(settings);
                 }
                 self.update_result = Some(result);
+            }
+            if let Some(result) = self
+                .runtime
+                .as_ref()
+                .and_then(super::macinrender::Runtime::take_hptf_result)
+            {
+                // Unsupported is an answer, not a failure — but only worth
+                // reporting when a profile was actually asked for.
+                self.hptf_error = match result {
+                    Ok(true) => None,
+                    Ok(false) => Some("This output has no headphone feed to compensate".to_owned()),
+                    Err(error) => Some(error),
+                };
             }
         }
         let snapshot = if self.uses_macinrender() {

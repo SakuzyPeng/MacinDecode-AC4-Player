@@ -40,6 +40,12 @@ impl SpeakerLayout {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent output switches, not one state machine: LFE routing, the \
+              Control Center label assist and the headphone preamp policy answer to \
+              different parts of the chain"
+)]
 pub struct OutputSettings {
     #[cfg(test)]
     #[serde(skip)]
@@ -49,6 +55,9 @@ pub struct OutputSettings {
     pub split_lfe: bool,
     pub atmos_label_assist: bool,
     pub sofa: String,
+    /// `AutoEq` `ParametricEQ.txt` headphone compensation; empty is off.
+    pub hptf: String,
+    pub hptf_auto_trim: bool,
     pub native_device: OutputDeviceSelection,
     pub stereo_device: OutputDeviceSelection,
     pub head_source: HeadSource,
@@ -63,6 +72,8 @@ impl Default for OutputSettings {
             split_lfe: true,
             atmos_label_assist: true,
             sofa: String::new(),
+            hptf: String::new(),
+            hptf_auto_trim: false,
             native_device: OutputDeviceSelection::SystemDefault,
             stereo_device: OutputDeviceSelection::SystemDefault,
             head_source: HeadSource::Automatic,
@@ -79,12 +90,44 @@ impl OutputSettings {
         self.mode.resolved() == SpatialBackendKind::SystemSpatial
             && self.layout == SpeakerLayout::SevenOneFour
     }
+    /// Headphone compensation applies to the two-channel feed this player
+    /// renders itself. The system-spatial and Windows passthrough paths hand a
+    /// bed to the operating system, which forms the final stereo signal where
+    /// we cannot filter it, so the control is unavailable rather than silent.
+    #[cfg_attr(
+        not(macinrender_output),
+        allow(
+            dead_code,
+            reason = "only the renderer-backed build forms a headphone feed to compensate"
+        )
+    )]
+    pub fn hptf_applicable(&self) -> bool {
+        #[cfg(test)]
+        if self.null_output {
+            return false;
+        }
+        self.mode.resolved() == SpatialBackendKind::SafBinaural
+    }
+    #[cfg(macinrender_output)]
+    pub fn hptf(&self) -> macindecode_macinrender::HptfSettings {
+        macindecode_macinrender::HptfSettings {
+            profile: if self.hptf_applicable() {
+                self.hptf.clone()
+            } else {
+                String::new()
+            },
+            auto_trim: self.hptf_auto_trim,
+        }
+    }
     pub fn validated(mut self) -> Self {
         if !self.mode.supported() {
             self.mode = SpatialBackendKind::Automatic;
         }
         if self.sofa.contains('\0') {
             self.sofa.clear();
+        }
+        if self.hptf.contains('\0') {
+            self.hptf.clear();
         }
         if self.head_source == HeadSource::AirPods && !cfg!(target_os = "macos") {
             self.head_source = HeadSource::Manual;
@@ -133,6 +176,53 @@ mod tests {
             ["7.1.4", "9.1.6", "22.2"]
         );
         assert!(serde_json::from_str::<SpeakerLayout>("\"5.1\"").is_err());
+    }
+
+    #[test]
+    fn headphone_compensation_is_off_by_default_and_hot_swaps_without_a_rebuild() {
+        // Settings written before this feature existed carry neither field, and
+        // must come back as no compensation using the profile's own preamp.
+        let before: OutputSettings = serde_json::from_str("{}").unwrap();
+        assert!(before.hptf.is_empty());
+        assert!(!before.hptf_auto_trim);
+
+        let mut after = before.clone();
+        after.hptf = "Sony MDR-MV1 ParametricEQ.txt".into();
+        after.hptf_auto_trim = true;
+        // The renderer blends a new profile into the running feed, so neither
+        // choosing one nor changing the preamp policy may rebuild the output.
+        assert!(!before.needs_rebuild(&after));
+        assert!(!after.needs_rebuild(&before));
+
+        let saved = serde_json::to_string(&after).unwrap();
+        let reloaded: OutputSettings = serde_json::from_str(&saved).unwrap();
+        assert_eq!(reloaded.hptf, after.hptf);
+        assert!(reloaded.hptf_auto_trim);
+
+        let mut broken = after.clone();
+        broken.hptf.push('\0');
+        assert!(broken.validated().hptf.is_empty());
+    }
+
+    #[test]
+    fn only_the_renderer_owned_headphone_feed_can_be_compensated() {
+        let mut settings = OutputSettings::default();
+        for (mode, applicable) in [
+            (SpatialBackendKind::SafBinaural, true),
+            // The bed goes to the operating system, which forms the final two
+            // channels where this player cannot filter them.
+            (SpatialBackendKind::SystemSpatial, false),
+            (SpatialBackendKind::WindowsSpatialAudio, false),
+        ] {
+            settings.mode = mode;
+            assert_eq!(
+                settings.hptf_applicable(),
+                applicable,
+                "{} should{} accept headphone compensation",
+                mode.label(),
+                if applicable { "" } else { " not" }
+            );
+        }
     }
 
     #[test]

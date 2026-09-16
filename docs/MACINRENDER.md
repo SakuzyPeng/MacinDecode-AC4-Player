@@ -1,6 +1,6 @@
 # MacinRender 播放集成
 
-Player 将 AC-4 Core 的 Scene 转换为 renderer-native Scene，经 MacinRender C ABI v1.36
+Player 将 AC-4 Core 的 Scene 转换为 renderer-native Scene，经 MacinRender C ABI v1.37
 进行空间渲染及设备输出。Core 类型和平台指针均不进入 GUI；FFI 封装集中在独立 crate。
 
 ## 播放策略
@@ -19,6 +19,34 @@ Player 将 AC-4 Core 的 Scene 转换为 renderer-native Scene，经 MacinRender
 miniaudio 硬限幅之前平滑降低两耳增益。未触发保护时按原音量逐采样通过，低音量不会被
 预先限幅。前视缓存保留暂停位置，并在 seek/新 epoch 时清空；结尾完整排出，媒体帧数不变。
 原生 Scene 的浮点拉取仍保留超满幅数据，系统空间音频交由系统处理最终输出。
+
+## 耳机补偿（HpTF）
+
+载入 AutoEq 的 `ParametricEQ.txt`，由渲染器把它设计成双二阶级联，施加在交给耳机的两声道上。
+**只有软件双耳可用**：多声道扬声器输出和系统空间音频把床交给操作系统做 HRTF，最终两声道不在本侧
+生成，原生接口对这些输出返回 `ADM_ERROR_UNSUPPORTED`——是一个可显示的状态，不是失败。Windows
+对象直通不经过 MacinRender，同样没有这一级。
+
+补偿位于输出限幅器**上游**，被抬高的频段仍由 −1 dBFS 天花板保护。它刻意不进入 LUFS 表——换耳机
+不应改变节目响度读数——但会改变 peak/RMS，因为那反映设备真正收到的信号。播放器自己的逐对象表头
+读的是 Scene 帧，在渲染之前，本来就不受影响。
+
+只支持 `ParametricEQ.txt`。AutoEq 的最小相位 `.wav` 需要约 2048 taps 才能把截断误差压到 0.1 dB，
+要分块 FFT 卷积；十段双二阶约 60 flops/frame 且无依赖。两种格式**不是同一条曲线**（宽带约 1 dB、
+20 kHz 约 3.2 dB），同时提供而不做电平匹配只会产生"哪种格式更好听"的伪结论。
+
+解析与系数设计在调用线程同步完成，坏文件直接报错，不打扰音频线程；播放器为此使用独立的
+`hptf-preparation` 线程，不在 UI 线程上做文件读取。换档位在 2048 帧窗口内线性混合两条级联，
+即时生效不等 ring 排空；一次只有一个切换在途，最坏应用延迟为两个窗口。seek 的滤波器状态由原生
+`begin_epoch` 连同峰值保护一起重置，播放器无需参与。
+
+`Preamp:` 策略有两档。默认严格使用文件里的数值；`auto_trim` 按 20 Hz–20 kHz 幅度响应的保守上界
+再压一点——这是频响界，不是瞬态限幅。设置里显示的 `max_response_db` 高于 0 表示该曲线可能触到天花板。
+
+生效状态从输出实时派生，与 SOFA 同一套语义：选中不等于生效，`applied_revision` 回显到播放器
+送出的 revision 才算 **in use**。渲染器能让补偿跨自己的后端和设备切换存活，但播放器重建输出
+（换模式、换设备）会得到一个全新的输出对象，其上没有补偿，因此每次装载设置和每次建好输出都
+重新对账一次。
 
 ## 内容指定的逐对象头追
 

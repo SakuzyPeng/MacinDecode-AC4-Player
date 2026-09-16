@@ -83,6 +83,8 @@ pub struct PlayerApp {
     pending_output_change: Option<OutputSettings>,
     audio_settings_error: Option<String>,
     sofa_picker: Option<Pin<Box<dyn Future<Output = Option<rfd::FileHandle>>>>>,
+    hptf_picker: Option<Pin<Box<dyn Future<Output = Option<rfd::FileHandle>>>>>,
+    hptf_picked: Option<String>,
     skin_picker: Option<Pin<Box<dyn Future<Output = Option<rfd::FileHandle>>>>>,
     camera: scene3d::camera::Camera,
     /// Whether zero-based LFE / one-based dynamic-object numbers are printed
@@ -849,6 +851,8 @@ impl PlayerApp {
             pending_output_change: None,
             audio_settings_error: None,
             sofa_picker: None,
+            hptf_picker: None,
+            hptf_picked: None,
             skin_picker: None,
             camera,
             object_numbers_visible: true,
@@ -1548,6 +1552,29 @@ impl PlayerApp {
         }
     }
 
+    fn poll_hptf_picker(&mut self, context: &egui::Context) {
+        if let Some(error) = self.output.take_hptf_error() {
+            self.audio_settings_error = Some(error);
+        }
+        let Some(picker) = self.hptf_picker.as_mut() else {
+            return;
+        };
+        let waker = Waker::from(Arc::new(DialogWake(context.clone())));
+        let Poll::Ready(path) = picker.as_mut().poll(&mut Context::from_waker(&waker)) else {
+            return;
+        };
+        self.hptf_picker = None;
+        let Some(path) = path else {
+            return;
+        };
+        if let Some(path) = path.path().to_str() {
+            self.hptf_picked = Some(path.to_owned());
+        } else {
+            self.audio_settings_error =
+                Some("This renderer requires a Unicode profile path".into());
+        }
+    }
+
     #[cfg(macinrender_output)]
     fn finish_output_preparation(&mut self, context: &egui::Context) -> bool {
         let Some(prepared) = self
@@ -1597,6 +1624,9 @@ impl PlayerApp {
         }
         let mut open = true;
         let mut settings = self.output.settings().clone();
+        if let Some(path) = self.hptf_picked.take() {
+            settings.hptf = path;
+        }
         let head = self.output.head_snapshot();
         let mut manual = None;
         let mut recenter = false;
@@ -1707,6 +1737,62 @@ impl PlayerApp {
                                     if let Some(path) = full_path.to_str() { path.clone_into(&mut settings.sofa); }
                                     else { self.audio_settings_error = Some("This renderer requires a Unicode SOFA path".into()); }
                                 }
+                            }
+                            ui.separator();
+                            ui.label(if settings.hptf.is_empty() {
+                                "Headphone compensation: off".to_owned()
+                            } else {
+                                format!(
+                                    "Headphone compensation: {}",
+                                    Path::new(&settings.hptf)
+                                        .file_name()
+                                        .unwrap_or_default()
+                                        .to_string_lossy()
+                                )
+                            });
+                            ui.horizontal(|ui| {
+                                if ui.button("Choose AutoEq profile…").clicked() {
+                                    self.hptf_picker = Some(Box::pin(
+                                        rfd::AsyncFileDialog::new()
+                                            .add_filter("AutoEq ParametricEQ", &["txt"])
+                                            .pick_file(),
+                                    ));
+                                    context.request_repaint();
+                                }
+                                if ui.button("Turn off").clicked() {
+                                    settings.hptf.clear();
+                                }
+                            });
+                            ui.checkbox(
+                                &mut settings.hptf_auto_trim,
+                                "Trim further if the curve still peaks above 0 dB",
+                            )
+                            .on_hover_text(
+                                "Off uses the profile's own Preamp line verbatim. This bounds the frequency response, not transient peaks.",
+                            );
+                            let hptf = self.output.hptf_readout();
+                            if self.output.active_hptf().is_some() {
+                                ui.label(format!(
+                                    "In use · {} bands · preamp {:+.1} dB{}",
+                                    hptf.bands,
+                                    hptf.preamp_db,
+                                    if hptf.auto_trim_db == 0.0 {
+                                        String::new()
+                                    } else {
+                                        format!(" · trimmed {:+.1} dB", hptf.auto_trim_db)
+                                    }
+                                ));
+                                if hptf.max_response_db > 0.0 {
+                                    ui.colored_label(
+                                        theme::WARNING,
+                                        format!(
+                                            "Peaks {:+.1} dB above full scale; the output ceiling will pull it back.",
+                                            hptf.max_response_db
+                                        ),
+                                    );
+                                }
+                            } else if !settings.hptf.is_empty() {
+                                ui.label("Selected; not yet running.");
                             }
                         }
                         ui.separator();

@@ -152,3 +152,25 @@ pub struct HeadSample {
     pub y: f64,
     pub z: f64,
 }
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct HptfConfig {
+    pub size: u32,
+    pub profile: *const c_char,
+    pub preamp_mode: i32,
+    pub reserved: u32,
+    pub revision: u64,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct HptfInfo {
+    pub size: u32,
+    pub enabled: i32,
+    pub band_count: u32,
+    pub sample_rate: u32,
+    pub preamp_db: f32,
+    pub auto_trim_db: f32,
+    pub max_response_db: f32,
+    pub reserved: u32,
+    pub applied_revision: u64,
+}

@@ -20,6 +20,10 @@ use std::sync::{Arc, Mutex};
 
 use api::Api;
 
+/// `ADM_ERROR_UNSUPPORTED`: the call is meaningless for this output rather
+/// than failed.
+const UNSUPPORTED: i32 = 2;
+
 fn size<T>() -> u32 {
     u32::try_from(size_of::<T>()).expect("C ABI structure exceeds u32")
 }
@@ -53,6 +57,32 @@ impl RendererSettings {
             ..Default::default()
         }))
     }
+}
+
+/// `AutoEq` `ParametricEQ.txt` headphone compensation. An empty profile disables
+/// it, which the renderer treats as an exact short-circuit rather than a
+/// unit-gain multiply.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct HptfSettings {
+    pub profile: String,
+    /// Attenuate further when the designed cascade still peaks above 0 dB across
+    /// 20 Hz-20 kHz. Off means the file's own `Preamp:` line is used verbatim.
+    pub auto_trim: bool,
+}
+
+/// What the headphone feed is actually running. `applied_revision` echoes the
+/// revision handed to [`Control::set_hptf`] once the audio callback has taken
+/// it up, so a caller can tell a selected profile from a live one.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct HptfStatus {
+    pub enabled: bool,
+    pub bands: u32,
+    pub preamp_db: f32,
+    pub auto_trim_db: f32,
+    /// Peak of the designed response over 20 Hz-20 kHz, preamp included. Above
+    /// zero the compensation can clip before the output's own ceiling catches it.
+    pub max_response_db: f32,
+    pub applied_revision: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -464,6 +494,59 @@ impl Control {
                 message
             })
         }
+    }
+    /// Load, replace or (with an empty profile) disable headphone compensation.
+    ///
+    /// `Ok(false)` reports that this output has no two-channel headphone feed to
+    /// compensate — the multichannel and system-spatial paths hand the operating
+    /// system a bed and never form the final stereo signal on our side. The
+    /// renderer answers that case explicitly instead of ignoring the request, so
+    /// it is a state to display, not a failure. Parsing and coefficient design
+    /// run synchronously here, so a bad file fails on this thread and never
+    /// reaches the audio callback.
+    pub fn set_hptf(&self, settings: &HptfSettings, revision: u64) -> Result<bool, String> {
+        let s = &self.inner;
+        let profile = string(&settings.profile)?;
+        let raw = raw::HptfConfig {
+            size: size::<raw::HptfConfig>(),
+            profile: profile.as_ptr(),
+            preamp_mode: i32::from(settings.auto_trim),
+            reserved: 0,
+            revision,
+        };
+        let _guard = s.gate.lock().unwrap();
+        // SAFETY: the borrowed profile string and config live until this
+        // synchronous call returns; the renderer copies what it keeps.
+        let code = unsafe { (s.api.adm_scene_output_set_hptf)(s.output, &raw const raw) };
+        if code == UNSUPPORTED {
+            return Ok(false);
+        }
+        s.error(code, 2).map(|()| true)
+    }
+    /// The compensation the output is running now, or the disabled default when
+    /// this output cannot carry one.
+    pub fn hptf_status(&self) -> Result<HptfStatus, String> {
+        let s = &self.inner;
+        let _guard = s.gate.lock().unwrap();
+        let mut info = raw::HptfInfo {
+            size: size::<raw::HptfInfo>(),
+            ..Default::default()
+        };
+        // SAFETY: the Arc retains the output, and the struct is written whole
+        // before this synchronous call returns.
+        let code = unsafe { (s.api.adm_scene_output_get_hptf_info)(s.output, &raw mut info) };
+        if code == UNSUPPORTED {
+            return Ok(HptfStatus::default());
+        }
+        s.error(code, 2)?;
+        Ok(HptfStatus {
+            enabled: info.enabled != 0,
+            bands: info.band_count,
+            preamp_db: info.preamp_db,
+            auto_trim_db: info.auto_trim_db,
+            max_response_db: info.max_response_db,
+            applied_revision: info.applied_revision,
+        })
     }
     pub fn status(&self) -> Result<Status, String> {
         let s = &self.inner;

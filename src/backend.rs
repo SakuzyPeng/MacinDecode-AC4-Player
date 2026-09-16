@@ -167,6 +167,22 @@ enum OutputClock {
     Preview,
 }
 
+/// What the headphone compensation is doing, in player-owned terms.
+///
+/// The renderer's own status struct stays behind `backend/macinrender.rs`, the
+/// same way `windows` and `raw` types do: this crosses into the UI, which is
+/// compiled on platforms that have no renderer at all.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct HptfReadout {
+    pub enabled: bool,
+    pub bands: u32,
+    pub preamp_db: f32,
+    pub auto_trim_db: f32,
+    /// Peak of the designed response over the audible band, preamp included.
+    /// Above zero the profile can drive the feed into the output's ceiling.
+    pub max_response_db: f32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutputSnapshot {
     #[cfg(all(target_os = "macos", macinrender_output))]

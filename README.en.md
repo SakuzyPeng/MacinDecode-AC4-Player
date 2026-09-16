@@ -159,6 +159,14 @@ live and do not interrupt decoding of the current track.
   directory, so later you can select it straight from the list. **available** means it can be
   selected; **in use** means the current binaural renderer has successfully loaded it.
   Loading failures show a specific error.
+- **Headphone compensation (HpTF):** load an [AutoEq](https://github.com/jaakkopasanen/AutoEq)
+  `ParametricEQ.txt` to take the headphone's own response out of binaural monitoring. Available in
+  **SAF binaural** only: system spatial audio and Windows object passthrough hand a multichannel bed
+  to the operating system, so the final two channels are never formed on the player's side. The
+  compensation sits upstream of the output limiter, so a boosted band is still caught by the peak
+  ceiling, and switching profiles crossfades without interrupting playback. The settings window
+  reports the bands and preamp actually running, and can trim further when a curve still peaks above
+  0 dBFS.
 
 ## Platform support
 

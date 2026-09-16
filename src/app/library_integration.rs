@@ -25,6 +25,7 @@ impl PlayerApp {
     pub(super) fn tick(&mut self, context: &egui::Context, showing: bool) {
         self.poll_library(context);
         self.poll_sofa_picker(context);
+        self.poll_hptf_picker(context);
         self.poll_skin_picker(context);
         self.sync_inspection(context);
         self.sync_decoder(context);

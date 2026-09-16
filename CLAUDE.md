@@ -160,7 +160,7 @@ Every one of these is named; keep new ones named too.
 | `player-library` | `library.rs` |
 | `sofa-catalog` | `sofa_catalog.rs` |
 | `listener-orientation` | `head_tracking.rs` |
-| `macinrender-scene-producer`, `hrtf-preparation`, `pcm-device-catalog`, `discard-prepared-output` | `backend/macinrender.rs` |
+| `macinrender-scene-producer`, `hrtf-preparation`, `hptf-preparation`, `pcm-device-catalog`, `discard-prepared-output` | `backend/macinrender.rs` |
 | `prepare-audio-output` | `backend/controller.rs` |
 | `windows-audio-device-catalog` | `backend/windows.rs` |
 | `windows-spatial-audio` | `crates/windows-spatial-audio` |

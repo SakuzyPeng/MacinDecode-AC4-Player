@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -99,6 +99,14 @@ struct Shared {
     snapshot: Mutex<OutputSnapshot>,
     switch: Mutex<Option<native::RendererSettings>>,
     switch_result: Mutex<Option<Result<(), String>>>,
+    hptf: Mutex<Option<(native::HptfSettings, u64)>>,
+    hptf_result: Mutex<Option<Result<bool, String>>>,
+    /// The revision handed to the renderer, and the one its audio callback
+    /// has taken up. A profile swap blends over two windows, so they differ
+    /// for a while and the producer polls only across that gap.
+    hptf_requested: AtomicU64,
+    hptf_applied: AtomicU64,
+    hptf_status: Mutex<native::HptfStatus>,
     control: NativeTarget,
 }
 pub(super) struct Runtime {
@@ -137,6 +145,11 @@ impl Runtime {
             snapshot: Mutex::new(snapshot),
             switch: Mutex::new(None),
             switch_result: Mutex::new(None),
+            hptf: Mutex::new(None),
+            hptf_result: Mutex::new(None),
+            hptf_requested: AtomicU64::new(0),
+            hptf_applied: AtomicU64::new(0),
+            hptf_status: Mutex::new(native::HptfStatus::default()),
             control: Arc::new(Mutex::new(None)),
         });
         let worker = Arc::clone(&shared);
@@ -184,6 +197,34 @@ impl Runtime {
             .switch
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(settings);
+    }
+    /// Ask the output to load, replace or drop headphone compensation. The
+    /// renderer parses and designs coefficients on the calling thread, so the
+    /// request is handed to a preparation thread rather than run here.
+    pub fn set_hptf(&self, settings: native::HptfSettings, revision: u64) {
+        self.shared
+            .hptf_requested
+            .store(revision, Ordering::Relaxed);
+        *self
+            .shared
+            .hptf
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((settings, revision));
+    }
+    /// `Ok(false)` means this output has no headphone feed to compensate.
+    pub fn take_hptf_result(&self) -> Option<Result<bool, String>> {
+        self.shared
+            .hptf_result
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+    pub fn hptf_status(&self) -> native::HptfStatus {
+        *self
+            .shared
+            .hptf_status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
     pub fn take_switch_result(&self) -> Option<Result<(), String>> {
         self.shared
@@ -602,6 +643,45 @@ fn run(
                     .unwrap_or_else(std::sync::PoisonError::into_inner) =
                     Some(Err(error.to_string()));
             }
+        }
+        if let Some((settings, revision)) = shared
+            .hptf
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            let loader = control.clone();
+            let reply = Arc::clone(shared);
+            let spawned = thread::Builder::new()
+                .name("hptf-preparation".into())
+                .spawn(move || {
+                    let result = loader.set_hptf(&settings, revision);
+                    *reply
+                        .hptf_result
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(result);
+                });
+            if let Err(error) = spawned {
+                *shared
+                    .hptf_result
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some(Err(error.to_string()));
+            }
+        }
+        // A swap blends over two windows before the callback owns it, so polling
+        // stops as soon as the applied revision catches up with the requested one.
+        if shared.hptf_applied.load(Ordering::Relaxed)
+            != shared.hptf_requested.load(Ordering::Relaxed)
+            && let Ok(hptf) = control.hptf_status()
+        {
+            shared
+                .hptf_applied
+                .store(hptf.applied_revision, Ordering::Relaxed);
+            *shared
+                .hptf_status
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = hptf;
         }
         let status = control.status()?;
         if status.phase == native::Phase::Failed {
