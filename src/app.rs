@@ -1738,17 +1738,24 @@ impl PlayerApp {
                                 }
                             }
                             ui.separator();
+                            // Name the file and nothing else. A ParametricEQ profile
+                            // carries no target or measurement provenance, so the
+                            // player cannot tell what a given one equalises towards
+                            // and must not imply that it knows.
                             ui.label(if settings.hptf.is_empty() {
-                                "Headphone compensation: off".to_owned()
+                                "Profile: none".to_owned()
                             } else {
                                 format!(
-                                    "Headphone compensation: {}",
+                                    "Profile: {}",
                                     Path::new(&settings.hptf)
                                         .file_name()
                                         .unwrap_or_default()
                                         .to_string_lossy()
                                 )
-                            });
+                            })
+                            .on_hover_text(
+                                "An AutoEq ParametricEQ profile, applied to the headphone feed exactly as written. Which target it equalises towards is decided by whoever generated it and is not recorded in the file; pair it with the reference field your SOFA was equalised to.",
+                            );
                             ui.horizontal(|ui| {
                                 if ui.button("Choose AutoEq profile…").clicked() {
                                     self.hptf_picker = Some(Box::pin(

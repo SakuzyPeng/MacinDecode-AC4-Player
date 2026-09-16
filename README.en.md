@@ -168,6 +168,11 @@ live and do not interrupt decoding of the current track.
   reports the bands and preamp actually running, and can trim further when a curve still peaks above
   0 dBFS. A profile you pick is copied into the `hptf/` folder in the app's data directory and
   listed with the same **available** / **in use** states as a SOFA.
+  Which target a profile equalises towards is decided by the file and is not recorded in it, so the
+  player shows only the file name and the bands and preamp actually running. Pair it with the
+  reference field your SOFA was equalised to — a diffuse-field-equalised HRTF wants a
+  diffuse-field profile; the presets published in the AutoEq repository target Harman with an
+  extra 6 dB of bass boost.
 
 ## Platform support
 

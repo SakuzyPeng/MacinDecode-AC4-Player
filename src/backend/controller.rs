@@ -463,7 +463,9 @@ impl SpatialOutputController {
                 // reporting when a profile was actually asked for.
                 self.hptf_error = match result {
                     Ok(true) => None,
-                    Ok(false) => Some("This output has no headphone feed to compensate".to_owned()),
+                    Ok(false) => Some(
+                        "This output has no headphone feed for a profile to apply to".to_owned(),
+                    ),
                     Err(error) => Some(error),
                 };
             }
