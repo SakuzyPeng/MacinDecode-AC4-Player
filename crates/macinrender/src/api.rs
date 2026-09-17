@@ -27,8 +27,8 @@ macro_rules! api {
                 }
                 let api = Self { $($name,)* };
                 // SAFETY: validated version entrypoints take no pointers.
-                if unsafe { (api.adm_api_version_major)() } != 1 || unsafe { (api.adm_api_version_minor)() } < 37 {
-                    return Err("MacinRender C ABI v1.37 or later is required".into());
+                if unsafe { (api.adm_api_version_major)() } != 1 || unsafe { (api.adm_api_version_minor)() } < 39 {
+                    return Err("MacinRender C ABI v1.39 or later is required".into());
                 }
                 let _ = CACHED.set(api.clone());
                 Ok(api)
@@ -60,7 +60,7 @@ api! {
     adm_scene_output_pause(*mut c_void) -> i32;
     adm_scene_output_set_volume(*mut c_void, f32) -> i32;
     adm_scene_output_get_status(*mut c_void, *mut raw::OutputStatus) -> i32;
-    adm_scene_output_set_hptf(*mut c_void, *const raw::HptfConfig) -> i32;
+    adm_scene_output_set_hptf_ex(*const c_void, *const raw::HptfConfig, *mut *mut c_char) -> i32;
     adm_scene_output_get_hptf_info(*mut c_void, *mut raw::HptfInfo) -> i32;
     adm_monitor_output_devices_json(*mut c_void, *mut *mut c_char) -> i32;
     adm_free_string(*mut c_char) -> ();

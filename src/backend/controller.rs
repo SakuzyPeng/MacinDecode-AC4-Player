@@ -51,10 +51,12 @@ pub struct SpatialOutputController {
     preparation: Option<Preparation>,
     #[cfg(macinrender_output)]
     prepared_session: Option<super::macinrender::PreparedSession>,
-    /// What was last handed to the current output, so reconciling is idempotent.
-    /// A new output starts with no compensation, so this resets with it.
+    /// Separate the last accepted profile from the request still being prepared.
+    /// Both belong to the current native output and reset with it.
     #[cfg(macinrender_output)]
-    hptf_sent: Option<macindecode_macinrender::HptfSettings>,
+    hptf_accepted: Option<(macindecode_macinrender::HptfSettings, u64)>,
+    #[cfg(macinrender_output)]
+    hptf_pending: Option<(macindecode_macinrender::HptfSettings, u64)>,
     #[cfg(macinrender_output)]
     hptf_revision: u64,
     hptf_error: Option<String>,
@@ -100,7 +102,9 @@ impl SpatialOutputController {
             #[cfg(macinrender_output)]
             prepared_session: None,
             #[cfg(macinrender_output)]
-            hptf_sent: None,
+            hptf_accepted: None,
+            #[cfg(macinrender_output)]
+            hptf_pending: None,
             #[cfg(macinrender_output)]
             hptf_revision: 0,
             hptf_error: None,
@@ -159,16 +163,18 @@ impl SpatialOutputController {
             return;
         };
         let wanted = self.settings.hptf();
-        // An output that never took a profile needs no request to stay without
-        // one, which also keeps the unsupported answer below meaningful.
-        if self.hptf_sent.as_ref() == Some(&wanted)
-            || (self.hptf_sent.is_none() && wanted.profile.is_empty())
+        if self.hptf_pending.is_some()
+            || self
+                .hptf_accepted
+                .as_ref()
+                .is_some_and(|(accepted, _)| accepted == &wanted)
+            || (self.hptf_accepted.is_none() && wanted.profile.is_empty())
         {
             return;
         }
         self.hptf_revision += 1;
         runtime.set_hptf(wanted.clone(), self.hptf_revision);
-        self.hptf_sent = Some(wanted);
+        self.hptf_pending = Some((wanted, self.hptf_revision));
     }
     /// The profile the current output is actually running, on the same terms as
     /// [`Self::active_sofa`]: selected is not applied, and a swap only counts
@@ -184,11 +190,11 @@ impl SpatialOutputController {
         #[cfg(macinrender_output)]
         if let Some(runtime) = &self.runtime
             && self.settings.hptf_applicable()
-            && !self.settings.hptf.is_empty()
+            && let Some((accepted, revision)) = &self.hptf_accepted
         {
             let status = runtime.hptf_status();
-            if status.enabled && status.applied_revision == self.hptf_revision {
-                return Some(&self.settings.hptf);
+            if status.enabled && status.applied_revision == *revision {
+                return Some(&accepted.profile);
             }
         }
         None
@@ -341,7 +347,7 @@ impl SpatialOutputController {
     pub fn settings_pending(&self) -> bool {
         #[cfg(macinrender_output)]
         {
-            self.pending_hot.is_some() || self.preparation.is_some()
+            self.pending_hot.is_some() || self.preparation.is_some() || self.hptf_pending.is_some()
         }
         #[cfg(not(macinrender_output))]
         {
@@ -380,7 +386,9 @@ impl SpatialOutputController {
             self.atmos.reset();
             self.legacy.reset();
             self.runtime = None;
-            self.hptf_sent = None;
+            self.hptf_accepted = None;
+            self.hptf_pending = None;
+            self.hptf_error = None;
             self.head.set_target(None);
             match super::macinrender::Runtime::spawn_prepared(
                 config.clone(),
@@ -419,7 +427,9 @@ impl SpatialOutputController {
         {
             self.head.set_target(None);
             self.runtime = None;
-            self.hptf_sent = None;
+            self.hptf_accepted = None;
+            self.hptf_pending = None;
+            self.hptf_error = None;
             self.config = None;
             self.pending_hot = None;
             self.preparation = None;
@@ -455,20 +465,34 @@ impl SpatialOutputController {
                 }
                 self.update_result = Some(result);
             }
-            if let Some(result) = self
+            if let Some((revision, result)) = self
                 .runtime
                 .as_ref()
                 .and_then(super::macinrender::Runtime::take_hptf_result)
+                && self
+                    .hptf_pending
+                    .as_ref()
+                    .is_some_and(|(_, pending)| *pending == revision)
             {
-                // Unsupported is an answer, not a failure — but only worth
-                // reporting when a profile was actually asked for.
+                let (wanted, _) = self.hptf_pending.take().expect("matched request");
                 self.hptf_error = match result {
-                    Ok(true) => None,
+                    Ok(true) => {
+                        self.hptf_accepted = Some((wanted.clone(), revision));
+                        None
+                    }
                     Ok(false) => Some(
                         "This output has no headphone feed for a profile to apply to".to_owned(),
                     ),
                     Err(error) => Some(error),
                 };
+                if self.hptf_error.is_some() && self.settings.hptf() == wanted {
+                    let previous = self.hptf_accepted.as_ref().map(|(settings, _)| settings);
+                    self.settings.hptf = previous.map_or_else(String::new, |s| s.profile.clone());
+                    self.settings.hptf_auto_trim = previous.is_some_and(|s| s.auto_trim);
+                }
+                // A newer desired setting may have arrived while this request ran.
+                self.sync_hptf();
+                self.revision += 1;
             }
         }
         let snapshot = if self.uses_macinrender() {
@@ -656,6 +680,81 @@ impl Default for SpatialOutputController {
 #[cfg(all(test, macinrender_output))]
 mod tests {
     use super::*;
+    #[test]
+    fn failed_hptf_switch_preserves_the_active_profile_and_allows_retry() {
+        let directory = tempfile::tempdir().unwrap();
+        let good = directory.path().join("good.txt");
+        let bad = directory.path().join("bad.txt");
+        std::fs::write(&good, b"Preamp: -3 dB\n").unwrap();
+        std::fs::write(&bad, b"not a profile\n").unwrap();
+        let key = PlaybackKey::new(41, 1);
+        let (queue, reader) = scene_queue_pair(key);
+        let signature = SceneSignature::from_block(&tone(0));
+        for i in 0..90 {
+            queue.try_push(key, tone(i * 1024)).unwrap();
+        }
+        queue.mark_end_of_stream(key);
+        let mut output = SpatialOutputController::new();
+        output.install_settings(OutputSettings {
+            null_output: true,
+            mode: SpatialBackendKind::SafBinaural,
+            ..Default::default()
+        });
+        output.playing = true;
+        output.ensure_configured(&output_config(signature), reader);
+        let mut settings = output.settings().clone();
+        settings.hptf = good.to_str().unwrap().to_owned();
+        output.hot_settings(settings.clone());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while output.active_hptf().is_none() {
+            output.poll();
+            assert!(
+                Instant::now() < deadline,
+                "good profile did not activate: {:?}",
+                output.take_hptf_error()
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(output.active_hptf(), good.to_str());
+        settings.hptf = bad.to_str().unwrap().to_owned();
+        output.hot_settings(settings);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            output.poll();
+            if let Some(error) = output.take_hptf_error() {
+                assert!(error.contains("HpTF"));
+                break;
+            }
+            assert!(Instant::now() < deadline, "bad profile did not fail");
+            thread::sleep(Duration::from_millis(5));
+        }
+        let readout = output.hptf_readout();
+        assert!(readout.enabled);
+        assert!((readout.preamp_db + 3.0).abs() < f32::EPSILON);
+        assert_eq!(
+            output.active_hptf(),
+            good.to_str(),
+            "old EQ is still audible but has lost its active identity"
+        );
+        assert_eq!(output.settings().hptf, good.to_str().unwrap());
+        assert!(!output.settings_pending());
+        // Correct the rejected file and choose it again: failure must not
+        // suppress a retry through the idempotence guard.
+        std::fs::write(&bad, b"Preamp: -6 dB\n").unwrap();
+        let mut settings = output.settings().clone();
+        settings.hptf = bad.to_str().unwrap().to_owned();
+        output.hot_settings(settings);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while output.active_hptf() != bad.to_str() {
+            output.poll();
+            assert!(
+                Instant::now() < deadline,
+                "corrected profile did not activate"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!((output.hptf_readout().preamp_db + 6.0).abs() < f32::EPSILON);
+    }
 
     #[cfg(target_os = "macos")]
     #[test]

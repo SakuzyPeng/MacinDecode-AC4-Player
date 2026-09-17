@@ -5,6 +5,8 @@
 mod api;
 #[cfg(target_os = "macos")]
 pub mod atmos;
+#[cfg(all(test, native_macinrender, unix))]
+mod hptf_tests;
 pub mod motion;
 #[cfg(test)]
 #[path = "../native_link.rs"]
@@ -517,14 +519,25 @@ impl Control {
             reserved: 0,
             revision,
         };
-        let _guard = s.gate.lock().unwrap();
-        // SAFETY: the borrowed profile string and config live until this
-        // synchronous call returns; the renderer copies what it keeps.
-        let code = unsafe { (s.api.adm_scene_output_set_hptf)(s.output, &raw const raw) };
-        if code == UNSUPPORTED {
-            return Ok(false);
+        let mut error = std::ptr::null_mut();
+        // SAFETY: the Arc retains the output and the config lives through this
+        // call. Preparation supports concurrent producer/control calls and owns
+        // its error string, so neither native nor Rust's gate spans file I/O.
+        let code = unsafe {
+            (s.api.adm_scene_output_set_hptf_ex)(s.output, &raw const raw, &raw mut error)
+        };
+        let message = copy_text(error);
+        // SAFETY: the _ex entrypoint transfers ownership, including on failure.
+        unsafe { (s.api.adm_free_string)(error) };
+        match code {
+            0 => Ok(true),
+            UNSUPPORTED => Ok(false),
+            _ => Err(if message.is_empty() {
+                format!("MacinRender headphone profile error {code}")
+            } else {
+                message
+            }),
         }
-        s.error(code, 2).map(|()| true)
     }
     /// The compensation the output is running now, or the disabled default when
     /// this output cannot carry one.
@@ -639,6 +652,8 @@ mod tests {
             size_of::<raw::OutputConfig>(),
             size_of::<raw::OutputStatus>(),
             size_of::<raw::HeadSample>(),
+            size_of::<raw::HptfConfig>(),
+            size_of::<raw::HptfInfo>(),
         ];
         for (index, size) in sizes.into_iter().enumerate() {
             // SAFETY: probe is built from the upstream header and returns a scalar.
@@ -668,6 +683,9 @@ mod tests {
             std::mem::offset_of!(raw::OutputStatus, presented),
             std::mem::offset_of!(raw::OutputStatus, clock),
             std::mem::offset_of!(raw::HeadSample, w),
+            std::mem::offset_of!(raw::HptfConfig, profile),
+            std::mem::offset_of!(raw::HptfConfig, revision),
+            std::mem::offset_of!(raw::HptfInfo, applied_revision),
         ];
         for (index, offset) in offsets.into_iter().enumerate() {
             // SAFETY: C's offsetof probe returns a scalar from the pinned headers.

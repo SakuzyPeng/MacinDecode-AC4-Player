@@ -100,7 +100,8 @@ struct Shared {
     switch: Mutex<Option<native::RendererSettings>>,
     switch_result: Mutex<Option<Result<(), String>>>,
     hptf: Mutex<Option<(native::HptfSettings, u64)>>,
-    hptf_result: Mutex<Option<Result<bool, String>>>,
+    hptf_result: Mutex<Option<(u64, Result<bool, String>)>>,
+    hptf_busy: AtomicBool,
     /// The revision handed to the renderer, and the one its audio callback
     /// has taken up. A profile swap blends over two windows, so they differ
     /// for a while and the producer polls only across that gap.
@@ -147,6 +148,7 @@ impl Runtime {
             switch_result: Mutex::new(None),
             hptf: Mutex::new(None),
             hptf_result: Mutex::new(None),
+            hptf_busy: AtomicBool::new(false),
             hptf_requested: AtomicU64::new(0),
             hptf_applied: AtomicU64::new(0),
             hptf_status: Mutex::new(native::HptfStatus::default()),
@@ -202,9 +204,6 @@ impl Runtime {
     /// renderer parses and designs coefficients on the calling thread, so the
     /// request is handed to a preparation thread rather than run here.
     pub fn set_hptf(&self, settings: native::HptfSettings, revision: u64) {
-        self.shared
-            .hptf_requested
-            .store(revision, Ordering::Relaxed);
         *self
             .shared
             .hptf
@@ -212,7 +211,7 @@ impl Runtime {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((settings, revision));
     }
     /// `Ok(false)` means this output has no headphone feed to compensate.
-    pub fn take_hptf_result(&self) -> Option<Result<bool, String>> {
+    pub fn take_hptf_result(&self) -> Option<(u64, Result<bool, String>)> {
         self.shared
             .hptf_result
             .lock()
@@ -644,29 +643,37 @@ fn run(
                     Some(Err(error.to_string()));
             }
         }
-        if let Some((settings, revision)) = shared
-            .hptf
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
+        if !shared.hptf_busy.load(Ordering::Acquire)
+            && let Some((settings, revision)) = shared
+                .hptf
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
         {
+            shared.hptf_busy.store(true, Ordering::Release);
             let loader = control.clone();
             let reply = Arc::clone(shared);
             let spawned = thread::Builder::new()
                 .name("hptf-preparation".into())
                 .spawn(move || {
                     let result = loader.set_hptf(&settings, revision);
+                    if matches!(result, Ok(true)) {
+                        reply.hptf_requested.store(revision, Ordering::Relaxed);
+                    }
                     *reply
                         .hptf_result
                         .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(result);
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        Some((revision, result));
+                    reply.hptf_busy.store(false, Ordering::Release);
                 });
             if let Err(error) = spawned {
                 *shared
                     .hptf_result
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                    Some(Err(error.to_string()));
+                    Some((revision, Err(error.to_string())));
+                shared.hptf_busy.store(false, Ordering::Release);
             }
         }
         // A swap blends over two windows before the callback owns it, so polling

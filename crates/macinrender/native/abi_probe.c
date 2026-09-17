@@ -3,8 +3,8 @@
 #include "adm/c_api.h"
 #include "mr_headmotion.h"
 
-#if ADM_API_VERSION < 13600
-#error MacinDecode requires MacinRender C ABI v1.36 or later
+#if ADM_API_VERSION < 13900
+#error MacinDecode requires MacinRender C ABI v1.39 or later
 #endif
 
 size_t macinrender_abi_size(uint32_t type) {
@@ -20,6 +20,8 @@ size_t macinrender_abi_size(uint32_t type) {
     case 8: return sizeof(adm_scene_output_config_t);
     case 9: return sizeof(adm_scene_output_status_t);
     case 10: return sizeof(mr_headmotion_sample_t);
+    case 11: return sizeof(adm_hptf_config_t);
+    case 12: return sizeof(adm_hptf_info_t);
     default: return 0;
     }
 }
@@ -45,6 +47,9 @@ size_t macinrender_abi_offset(uint32_t field) {
     case 16: return offsetof(adm_scene_output_status_t, presented_frames);
     case 17: return offsetof(adm_scene_output_status_t, clock_kind);
     case 18: return offsetof(mr_headmotion_sample_t, w);
+    case 19: return offsetof(adm_hptf_config_t, profile_path);
+    case 20: return offsetof(adm_hptf_config_t, revision);
+    case 21: return offsetof(adm_hptf_info_t, applied_revision);
     default: return (size_t)-1;
     }
 }

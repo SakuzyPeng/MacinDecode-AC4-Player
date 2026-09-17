@@ -1838,7 +1838,7 @@ impl PlayerApp {
                                 "Off uses the profile's own Preamp line verbatim. This bounds the frequency response, not transient peaks.",
                             );
                             let hptf = self.output.hptf_readout();
-                            let running = self.output.active_hptf().is_some();
+                            let running = self.output.active_hptf() == Some(settings.hptf.as_str());
                             // The renderer designs at the rate its output runs;
                             // 48 kHz is what a Scene output is created with, so
                             // that is the curve to draw before one exists.
@@ -1846,7 +1846,14 @@ impl PlayerApp {
                             let profile = settings.hptf.clone();
                             match self.hptf_curve(&profile, rate) {
                                 Some(Ok(curve)) => {
-                                    let curve = curve.clone();
+                                    let curve = curve.with_output_trim(if running { hptf.auto_trim_db } else { 0.0 });
+                                    ui.label(if running {
+                                        "Applied response"
+                                    } else if settings.hptf_auto_trim {
+                                        "Profile response · before automatic trim"
+                                    } else {
+                                        "Profile response"
+                                    });
                                     draw_hptf_curve(ui, &curve);
                                     if running && let Some(note) = hptf_disagreement(&curve, &hptf) {
                                         ui.colored_label(theme::WARNING, note);
@@ -3676,11 +3683,8 @@ fn hptf_disagreement(
             curve.preamp_db, readout.preamp_db
         ));
     }
-    // With auto-trim on, the renderer's peak is the one it measured before
-    // attenuating, which this curve has no way to know about. Compare only where
-    // the two describe the same cascade.
-    if readout.auto_trim_db == 0.0 && (readout.max_response_db - curve.max_response_db).abs() > 0.1
-    {
+    // Both peaks include the file preamp and any additional output trim.
+    if (readout.max_response_db - curve.max_response_db).abs() > 0.1 {
         return Some(format!(
             "Showing a peak of {:+.2} dB, but the renderer measured {:+.2} dB.",
             curve.max_response_db, readout.max_response_db
@@ -4270,6 +4274,72 @@ fn draw_drop_overlay(context: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(macinrender_output)]
+    #[test]
+    fn displayed_profile_response_matches_native_auto_trim() {
+        use macindecode_macinrender as native;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("boost.txt");
+        std::fs::write(
+            &path,
+            b"Preamp: 0 dB\nFilter 1: ON PK Fc 1000 Hz Gain 6 dB Q 1\n",
+        )
+        .unwrap();
+        let mut session = native::Session::new(&native::Config {
+            renderer: native::RendererSettings {
+                binaural: true,
+                layout: "4+7+0".into(),
+                sofa: String::new(),
+                split_lfe: true,
+            },
+            output: native::OutputKind::Null,
+            device_id: String::new(),
+            input_rate: 48_000,
+        })
+        .unwrap();
+        let control = session.control();
+        let profile = path.to_str().unwrap();
+        for auto_trim in [false, true] {
+            let revision = 1 + u64::from(auto_trim);
+            assert_eq!(
+                control.set_hptf(
+                    &native::HptfSettings {
+                        profile: profile.to_owned(),
+                        auto_trim,
+                    },
+                    revision
+                ),
+                Ok(true)
+            );
+            session.reset(revision, 0).unwrap();
+            let status = control.hptf_status().unwrap();
+            assert_eq!(status.applied_revision, revision);
+            let readout = crate::backend::HptfReadout {
+                enabled: status.enabled,
+                bands: status.bands,
+                rate: status.rate,
+                preamp_db: status.preamp_db,
+                auto_trim_db: status.auto_trim_db,
+                max_response_db: status.max_response_db,
+            };
+            let original = crate::hptf_profile::Curve::read(profile, status.rate).unwrap();
+            let mut drawn = original.with_output_trim(status.auto_trim_db);
+            assert!(original.max_response_db > 5.9);
+            if auto_trim {
+                assert!(drawn.max_response_db.abs() < 0.01);
+            }
+            for (before, after) in original.points.iter().zip(&drawn.points) {
+                assert!((after - before - status.auto_trim_db).abs() < 0.0001);
+            }
+            assert_eq!(hptf_disagreement(&drawn, &readout), None);
+            drawn.max_response_db += 1.0;
+            assert!(
+                hptf_disagreement(&drawn, &readout).is_some(),
+                "auto trim must not suppress a real discrepancy"
+            );
+        }
+    }
 
     #[test]
     fn decode_failure_unlocks_output_settings_and_restores_the_previous_choice() {

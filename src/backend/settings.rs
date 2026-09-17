@@ -102,10 +102,6 @@ impl OutputSettings {
         )
     )]
     pub fn hptf_applicable(&self) -> bool {
-        #[cfg(test)]
-        if self.null_output {
-            return false;
-        }
         self.mode.resolved() == SpatialBackendKind::SafBinaural
     }
     #[cfg(macinrender_output)]

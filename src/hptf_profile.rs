@@ -319,6 +319,18 @@ impl Curve {
         }
     }
 
+    /// Fold in the additional attenuation reported by the running output.
+    /// The file's preamp remains separate so it can still be checked against
+    /// the renderer's original profile metadata.
+    pub fn with_output_trim(&self, trim_db: f32) -> Self {
+        let mut curve = self.clone();
+        for db in &mut curve.points {
+            *db += trim_db;
+        }
+        curve.max_response_db += trim_db;
+        curve
+    }
+
     /// Where `hz` sits across the plot, as a fraction of its width.
     #[allow(
         clippy::cast_possible_truncation,

@@ -1790,6 +1790,7 @@ dependencies = [
  "cc",
  "serde_json",
  "shlex",
+ "tempfile",
 ]
 
 [[package]]
