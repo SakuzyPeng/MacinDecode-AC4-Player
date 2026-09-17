@@ -87,6 +87,9 @@ pub struct PlayerApp {
     hptf_picker: Option<Pin<Box<dyn Future<Output = Option<rfd::FileHandle>>>>>,
     /// The drawn profile, read once per path and design rate.
     hptf_drawing: Option<(String, u32, Result<crate::hptf_profile::Curve, String>)>,
+    /// The profile under the pointer, cached the same way so that sweeping the
+    /// folder re-reads a file only when the row changes.
+    hptf_ghost: Option<(String, u32, Result<crate::hptf_profile::Curve, String>)>,
     skin_picker: Option<Pin<Box<dyn Future<Output = Option<rfd::FileHandle>>>>>,
     camera: scene3d::camera::Camera,
     /// Whether zero-based LFE / one-based dynamic-object numbers are printed
@@ -863,6 +866,7 @@ impl PlayerApp {
             sofa_picker: None,
             hptf_picker: None,
             hptf_drawing: None,
+            hptf_ghost: None,
             skin_picker: None,
             camera,
             object_numbers_visible: true,
@@ -1618,31 +1622,6 @@ impl PlayerApp {
         }
     }
 
-    /// The curve for `path`, read from disk only when the profile or the rate it
-    /// must be designed at changes.
-    fn hptf_curve(
-        &mut self,
-        path: &str,
-        rate: u32,
-    ) -> Option<&Result<crate::hptf_profile::Curve, String>> {
-        if path.is_empty() {
-            self.hptf_drawing = None;
-            return None;
-        }
-        if self
-            .hptf_drawing
-            .as_ref()
-            .is_none_or(|(cached, at, _)| cached != path || *at != rate)
-        {
-            self.hptf_drawing = Some((
-                path.to_owned(),
-                rate,
-                crate::hptf_profile::Curve::read(path, rate),
-            ));
-        }
-        self.hptf_drawing.as_ref().map(|(_, _, curve)| curve)
-    }
-
     #[allow(
         clippy::too_many_lines,
         reason = "audio settings share a single transactional update"
@@ -1773,13 +1752,7 @@ impl PlayerApp {
                             ui.label(if settings.hptf.is_empty() {
                                 "Profile: none".to_owned()
                             } else {
-                                format!(
-                                    "Profile: {}",
-                                    Path::new(&settings.hptf)
-                                        .file_name()
-                                        .unwrap_or_default()
-                                        .to_string_lossy()
-                                )
+                                format!("Profile: {}", profile_name(&settings.hptf))
                             })
                             .on_hover_text(
                                 "An AutoEq ParametricEQ profile, applied to the headphone feed exactly as written. Which target it equalises towards is decided by whoever generated it and is not recorded in the file; pair it with the reference field your SOFA was equalised to.",
@@ -1798,11 +1771,17 @@ impl PlayerApp {
                                     settings.hptf.clear();
                                 }
                                 if ui.button("Refresh profile folder").clicked() {
+                                    // The curves are read from the files this
+                                    // re-reads, so drop them with it rather than
+                                    // let an edited profile keep its old picture.
+                                    self.hptf_drawing = None;
+                                    self.hptf_ghost = None;
                                     self.hptf.refresh(None, context);
                                 }
                             });
                             ui.label(self.hptf.root.display().to_string());
                             ui.label(&self.hptf.message);
+                            let mut hovered: Option<String> = None;
                             for file in &self.hptf.files {
                                 let full_path = self.hptf.root.join(&file.path);
                                 let selected = Path::new(&settings.hptf) == full_path;
@@ -1811,16 +1790,20 @@ impl PlayerApp {
                                     .active_hptf()
                                     .is_some_and(|path| Path::new(path) == full_path);
                                 let status = file.display_status(active);
-                                if ui
-                                    .add_enabled(
-                                        file.selectable(),
-                                        egui::Button::selectable(
-                                            selected,
-                                            format!("{} · {status}", file.path.display()),
-                                        ),
-                                    )
-                                    .clicked()
-                                {
+                                let row = ui.add_enabled(
+                                    file.selectable(),
+                                    egui::Button::selectable(
+                                        selected,
+                                        format!("{} · {status}", file.path.display()),
+                                    ),
+                                );
+                                // Only a row that can be chosen can be asked
+                                // about; one still importing has no settled file
+                                // to read.
+                                if file.selectable() && row.hovered() {
+                                    hovered = full_path.to_str().map(str::to_owned);
+                                }
+                                if row.clicked() {
                                     if let Some(path) = full_path.to_str() {
                                         path.clone_into(&mut settings.hptf);
                                     } else {
@@ -1844,28 +1827,79 @@ impl PlayerApp {
                             // that is the curve to draw before one exists.
                             let rate = if hptf.rate == 0 { 48_000 } else { hptf.rate };
                             let profile = settings.hptf.clone();
-                            match self.hptf_curve(&profile, rate) {
-                                Some(Ok(curve)) => {
-                                    let curve = curve.with_output_trim(if running { hptf.auto_trim_db } else { 0.0 });
-                                    ui.label(if running {
-                                        "Applied response"
-                                    } else if settings.hptf_auto_trim {
-                                        "Profile response · before automatic trim"
+                            let ghost_path = hptf_ghost(hovered.as_deref(), &profile);
+                            let drawn = hptf_curve(&mut self.hptf_drawing, &profile, rate);
+                            let ghost = hptf_curve(
+                                &mut self.hptf_ghost,
+                                ghost_path.unwrap_or_default(),
+                                rate,
+                            );
+                            // The drawn line is what the output does, so it takes
+                            // the renderer's extra trim — but only while it is
+                            // this profile that is running. A ghost never is one,
+                            // so a ghost is drawn the way its own file reads.
+                            let drawn_curve =
+                                drawn.and_then(|curve| curve.as_ref().ok()).map(|curve| {
+                                    curve.with_output_trim(if running {
+                                        hptf.auto_trim_db
                                     } else {
-                                        "Profile response"
-                                    });
-                                    draw_hptf_curve(ui, &curve);
-                                    if running && let Some(note) = hptf_disagreement(&curve, &hptf) {
-                                        ui.colored_label(theme::WARNING, note);
-                                    }
-                                }
-                                Some(Err(error)) => {
+                                        0.0
+                                    })
+                                });
+                            let ghost_curve = ghost.and_then(|curve| curve.as_ref().ok());
+                            if drawn_curve.is_some() {
+                                ui.label(if running {
+                                    "Applied response"
+                                } else if settings.hptf_auto_trim {
+                                    "Profile response · before automatic trim"
+                                } else {
+                                    "Profile response"
+                                });
+                            }
+                            if drawn_curve.is_some() || ghost_curve.is_some() {
+                                draw_hptf_curve(ui, drawn_curve.as_ref(), ghost_curve);
+                            }
+                            if let Some(path) = ghost_path {
+                                // Which line is which. Nothing else in the panel
+                                // names the profile being pointed at, and the
+                                // pointer is about to leave it.
+                                if let Some(Err(error)) = ghost {
                                     ui.colored_label(
-                                        theme::WARNING,
-                                        format!("Cannot read this profile: {error}"),
+                                        theme::MUTED,
+                                        format!("{}: {error}", profile_name(path)),
                                     );
+                                } else {
+                                    ui.horizontal_wrapped(|ui| {
+                                        if drawn_curve.is_some() {
+                                            ui.colored_label(theme::ACCENT, profile_name(&profile));
+                                            ui.label("vs");
+                                        }
+                                        // The heading above describes the drawn
+                                        // line alone. When the output is trimming
+                                        // that one, the two are not the same kind
+                                        // of curve, and the legend has to say so.
+                                        ui.colored_label(
+                                            theme::MUTED,
+                                            if running && hptf.auto_trim_db != 0.0 {
+                                                format!("{} · as written", profile_name(path))
+                                            } else {
+                                                profile_name(path)
+                                            },
+                                        );
+                                    });
                                 }
-                                None => {}
+                            }
+                            if let Some(Err(error)) = drawn {
+                                ui.colored_label(
+                                    theme::WARNING,
+                                    format!("Cannot read this profile: {error}"),
+                                );
+                            }
+                            if running
+                                && let Some(curve) = &drawn_curve
+                                && let Some(note) = hptf_disagreement(curve, &hptf)
+                            {
+                                ui.colored_label(theme::WARNING, note);
                             }
                             if running {
                                 ui.label(format!(
@@ -3559,19 +3593,84 @@ enum StatusKind {
     Warning,
 }
 
-/// The response a profile's cascade applies to the headphone feed.
+/// The name a profile goes by on screen. The folder is one line above it and the
+/// full path is rarely the useful half.
+fn profile_name(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// The curve for `path` at `rate`, kept in `slot` and read from disk only when
+/// one of them changes. An empty path is "no profile", and clears the slot.
+///
+/// A biquad's response depends on the rate it was designed at, so the rate is
+/// half of the key: the same file at two rates is two curves.
+fn hptf_curve<'a>(
+    slot: &'a mut Option<(String, u32, Result<crate::hptf_profile::Curve, String>)>,
+    path: &str,
+    rate: u32,
+) -> Option<&'a Result<crate::hptf_profile::Curve, String>> {
+    if path.is_empty() {
+        *slot = None;
+        return None;
+    }
+    if slot
+        .as_ref()
+        .is_none_or(|(cached, at, _)| cached != path || *at != rate)
+    {
+        *slot = Some((
+            path.to_owned(),
+            rate,
+            crate::hptf_profile::Curve::read(path, rate),
+        ));
+    }
+    slot.as_ref().map(|(_, _, curve)| curve)
+}
+
+/// Which profile to ghost behind the drawn one.
+///
+/// Pointing at a row is a question, not a choice: the answer is drawn and
+/// nothing reaches the renderer, so comparing two profiles cannot crossfade the
+/// audio being judged. Ghosting the drawn profile behind itself would answer
+/// nothing, and that is not a corner case — clicking a row leaves the pointer
+/// on it, so the frame that selects a profile is also a frame that hovers it.
+fn hptf_ghost<'a>(hovered: Option<&'a str>, drawn: &str) -> Option<&'a str> {
+    hovered.filter(|path| Path::new(path) != Path::new(drawn))
+}
+
+/// The decibel range the plot has to cover, top first.
+///
+/// Fixed at +3 to -12 dB rather than fitted to the data: two profiles looked at a
+/// minute apart have to stay comparable by eye, which a rescaling axis quietly
+/// destroys. A curve that runs past either end extends the range instead — and
+/// the ghost counts, because a comparison drawn outside the frame is worse than
+/// no comparison.
+fn hptf_axis(curves: [Option<&crate::hptf_profile::Curve>; 2]) -> (f32, f32) {
+    let shown = || curves.into_iter().flatten();
+    (
+        shown().fold(3.0_f32, |top, curve| top.max(curve.max_response_db.ceil())),
+        shown().fold(-12.0_f32, |bottom, curve| bottom.min(curve.floor().floor())),
+    )
+}
+
+/// The response a profile's cascade applies to the headphone feed, with
+/// whatever is being pointed at drawn faintly behind it.
 ///
 /// Drawn with the preamp folded in, so the top rule is full scale and the height
-/// of the curve below it is the headroom the preamp bought. The axis is fixed at
-/// +3 to -12 dB rather than fitted to the data: two profiles looked at a minute
-/// apart have to stay comparable by eye, which a rescaling axis quietly
-/// destroys. A curve that runs past either end extends the axis instead.
+/// of the curve below it is the headroom the preamp bought.
 #[allow(
     clippy::cast_precision_loss,
     reason = "the index is bounded by the stored curve's length, far inside \
               what f32 represents exactly"
 )]
-fn draw_hptf_curve(ui: &mut egui::Ui, curve: &crate::hptf_profile::Curve) {
+fn draw_hptf_curve(
+    ui: &mut egui::Ui,
+    curve: Option<&crate::hptf_profile::Curve>,
+    ghost: Option<&crate::hptf_profile::Curve>,
+) {
     const LABELS: f32 = 13.0;
     const COLUMNS: usize = 512;
     let (rect, _) = ui.allocate_exact_size(
@@ -3588,8 +3687,7 @@ fn draw_hptf_curve(ui: &mut egui::Ui, curve: &crate::hptf_profile::Curve) {
     );
 
     let plot = egui::Rect::from_min_max(rect.min, egui::pos2(rect.max.x, rect.max.y - LABELS));
-    let top = 3.0_f32.max(curve.max_response_db.ceil());
-    let bottom = (-12.0_f32).min(curve.floor().floor());
+    let (top, bottom) = hptf_axis([ghost, curve]);
     let y = |db: f32| plot.top() + (top - db) / (top - bottom) * plot.height();
     let x = |hz: f64| plot.left() + crate::hptf_profile::Curve::position(hz) * plot.width();
 
@@ -3644,22 +3742,33 @@ fn draw_hptf_curve(ui: &mut egui::Ui, curve: &crate::hptf_profile::Curve) {
     // The stored curve is far denser than any panel is wide, and the extra
     // vertices only cost tessellation. COLUMNS still leaves more than one sample
     // per pixel at the settings window's width.
-    let last = curve.points.len().saturating_sub(1);
-    let step = curve.points.len().div_ceil(COLUMNS).max(1);
-    let points: Vec<_> = (0..curve.points.len())
-        .step_by(step)
-        .chain(std::iter::once(last))
-        .map(|index| {
-            let across = index as f32 / last.max(1) as f32;
-            egui::pos2(plot.left() + across * plot.width(), y(curve.points[index]))
-        })
-        .collect();
-    painter.add(egui::Shape::line(points, Stroke::new(1.5, theme::ACCENT)));
-    painter.circle_filled(
-        egui::pos2(x(f64::from(curve.peak_hz)), y(curve.max_response_db)),
-        2.5,
-        theme::ACCENT,
-    );
+    let trace = |curve: &crate::hptf_profile::Curve, stroke: Stroke| {
+        let last = curve.points.len().saturating_sub(1);
+        let step = curve.points.len().div_ceil(COLUMNS).max(1);
+        let points: Vec<_> = (0..curve.points.len())
+            .step_by(step)
+            .chain(std::iter::once(last))
+            .map(|index| {
+                let across = index as f32 / last.max(1) as f32;
+                egui::pos2(plot.left() + across * plot.width(), y(curve.points[index]))
+            })
+            .collect();
+        painter.add(egui::Shape::line(points, stroke));
+    };
+    // Behind, and thin enough to read as the question rather than the answer.
+    if let Some(ghost) = ghost {
+        trace(ghost, Stroke::new(1.4, theme::MUTED.gamma_multiply(0.55)));
+    }
+    if let Some(curve) = curve {
+        trace(curve, Stroke::new(1.5, theme::ACCENT));
+        // Only the drawn profile gets its peak marked: that dot is the number
+        // the renderer is asked to confirm, and the ghost is not running.
+        painter.circle_filled(
+            egui::pos2(x(f64::from(curve.peak_hz)), y(curve.max_response_db)),
+            2.5,
+            theme::ACCENT,
+        );
+    }
 }
 
 /// Where our reading of a profile and the renderer's disagree.
@@ -4968,5 +5077,86 @@ mod tests {
         assert!(!is_reconfigurable_scene_error(
             "Windows returned an invalid Spatial Audio object buffer"
         ));
+    }
+
+    #[test]
+    fn a_profile_is_read_again_only_when_the_file_or_the_design_rate_changes() {
+        let band = "Filter 1: ON PK Fc 1000 Hz Gain 1.0 dB Q 1.00\n";
+        let folder = tempfile::tempdir().unwrap();
+        let first = folder.path().join("first.txt");
+        let second = folder.path().join("second.txt");
+        std::fs::write(&first, band).unwrap();
+        std::fs::write(&second, band.repeat(2)).unwrap();
+        let first = first.to_str().unwrap();
+        let second = second.to_str().unwrap();
+
+        // The band count says whether the file was read again, and says it in an
+        // integer.
+        let mut slot = None;
+        let bands = |slot: &Option<(String, u32, Result<crate::hptf_profile::Curve, String>)>| {
+            slot.as_ref().unwrap().2.as_ref().unwrap().bands
+        };
+
+        assert!(hptf_curve(&mut slot, first, 48_000).is_some());
+        assert_eq!(bands(&slot), 1);
+
+        // Rewriting the file behind the cache is how the next call proves it did
+        // not go back to disk.
+        std::fs::write(first, band.repeat(3)).unwrap();
+        assert!(hptf_curve(&mut slot, first, 48_000).is_some());
+        assert_eq!(bands(&slot), 1);
+
+        // A rate change is a different curve from the same file, so it re-reads.
+        assert!(hptf_curve(&mut slot, first, 44_100).is_some());
+        assert_eq!(bands(&slot), 3);
+        assert!(hptf_curve(&mut slot, second, 44_100).is_some());
+        assert_eq!(bands(&slot), 2);
+
+        // Turning the profile off has to take its picture with it.
+        assert!(hptf_curve(&mut slot, "", 44_100).is_none());
+        assert!(slot.is_none());
+    }
+
+    #[test]
+    fn the_plot_frames_the_ghost_too_but_only_when_a_curve_leaves_the_fixed_axis() {
+        let curve = |max: f32, min: f32| crate::hptf_profile::Curve {
+            bands: 1,
+            preamp_db: 0.0,
+            max_response_db: max,
+            peak_hz: 1_000.0,
+            points: vec![min, max],
+        };
+        let axis = |top: f32, bottom: f32, range: (f32, f32)| {
+            (range.0 - top).abs() < f32::EPSILON && (range.1 - bottom).abs() < f32::EPSILON
+        };
+
+        // Inside the fixed frame nothing rescales, which is the whole point of
+        // fixing it.
+        let quiet = curve(1.5, -4.0);
+        assert!(axis(3.0, -12.0, hptf_axis([None, None])));
+        assert!(axis(3.0, -12.0, hptf_axis([None, Some(&quiet)])));
+        assert!(axis(3.0, -12.0, hptf_axis([Some(&quiet), Some(&quiet)])));
+
+        // Either curve running past either end extends the frame, so a ghost is
+        // never cropped to keep the drawn one's scale.
+        let loud = curve(7.2, -20.4);
+        assert!(axis(8.0, -21.0, hptf_axis([Some(&loud), Some(&quiet)])));
+        assert!(axis(8.0, -21.0, hptf_axis([Some(&quiet), Some(&loud)])));
+    }
+
+    #[test]
+    fn a_profile_is_never_ghosted_behind_itself() {
+        assert_eq!(
+            hptf_ghost(Some("/hptf/other.txt"), "/hptf/drawn.txt"),
+            Some("/hptf/other.txt")
+        );
+        // The frame that selects a row is also a frame that hovers it.
+        assert_eq!(hptf_ghost(Some("/hptf/drawn.txt"), "/hptf/drawn.txt"), None);
+        assert_eq!(hptf_ghost(None, "/hptf/drawn.txt"), None);
+        // With nothing selected the ghost is the whole drawing.
+        assert_eq!(
+            hptf_ghost(Some("/hptf/other.txt"), ""),
+            Some("/hptf/other.txt")
+        );
     }
 }

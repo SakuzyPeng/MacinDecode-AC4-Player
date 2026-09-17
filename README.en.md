@@ -168,8 +168,11 @@ live and do not interrupt decoding of the current track.
   reports the bands and preamp actually running, and can trim further when a curve still peaks above
   0 dBFS. A profile you pick is copied into the `hptf/` folder in the app's data directory and
   listed with the same **available** / **in use** states as a SOFA.
-  The settings window plots the profile's response with the preamp and any applied automatic trim folded in, so full scale is the
-  top rule and you can see what it lifts and how much headroom is left.
+  The settings window plots the profile's response with the preamp and any applied automatic trim
+  folded in, so full scale is the top rule and you can see what it lifts and how much headroom is
+  left. Point at another row in the list and that profile is drawn faintly behind the current one,
+  as its own file reads — drawn only, never sent, so comparing two profiles cannot interrupt the
+  one you are listening to.
   Which target a profile equalises towards is decided by the file and is not recorded in it, so the
   player shows only the file name and the bands and preamp actually running. Pair it with the
   reference field your SOFA was equalised to — a diffuse-field-equalised HRTF wants a
