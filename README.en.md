@@ -158,7 +158,9 @@ live and do not interrupt decoding of the current track.
 - **Custom HRTFs:** a SOFA file you pick is copied into the `sofa/` folder in the app's data
   directory, so later you can select it straight from the list. **available** means it can be
   selected; **in use** means the current binaural renderer has successfully loaded it.
-  Loading failures show a specific error.
+  Loading failures show a specific error. The list itself shows four rows and scrolls in place past
+  that, and it opens scrolled to whatever is selected — a folder has no upper bound, and the
+  settings window does not grow with it.
 - **Headphone compensation (HpTF):** load an [AutoEq](https://github.com/jaakkopasanen/AutoEq)
   `ParametricEQ.txt` to take the headphone's own response out of binaural monitoring. Available in
   **SAF binaural** only: system spatial audio and Windows object passthrough hand a multichannel bed

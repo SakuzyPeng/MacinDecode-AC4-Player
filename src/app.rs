@@ -94,6 +94,16 @@ pub struct PlayerApp {
     /// of it. Its presence is also what marks that import as a save, so the
     /// knobs come off in the same settings change that selects the new file.
     hptf_saving: Option<tempfile::TempDir>,
+    /// The row each managed folder's list was last scrolled to.
+    ///
+    /// A bounded list can hold the selected file off screen, and the moment
+    /// that matters most is a selection that moves without a click on its row
+    /// — the import behind Save as profile… picks the new file itself.
+    /// Remembering what was last brought into view makes the scroll a one-shot:
+    /// it fires when the selection moves and leaves the list alone afterwards,
+    /// so it never fights a hand on the wheel.
+    sofa_shown: Option<PathBuf>,
+    hptf_shown: Option<PathBuf>,
     skin_picker: Option<Pin<Box<dyn Future<Output = Option<rfd::FileHandle>>>>>,
     camera: scene3d::camera::Camera,
     /// Whether zero-based LFE / one-based dynamic-object numbers are printed
@@ -777,6 +787,10 @@ impl PlayerApp {
         )
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one construction site naming every field is what keeps a new one from being forgotten"
+    )]
     fn from_storage(
         context: &egui::Context,
         storage: Option<&dyn eframe::Storage>,
@@ -872,6 +886,8 @@ impl PlayerApp {
             hptf_drawing: None,
             hptf_ghost: None,
             hptf_saving: None,
+            sofa_shown: None,
+            hptf_shown: None,
             skin_picker: None,
             camera,
             object_numbers_visible: true,
@@ -1795,15 +1811,16 @@ impl PlayerApp {
                             });
                             ui.label(self.sofa.root.display().to_string());
                             ui.label(&self.sofa.message);
-                            for file in &self.sofa.files {
-                                let full_path = self.sofa.root.join(&file.path);
-                                let selected = Path::new(&settings.sofa) == full_path;
-                                let active = self.output.active_sofa().is_some_and(|path| Path::new(path) == full_path);
-                                let status = file.display_status(active);
-                                if ui.add_enabled(file.selectable(), egui::Button::selectable(selected, format!("{} · {status}", file.path.display()))).clicked() {
-                                    if let Some(path) = full_path.to_str() { path.clone_into(&mut settings.sofa); }
-                                    else { self.audio_settings_error = Some("This renderer requires a Unicode SOFA path".into()); }
-                                }
+                            let (clicked, _) = draw_catalog_files(
+                                ui,
+                                &self.sofa,
+                                self.output.active_sofa(),
+                                Path::new(&settings.sofa),
+                                &mut self.sofa_shown,
+                            );
+                            if let Some(full_path) = clicked {
+                                if let Some(path) = full_path.to_str() { path.clone_into(&mut settings.sofa); }
+                                else { self.audio_settings_error = Some("This renderer requires a Unicode SOFA path".into()); }
                             }
                             ui.separator();
                             // Name the file and nothing else. A ParametricEQ profile
@@ -1842,36 +1859,22 @@ impl PlayerApp {
                             });
                             ui.label(self.hptf.root.display().to_string());
                             ui.label(&self.hptf.message);
-                            let mut hovered: Option<String> = None;
-                            for file in &self.hptf.files {
-                                let full_path = self.hptf.root.join(&file.path);
-                                let selected = Path::new(&settings.hptf) == full_path;
-                                let active = self
-                                    .output
-                                    .active_hptf()
-                                    .is_some_and(|path| Path::new(path) == full_path);
-                                let status = file.display_status(active);
-                                let row = ui.add_enabled(
-                                    file.selectable(),
-                                    egui::Button::selectable(
-                                        selected,
-                                        format!("{} · {status}", file.path.display()),
-                                    ),
-                                );
-                                // Only a row that can be chosen can be asked
-                                // about; one still importing has no settled file
-                                // to read.
-                                if file.selectable() && row.hovered() {
-                                    hovered = full_path.to_str().map(str::to_owned);
-                                }
-                                if row.clicked() {
-                                    if let Some(path) = full_path.to_str() {
-                                        path.clone_into(&mut settings.hptf);
-                                    } else {
-                                        self.audio_settings_error = Some(
-                                            "This renderer requires a Unicode profile path".into(),
-                                        );
-                                    }
+                            let (clicked, hovered) = draw_catalog_files(
+                                ui,
+                                &self.hptf,
+                                self.output.active_hptf(),
+                                Path::new(&settings.hptf),
+                                &mut self.hptf_shown,
+                            );
+                            let hovered = hovered
+                                .and_then(|path| path.to_str().map(str::to_owned));
+                            if let Some(full_path) = clicked {
+                                if let Some(path) = full_path.to_str() {
+                                    path.clone_into(&mut settings.hptf);
+                                } else {
+                                    self.audio_settings_error = Some(
+                                        "This renderer requires a Unicode profile path".into(),
+                                    );
                                 }
                             }
                             ui.checkbox(
@@ -3765,6 +3768,73 @@ enum StatusKind {
     Warning,
 }
 
+/// How many rows of a managed folder the settings panel shows at once.
+///
+/// A managed folder has no upper bound — one row per file, each costing a full
+/// interactive height — so these two lists are the one part of the panel that
+/// can outgrow any screen. Four rows read as a list rather than as a stack of
+/// buttons, and the cap is computed from the style rather than written in
+/// pixels so it follows the theme instead of drifting from it. That also
+/// leaves a sliver of the fifth row showing, which is the cheapest way to say
+/// there is more below.
+const CATALOG_ROWS_SHOWN: f32 = 4.0;
+
+/// Draw one managed folder as a bounded list, and report the file that was
+/// clicked and the one under the pointer.
+///
+/// `shown` is the row this list last scrolled to, and it is what keeps
+/// bringing the selection into view a one-shot rather than a scroll position
+/// the panel re-asserts every frame. It is cleared when the selection is not
+/// one of the rows, so a file that comes back — reimported, or dropped into
+/// the folder again — is scrolled to instead of being taken for already shown.
+fn draw_catalog_files(
+    ui: &mut egui::Ui,
+    catalog: &crate::file_catalog::Catalog,
+    in_use: Option<&str>,
+    selected: &Path,
+    shown: &mut Option<PathBuf>,
+) -> (Option<PathBuf>, Option<PathBuf>) {
+    let row = ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
+    let bring_into_view = shown.as_deref() != Some(selected);
+    let (mut clicked, mut hovered, mut present) = (None, None, false);
+    egui::ScrollArea::vertical()
+        .id_salt(("catalog-files", catalog.kind.slug))
+        .max_height(row * CATALOG_ROWS_SHOWN)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            for file in &catalog.files {
+                let full_path = catalog.root.join(&file.path);
+                let is_selected = selected == full_path;
+                let active = in_use.is_some_and(|path| Path::new(path) == full_path);
+                let response = ui.add_enabled(
+                    file.selectable(),
+                    egui::Button::selectable(
+                        is_selected,
+                        format!("{} · {}", file.path.display(), file.display_status(active)),
+                    ),
+                );
+                // Only a row that can be chosen can be asked about; one still
+                // importing has no settled file to read.
+                if file.selectable() && response.hovered() {
+                    hovered = Some(full_path.clone());
+                }
+                if is_selected {
+                    present = true;
+                    if bring_into_view {
+                        // Minimal scrolling: a row already on screen stays
+                        // where it is rather than being jerked to the middle.
+                        response.scroll_to_me(None);
+                    }
+                }
+                if response.clicked() {
+                    clicked = Some(full_path);
+                }
+            }
+        });
+    *shown = present.then(|| selected.to_path_buf());
+    (clicked, hovered)
+}
+
 /// The name a profile goes by on screen. The folder is one line above it and the
 /// full path is rarely the useful half.
 fn profile_name(path: &str) -> String {
@@ -5644,6 +5714,105 @@ Filter 10: ON WAT Fc 500 Hz Gain 1 dB Q 1
         // as the same kind of thing beside a "-1.0".
         assert!(adjustment_summary(bass).starts_with("bass +"));
         assert!(adjustment_summary(Adjustment::default()).is_empty());
+    }
+
+    /// Build a folder listing of `count` selectable files.
+    fn folder_of(count: usize) -> crate::file_catalog::Catalog {
+        let mut catalog =
+            crate::file_catalog::Catalog::new(crate::file_catalog::HPTF, PathBuf::from("/hptf"));
+        catalog.files = (0..count)
+            .map(|index| crate::file_catalog::Entry {
+                path: PathBuf::from(format!("profile-{index}.txt")),
+                sha256: None,
+                status: "unverified".to_owned(),
+            })
+            .collect();
+        catalog
+    }
+
+    /// Draw one folder listing and hand back the height it took and the row it
+    /// remembered. Twice, because a scroll area sizes itself from the content
+    /// it measured on the previous pass.
+    fn drawn_list(
+        catalog: &crate::file_catalog::Catalog,
+        selected: &Path,
+    ) -> (f32, Option<PathBuf>, egui::style::Spacing) {
+        let context = egui::Context::default();
+        let mut shown = None;
+        let (mut height, mut spacing) = (0.0, egui::style::Spacing::default());
+        for _ in 0..2 {
+            shown = None;
+            context
+                .run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(390.0, 2000.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        spacing = ui.spacing().clone();
+                        height = ui
+                            .scope(|ui| {
+                                draw_catalog_files(ui, catalog, None, selected, &mut shown);
+                            })
+                            .response
+                            .rect
+                            .height();
+                    },
+                )
+                .drop_without_applying_deltas();
+        }
+        (height, shown, spacing)
+    }
+
+    /// The one thing a managed folder cannot promise is how much of it there
+    /// is, so the panel decides how much of it it shows. Without this the two
+    /// file lists are the only part of the window whose height has no bound at
+    /// all, and a folder of profiles pushes everything under it off the screen.
+    #[test]
+    fn a_folder_list_stops_growing_at_the_rows_the_panel_shows() {
+        let (three, _, spacing) = drawn_list(&folder_of(3), Path::new(""));
+        let row = spacing.interact_size.y + spacing.item_spacing.y;
+        let cap = row * CATALOG_ROWS_SHOWN;
+
+        // A short folder is bounded, not padded: the cap is a ceiling and the
+        // panel keeps the space a small folder does not need.
+        assert!(
+            three < cap,
+            "three files took {three} of a {cap} cap; the list is being padded out"
+        );
+
+        // Past the ceiling the list stops growing, and goes on not growing.
+        let (forty, _, _) = drawn_list(&folder_of(40), Path::new(""));
+        let (four_hundred, _, _) = drawn_list(&folder_of(400), Path::new(""));
+        assert!(
+            forty <= cap + 0.5,
+            "forty files took {forty}, past the {cap} cap"
+        );
+        assert!(
+            (forty - four_hundred).abs() < 0.5,
+            "{forty} for forty files and {four_hundred} for four hundred: the list still grows"
+        );
+    }
+
+    /// The cap can hold the chosen file off screen, so the list scrolls to it —
+    /// once. What makes it once is the remembered row, and remembering a row
+    /// the folder does not have would leave that file unscrolled-to when it
+    /// arrived, which is exactly the case the save flow lands in.
+    #[test]
+    fn a_folder_list_remembers_only_a_selection_it_could_show() {
+        let folder = folder_of(40);
+        let (_, shown, _) = drawn_list(&folder, Path::new("/hptf/profile-30.txt"));
+        assert_eq!(shown.as_deref(), Some(Path::new("/hptf/profile-30.txt")));
+
+        // Nothing selected, and a selection this folder does not hold, are the
+        // same answer: there was no row to bring into view.
+        let (_, shown, _) = drawn_list(&folder, Path::new(""));
+        assert_eq!(shown, None);
+        let (_, shown, _) = drawn_list(&folder, Path::new("/hptf/not-here.txt"));
+        assert_eq!(shown, None);
     }
 
     #[test]
