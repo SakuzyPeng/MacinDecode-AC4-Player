@@ -1077,3 +1077,79 @@ fn real_playback_browse_pause_and_restart_restore_the_output_position() {
     assert_eq!(restored.cursor.as_ref().unwrap().entry.id, entry);
     assert_eq!(restored.output.snapshot().playhead_frames(), frame);
 }
+
+/// Saving a tuned profile has one invariant worth a test: selecting the new
+/// file and putting the knobs back are *one* settings change. Split them and a
+/// frame of the new profile — which already has the adjustment in its bands —
+/// runs with the knobs still up, applying it twice.
+#[test]
+fn saving_a_tuned_profile_selects_it_and_puts_the_knobs_back() {
+    use crate::hptf_profile::{Adjustment, Profile};
+    let dir = tempfile::tempdir().unwrap();
+    let (mut app, context) = open(dir.path());
+    settle(&mut app, &context);
+    // The managed folders are driven from `logic`, which no harness pass
+    // reaches, so this test turns that one crank itself.
+    let scan = |app: &mut PlayerApp, context: &egui::Context| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            app.tick(context, false);
+            app.poll_file_catalogs(context);
+            if app.hptf.started && !app.hptf.busy() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the profile folder never settled"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    scan(&mut app, &context);
+
+    let adjustment = Adjustment {
+        bass_db: 2.5,
+        tilt_db_per_octave: -1.0,
+    };
+    let mut settings = app.output.settings().clone();
+    settings.hptf_bass_db = 2.5;
+    settings.hptf_tilt_db = -1.0;
+    app.change_output_settings(settings, &context);
+    // Without this the assertions below would pass on a test that never turned
+    // a knob in the first place.
+    assert!((app.output.settings().hptf_bass_db - 2.5).abs() < f32::EPSILON);
+
+    // Staged the way the Save button stages it: the adjustment already in the
+    // bands, under the name the folder will keep.
+    let tuned = Profile::parse("Preamp: -1 dB\nFilter 1: ON PK Fc 1000 Hz Gain 2 dB Q 1\n")
+        .unwrap()
+        .with(adjustment)
+        .unwrap();
+    let name = "Tuned (bass +2.5 dB, tilt -1.00 dB per octave).txt";
+    let staging = tempfile::tempdir().unwrap();
+    let file = staging.path().join(name);
+    std::fs::write(&file, tuned.to_parametric_eq()).unwrap();
+    app.hptf_saving = Some(staging);
+    app.hptf.refresh(Some(file), &context);
+    scan(&mut app, &context);
+
+    let settings = app.output.settings().clone();
+    assert!(settings.hptf.ends_with(name), "{}", settings.hptf);
+    assert!(settings.hptf_bass_db == 0.0 && settings.hptf_tilt_db == 0.0);
+    assert!(
+        app.hptf_saving.is_none(),
+        "the staging copy is released once the import has read it"
+    );
+
+    // What landed in hptf/ is the cascade that was staged, and it carries the
+    // file's one band plus the adjustment's four.
+    let landed = Profile::parse(&std::fs::read_to_string(&settings.hptf).unwrap()).unwrap();
+    assert_eq!(tuned.disagreement(&landed), None);
+    assert_eq!(
+        landed.bands(),
+        1 + u32::try_from(adjustment.bands().len()).unwrap()
+    );
+
+    app.flush_persistence();
+    app.library.shutdown();
+}

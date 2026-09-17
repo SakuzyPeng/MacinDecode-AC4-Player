@@ -179,7 +179,9 @@ live and do not interrupt decoding of the current track.
   behind AutoEq's own `--bass-boost`) and **Tilt** (a straight slope through 1 kHz, up to ±2 dB/oct,
   measured to stay within 0.25 dB of straight). What they add is appended to the profile rather than
   merged into it: the panel counts it separately, draws the profile alone as a dashed line beside it,
-  and turning both back to zero returns the file exactly as written.
+  and turning both back to zero returns the file exactly as written. **Save as profile…** writes the
+  two together into `hptf/` as an ordinary profile, selects it and returns the knobs to rest, so a
+  setting worth keeping becomes a file you can copy rather than two numbers in the settings.
   Which target a profile equalises towards is decided by the file and is not recorded in it, so the
   player shows only the file name and the bands and preamp actually running. Pair it with the
   reference field your SOFA was equalised to — a diffuse-field-equalised HRTF wants a

@@ -90,6 +90,10 @@ pub struct PlayerApp {
     /// The profile under the pointer, cached the same way so that sweeping the
     /// folder re-reads a file only when the row changes.
     hptf_ghost: Option<HptfDrawing>,
+    /// Holds a saved profile's staging directory while the catalog imports out
+    /// of it. Its presence is also what marks that import as a save, so the
+    /// knobs come off in the same settings change that selects the new file.
+    hptf_saving: Option<tempfile::TempDir>,
     skin_picker: Option<Pin<Box<dyn Future<Output = Option<rfd::FileHandle>>>>>,
     camera: scene3d::camera::Camera,
     /// Whether zero-based LFE / one-based dynamic-object numbers are printed
@@ -867,6 +871,7 @@ impl PlayerApp {
             hptf_picker: None,
             hptf_drawing: None,
             hptf_ghost: None,
+            hptf_saving: None,
             skin_picker: None,
             camera,
             object_numbers_visible: true,
@@ -1566,6 +1571,62 @@ impl PlayerApp {
         }
     }
 
+    /// Start each managed folder's first scan once the library can supply its
+    /// stored index, and take whatever the scans and imports came back with.
+    ///
+    /// Split out of [`Self::logic`] because it is the one part of a hidden
+    /// window's work a test can drive directly: an import is asynchronous, and
+    /// without a handle on the step that takes its result there is nowhere to
+    /// observe it from.
+    fn poll_file_catalogs(&mut self, context: &egui::Context) {
+        if self.library.ready && !self.sofa.started {
+            self.sofa.files = self.library.sofa_index.take().unwrap_or_default();
+            self.sofa.refresh(None, context);
+        }
+        if self.library.ready && !self.hptf.started {
+            self.hptf.files = self.library.hptf_index.take().unwrap_or_default();
+            self.hptf.refresh(None, context);
+        }
+        if let Some((files, imported)) = self.sofa.poll() {
+            self.library
+                .save_file_index(crate::file_catalog::SOFA, files);
+            if let Some(path) = imported {
+                if let Some(path) = path.to_str() {
+                    let mut settings = self.output.settings().clone();
+                    path.clone_into(&mut settings.sofa);
+                    self.change_output_settings(settings, context);
+                } else {
+                    self.audio_settings_error =
+                        Some("This renderer requires a Unicode SOFA path".into());
+                }
+            }
+        }
+        if let Some((files, imported)) = self.hptf.poll() {
+            self.library
+                .save_file_index(crate::file_catalog::HPTF, files);
+            // A save arrives here like any other import. Taking the staging
+            // directory back is what says this one was a save, and the knobs
+            // have to come off in the same settings change that selects the
+            // file they are now baked into — otherwise a frame of the new
+            // profile would run with the adjustment applied twice.
+            let saved = self.hptf_saving.take().is_some();
+            if let Some(path) = imported {
+                if let Some(path) = path.to_str() {
+                    let mut settings = self.output.settings().clone();
+                    path.clone_into(&mut settings.hptf);
+                    if saved {
+                        settings.hptf_bass_db = 0.0;
+                        settings.hptf_tilt_db = 0.0;
+                    }
+                    self.change_output_settings(settings, context);
+                } else {
+                    self.audio_settings_error =
+                        Some("This renderer requires a Unicode profile path".into());
+                }
+            }
+        }
+    }
+
     fn poll_hptf_picker(&mut self, context: &egui::Context) {
         if let Some(error) = self.output.take_hptf_error() {
             self.audio_settings_error = Some(error);
@@ -1824,6 +1885,7 @@ impl PlayerApp {
                             // sculpt with would argue against every other
                             // decision in an inspection tool; two named,
                             // checkable controls do not.
+                            let mut save_requested = false;
                             ui.add_enabled_ui(!settings.hptf.is_empty(), |ui| {
                                 ui.add(
                                     egui::Slider::new(
@@ -1838,29 +1900,38 @@ impl PlayerApp {
                                 .on_hover_text(
                                     "A low shelf at 105 Hz, Q 0.70 — the shape behind AutoEq's own --bass-boost, so +6 dB on a bass-free profile gives the published preset rather than something like it.",
                                 );
-                                ui.horizontal(|ui| {
-                                    ui.add(
-                                        egui::Slider::new(
-                                            &mut settings.hptf_tilt_db,
-                                            -crate::hptf_profile::TILT_LIMIT_DB
-                                                ..=crate::hptf_profile::TILT_LIMIT_DB,
-                                        )
-                                        .text("Tilt")
-                                        .suffix(" dB/oct")
-                                        .fixed_decimals(2),
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut settings.hptf_tilt_db,
+                                        -crate::hptf_profile::TILT_LIMIT_DB
+                                            ..=crate::hptf_profile::TILT_LIMIT_DB,
                                     )
-                                    .on_hover_text(format!(
-                                        "A straight slope turning about {:.0} Hz, held within a quarter of a decibel of straight across 20 Hz–20 kHz. A diffuse-field target sits roughly -1 dB/oct from a Harman one.",
-                                        crate::hptf_profile::TILT_PIVOT_HZ
-                                    ));
-                                    let moved = settings.hptf_bass_db != 0.0
-                                        || settings.hptf_tilt_db != 0.0;
+                                    .text("Tilt")
+                                    .suffix(" dB/oct")
+                                    .fixed_decimals(2),
+                                )
+                                .on_hover_text(format!(
+                                    "A straight slope turning about {:.0} Hz, held within a quarter of a decibel of straight across 20 Hz–20 kHz. A diffuse-field target sits roughly -1 dB/oct from a Harman one.",
+                                    crate::hptf_profile::TILT_PIVOT_HZ
+                                ));
+                                let moved =
+                                    settings.hptf_bass_db != 0.0 || settings.hptf_tilt_db != 0.0;
+                                ui.horizontal(|ui| {
                                     if ui
                                         .add_enabled(moved, egui::Button::new("Reset"))
                                         .clicked()
                                     {
                                         settings.hptf_bass_db = 0.0;
                                         settings.hptf_tilt_db = 0.0;
+                                    }
+                                    if ui
+                                        .add_enabled(moved, egui::Button::new("Save as profile…"))
+                                        .on_hover_text(
+                                            "Writes the profile with the adjustment baked in into the hptf/ folder, selects it and returns the knobs to rest. A setting worth keeping becomes an ordinary, portable profile rather than a number in settings.json.",
+                                        )
+                                        .clicked()
+                                    {
+                                        save_requested = true;
                                     }
                                 });
                             });
@@ -2019,6 +2090,46 @@ impl PlayerApp {
                                 }
                             } else if !settings.hptf.is_empty() {
                                 ui.label("Selected; not yet running.");
+                            }
+                            if save_requested {
+                                let staged = drawn
+                                    .ok_or_else(|| "no profile is selected".to_owned())
+                                    .and_then(|drawing| {
+                                        drawing.profile.as_ref().map_err(Clone::clone)
+                                    })
+                                    .and_then(|base| base.with(adjustment))
+                                    .and_then(|tuned| {
+                                        let directory =
+                                            tempfile::tempdir().map_err(|e| e.to_string())?;
+                                        let file = directory
+                                            .path()
+                                            .join(adjusted_profile_name(&profile, adjustment));
+                                        // The provenance goes in a comment both
+                                        // parsers skip. The knobs stop being
+                                        // separate here, and that line is the
+                                        // only thing that will still say so.
+                                        std::fs::write(
+                                            &file,
+                                            format!(
+                                                "# {} with {}\n{}",
+                                                profile_name(&profile),
+                                                adjustment_summary(adjustment),
+                                                tuned.to_parametric_eq()
+                                            ),
+                                        )
+                                        .map_err(|e| e.to_string())?;
+                                        Ok((directory, file))
+                                    });
+                                match staged {
+                                    Ok((directory, file)) => {
+                                        self.hptf_saving = Some(directory);
+                                        self.hptf.refresh(Some(file), context);
+                                    }
+                                    Err(error) => {
+                                        self.audio_settings_error =
+                                            Some(format!("Cannot save this profile: {error}"));
+                                    }
+                                }
                             }
                         }
                         ui.separator();
@@ -3521,42 +3632,7 @@ impl eframe::App for PlayerApp {
         // leave two versions to drift apart.
         let showing = std::mem::take(&mut self.stage_drawn);
         self.tick(context, showing);
-        if self.library.ready && !self.sofa.started {
-            self.sofa.files = self.library.sofa_index.take().unwrap_or_default();
-            self.sofa.refresh(None, context);
-        }
-        if self.library.ready && !self.hptf.started {
-            self.hptf.files = self.library.hptf_index.take().unwrap_or_default();
-            self.hptf.refresh(None, context);
-        }
-        if let Some((files, imported)) = self.sofa.poll() {
-            self.library
-                .save_file_index(crate::file_catalog::SOFA, files);
-            if let Some(path) = imported {
-                if let Some(path) = path.to_str() {
-                    let mut settings = self.output.settings().clone();
-                    path.clone_into(&mut settings.sofa);
-                    self.change_output_settings(settings, context);
-                } else {
-                    self.audio_settings_error =
-                        Some("This renderer requires a Unicode SOFA path".into());
-                }
-            }
-        }
-        if let Some((files, imported)) = self.hptf.poll() {
-            self.library
-                .save_file_index(crate::file_catalog::HPTF, files);
-            if let Some(path) = imported {
-                if let Some(path) = path.to_str() {
-                    let mut settings = self.output.settings().clone();
-                    path.clone_into(&mut settings.hptf);
-                    self.change_output_settings(settings, context);
-                } else {
-                    self.audio_settings_error =
-                        Some("This renderer requires a Unicode profile path".into());
-                }
-            }
-        }
+        self.poll_file_catalogs(context);
     }
 
     fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -3729,6 +3805,35 @@ impl HptfDrawing {
     fn reference(&self) -> Option<&crate::hptf_profile::Curve> {
         self.adjusted.as_ref().and(self.curve.as_ref().ok())
     }
+}
+
+/// What was done to a profile, in the words the knobs use. Empty when nothing
+/// was.
+fn adjustment_summary(adjustment: crate::hptf_profile::Adjustment) -> String {
+    let mut parts = Vec::new();
+    if adjustment.bass_db != 0.0 {
+        parts.push(format!("bass {:+.1} dB", adjustment.bass_db));
+    }
+    if adjustment.tilt_db_per_octave != 0.0 {
+        parts.push(format!(
+            "tilt {:+.2} dB per octave",
+            adjustment.tilt_db_per_octave
+        ));
+    }
+    parts.join(", ")
+}
+
+/// What a saved profile is called: the file it came from and what was done to
+/// it, so a month later the folder still says which is which.
+fn adjusted_profile_name(path: &str, adjustment: crate::hptf_profile::Adjustment) -> String {
+    format!(
+        "{} ({}).txt",
+        Path::new(path)
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy(),
+        adjustment_summary(adjustment)
+    )
 }
 
 /// The drawing for `path` at `rate`, kept in `slot` and re-read from disk only
@@ -5511,6 +5616,34 @@ Filter 10: ON WAT Fc 500 Hz Gain 1 dB Q 1
             -21.0,
             hptf_axis([None, Some(&quiet), Some(&loud)])
         ));
+    }
+
+    #[test]
+    fn a_saved_profile_is_named_after_the_file_and_what_was_done_to_it() {
+        use crate::hptf_profile::Adjustment;
+        let bass = Adjustment {
+            bass_db: 2.5,
+            ..Adjustment::default()
+        };
+        assert_eq!(
+            adjusted_profile_name("/hptf/Sony_MDR-MV1.txt", bass),
+            "Sony_MDR-MV1 (bass +2.5 dB).txt"
+        );
+        let both = Adjustment {
+            bass_db: -1.0,
+            tilt_db_per_octave: -1.0,
+        };
+        let name = adjusted_profile_name("/hptf/Sony_MDR-MV1.txt", both);
+        assert_eq!(
+            name,
+            "Sony_MDR-MV1 (bass -1.0 dB, tilt -1.00 dB per octave).txt"
+        );
+        // Nothing here that a filesystem refuses, on any of the three targets.
+        assert!(!name.contains(['/', '\\', ':', '*', '?', '"', '<', '>', '|']));
+        // The sign is always printed: "+2.5" and "2.5" would not sort or read
+        // as the same kind of thing beside a "-1.0".
+        assert!(adjustment_summary(bass).starts_with("bass +"));
+        assert!(adjustment_summary(Adjustment::default()).is_empty());
     }
 
     #[test]

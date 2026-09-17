@@ -163,6 +163,19 @@ impl BandType {
             _ => return None,
         })
     }
+
+    /// The token `AutoEq` itself writes, of the several this reads.
+    fn token(self) -> &'static str {
+        match self {
+            Self::Peaking => "PK",
+            Self::LowShelf => "LSC",
+            Self::HighShelf => "HSC",
+            Self::LowPass => "LP",
+            Self::HighPass => "HP",
+            Self::BandPass => "BP",
+            Self::Notch => "NO",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -438,6 +451,28 @@ impl Profile {
             }
         }
         None
+    }
+
+    /// This cascade as `ParametricEQ` text, in the form `AutoEq` writes.
+    ///
+    /// Every number is printed at whatever length reads back as the same
+    /// double — usually two digits, occasionally seventeen. A profile saved
+    /// from the panel has to *be* what was being listened to, and a derived
+    /// band's corner is not a number anybody typed, so rounding it to look
+    /// tidy would quietly save something else.
+    pub fn to_parametric_eq(&self) -> String {
+        std::iter::once(format!("Preamp: {} dB\n", self.preamp_db))
+            .chain(self.bands.iter().enumerate().map(|(index, band)| {
+                format!(
+                    "Filter {}: ON {} Fc {} Hz Gain {} dB Q {}\n",
+                    index + 1,
+                    band.kind.token(),
+                    band.fc,
+                    band.gain_db,
+                    band.q
+                )
+            }))
+            .collect()
     }
 
     /// The bands that reach the audio, in file order.
@@ -814,6 +849,35 @@ Filter 10: ON HSC Fc 10000 Hz Gain -2.2 dB Q 0.70
         .clamped();
         assert!((past.bass_db - f64::from(BASS_LIMIT_DB)).abs() < 1e-12);
         assert!((past.tilt_db_per_octave + f64::from(TILT_LIMIT_DB)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_saved_profile_reads_back_as_the_very_same_cascade() {
+        let tuned = Profile::parse(AUTOEQ)
+            .unwrap()
+            .with(Adjustment {
+                bass_db: 2.5,
+                tilt_db_per_octave: -1.0,
+            })
+            .unwrap();
+        let reread = Profile::parse(&tuned.to_parametric_eq()).unwrap();
+
+        // Not "within a tolerance": the same doubles. A saved profile is what
+        // was being listened to, or it is a different profile.
+        assert_eq!(tuned.preamp_db.to_bits(), reread.preamp_db.to_bits());
+        assert_eq!(tuned.cascade().len(), reread.cascade().len());
+        for (index, (ours, back)) in tuned.cascade().iter().zip(reread.cascade()).enumerate() {
+            assert_eq!(ours.kind, back.kind, "band {index} type");
+            assert_eq!(ours.fc.to_bits(), back.fc.to_bits(), "band {index} Fc");
+            assert_eq!(
+                ours.gain_db.to_bits(),
+                back.gain_db.to_bits(),
+                "band {index} gain"
+            );
+            assert_eq!(ours.q.to_bits(), back.q.to_bits(), "band {index} Q");
+        }
+        // Every token it writes is one it reads, including the derived shelves.
+        assert_eq!(tuned.disagreement(&reread), None);
     }
 
     #[test]
