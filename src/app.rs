@@ -1761,11 +1761,17 @@ impl PlayerApp {
                             ui.separator();
                             ui.horizontal(|ui| {
                                 for &candidate in pages {
-                                    ui.selectable_value(&mut page, candidate, candidate.label());
+                                    if ui
+                                        .selectable_value(&mut page, candidate, candidate.label())
+                                        .clicked()
+                                    {
+                                        // A fallback only changes what is drawn; an
+                                        // explicit tab choice changes what is remembered.
+                                        self.output_page = page;
+                                    }
                                 }
                             });
                         }
-                        self.output_page = page;
                         ui.separator();
                         match page {
                             OutputPage::Speakers => draw_speakers_page(ui, &mut settings),
