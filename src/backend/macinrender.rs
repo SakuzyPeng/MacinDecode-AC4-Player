@@ -99,7 +99,7 @@ struct Shared {
     snapshot: Mutex<OutputSnapshot>,
     switch: Mutex<Option<native::RendererSettings>>,
     switch_result: Mutex<Option<Result<(), String>>>,
-    hptf: Mutex<Option<(native::HptfSettings, u64)>>,
+    hptf: Mutex<Option<(super::HptfRequest, u64)>>,
     hptf_result: Mutex<Option<(u64, Result<bool, String>)>>,
     hptf_busy: AtomicBool,
     /// The revision handed to the renderer, and the one its audio callback
@@ -203,12 +203,12 @@ impl Runtime {
     /// Ask the output to load, replace or drop headphone compensation. The
     /// renderer parses and designs coefficients on the calling thread, so the
     /// request is handed to a preparation thread rather than run here.
-    pub fn set_hptf(&self, settings: native::HptfSettings, revision: u64) {
+    pub fn set_hptf(&self, request: super::HptfRequest, revision: u64) {
         *self
             .shared
             .hptf
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((settings, revision));
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((request, revision));
     }
     /// `Ok(false)` means this output has no headphone feed to compensate.
     pub fn take_hptf_result(&self) -> Option<(u64, Result<bool, String>)> {
@@ -644,7 +644,7 @@ fn run(
             }
         }
         if !shared.hptf_busy.load(Ordering::Acquire)
-            && let Some((settings, revision)) = shared
+            && let Some((request, revision)) = shared
                 .hptf
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -656,7 +656,7 @@ fn run(
             let spawned = thread::Builder::new()
                 .name("hptf-preparation".into())
                 .spawn(move || {
-                    let result = loader.set_hptf(&settings, revision);
+                    let result = request.apply(&loader, revision);
                     if matches!(result, Ok(true)) {
                         reply.hptf_requested.store(revision, Ordering::Relaxed);
                     }

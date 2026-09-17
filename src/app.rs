@@ -1820,26 +1820,79 @@ impl PlayerApp {
                             .on_hover_text(
                                 "Off uses the profile's own Preamp line verbatim. This bounds the frequency response, not transient peaks.",
                             );
+                            // Two knobs, and only two. A row of biquads to
+                            // sculpt with would argue against every other
+                            // decision in an inspection tool; two named,
+                            // checkable controls do not.
+                            ui.add_enabled_ui(!settings.hptf.is_empty(), |ui| {
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut settings.hptf_bass_db,
+                                        -crate::hptf_profile::BASS_LIMIT_DB
+                                            ..=crate::hptf_profile::BASS_LIMIT_DB,
+                                    )
+                                    .text("Bass")
+                                    .suffix(" dB")
+                                    .fixed_decimals(1),
+                                )
+                                .on_hover_text(
+                                    "A low shelf at 105 Hz, Q 0.70 — the shape behind AutoEq's own --bass-boost, so +6 dB on a bass-free profile gives the published preset rather than something like it.",
+                                );
+                                ui.horizontal(|ui| {
+                                    ui.add(
+                                        egui::Slider::new(
+                                            &mut settings.hptf_tilt_db,
+                                            -crate::hptf_profile::TILT_LIMIT_DB
+                                                ..=crate::hptf_profile::TILT_LIMIT_DB,
+                                        )
+                                        .text("Tilt")
+                                        .suffix(" dB/oct")
+                                        .fixed_decimals(2),
+                                    )
+                                    .on_hover_text(format!(
+                                        "A straight slope turning about {:.0} Hz, held within a quarter of a decibel of straight across 20 Hz–20 kHz. A diffuse-field target sits roughly -1 dB/oct from a Harman one.",
+                                        crate::hptf_profile::TILT_PIVOT_HZ
+                                    ));
+                                    let moved = settings.hptf_bass_db != 0.0
+                                        || settings.hptf_tilt_db != 0.0;
+                                    if ui
+                                        .add_enabled(moved, egui::Button::new("Reset"))
+                                        .clicked()
+                                    {
+                                        settings.hptf_bass_db = 0.0;
+                                        settings.hptf_tilt_db = 0.0;
+                                    }
+                                });
+                            });
+                            let adjustment = settings.hptf_adjustment();
                             let hptf = self.output.hptf_readout();
-                            let running = self.output.active_hptf() == Some(settings.hptf.as_str());
+                            // Running means this profile *and* these knobs: a
+                            // slider that has moved but not yet reached the
+                            // audio must not be called applied.
+                            let running = self.output.active_hptf() == Some(settings.hptf.as_str())
+                                && self.output.active_hptf_adjustment() == adjustment;
                             // The renderer designs at the rate its output runs;
                             // 48 kHz is what a Scene output is created with, so
                             // that is the curve to draw before one exists.
                             let rate = if hptf.rate == 0 { 48_000 } else { hptf.rate };
                             let profile = settings.hptf.clone();
                             let ghost_path = hptf_ghost(hovered.as_deref(), &profile);
-                            let drawn = hptf_curve(&mut self.hptf_drawing, &profile, rate);
+                            let drawn = hptf_curve(&mut self.hptf_drawing, &profile, rate, adjustment);
+                            // A ghost answers "what does that file do", so it is
+                            // drawn as written — the knobs belong to the chain,
+                            // not to the file being pointed at.
                             let ghost = hptf_curve(
                                 &mut self.hptf_ghost,
                                 ghost_path.unwrap_or_default(),
                                 rate,
+                                crate::hptf_profile::Adjustment::default(),
                             );
                             // The drawn line is what the output does, so it takes
                             // the renderer's extra trim — but only while it is
                             // this profile that is running. A ghost never is one,
                             // so a ghost is drawn the way its own file reads.
                             let drawn_curve = drawn
-                                .and_then(|drawing| drawing.curve.as_ref().ok())
+                                .and_then(|drawing| drawing.running().as_ref().ok())
                                 .map(|curve| {
                                     curve.with_output_trim(if running {
                                         hptf.auto_trim_db
@@ -1847,6 +1900,7 @@ impl PlayerApp {
                                         0.0
                                     })
                                 });
+                            let reference_curve = drawn.and_then(HptfDrawing::reference);
                             let ghost_curve =
                                 ghost.and_then(|drawing| drawing.curve.as_ref().ok());
                             if drawn_curve.is_some() {
@@ -1858,8 +1912,22 @@ impl PlayerApp {
                                     "Profile response"
                                 });
                             }
-                            if drawn_curve.is_some() || ghost_curve.is_some() {
-                                draw_hptf_curve(ui, drawn_curve.as_ref(), ghost_curve);
+                            if drawn_curve.is_some()
+                                || reference_curve.is_some()
+                                || ghost_curve.is_some()
+                            {
+                                draw_hptf_curve(
+                                    ui,
+                                    drawn_curve.as_ref(),
+                                    reference_curve,
+                                    ghost_curve,
+                                );
+                            }
+                            if reference_curve.is_some() {
+                                ui.colored_label(
+                                    theme::MUTED,
+                                    "Dashed: the profile alone, without the adjustment.",
+                                );
                             }
                             if let Some(path) = ghost_path {
                                 // Which line is which. Nothing else in the panel
@@ -1898,7 +1966,7 @@ impl PlayerApp {
                             {
                                 ui.colored_label(theme::MUTED, note);
                             }
-                            if let Some(Err(error)) = drawn.map(|drawing| &drawing.curve) {
+                            if let Some(Err(error)) = drawn.map(HptfDrawing::running) {
                                 ui.colored_label(
                                     theme::WARNING,
                                     format!("Cannot read this profile: {error}"),
@@ -1918,9 +1986,21 @@ impl PlayerApp {
                                 ui.colored_label(theme::WARNING, note);
                             }
                             if running {
+                                // Count the adjustment apart from the file, so
+                                // that the file and the listener never have to
+                                // be told apart afterwards.
+                                let added =
+                                    u32::try_from(adjustment.bands().len()).unwrap_or_default();
                                 ui.label(format!(
-                                    "In use · {} bands · preamp {:+.1} dB{}",
-                                    hptf.bands,
+                                    "In use · {} · preamp {:+.1} dB{}",
+                                    if added == 0 {
+                                        format!("{} bands", hptf.bands)
+                                    } else {
+                                        format!(
+                                            "{} bands + {added} adjustment",
+                                            hptf.bands.saturating_sub(added)
+                                        )
+                                    },
                                     hptf.preamp_db,
                                     if hptf.auto_trim_db == 0.0 {
                                         String::new()
@@ -3624,10 +3704,31 @@ fn profile_name(path: &str) -> String {
 struct HptfDrawing {
     path: String,
     rate: u32,
+    /// The file's own reading, kept so that turning a knob never goes back to
+    /// disk — a slider drag would otherwise read the file once a frame.
+    profile: Result<crate::hptf_profile::Profile, String>,
+    /// The file alone.
     curve: Result<crate::hptf_profile::Curve, String>,
     /// What the renderer read differently, if anything. `None` also covers
     /// "there is no renderer in this binary to ask" — see `backend::hptf_parse`.
     disagreement: Option<String>,
+    /// The knobs `adjusted` was designed for. At rest there is nothing to
+    /// design, and `curve` is what runs.
+    adjustment: crate::hptf_profile::Adjustment,
+    adjusted: Option<Result<crate::hptf_profile::Curve, String>>,
+}
+
+impl HptfDrawing {
+    /// What the output runs: the file, or the file with the knobs on it.
+    fn running(&self) -> &Result<crate::hptf_profile::Curve, String> {
+        self.adjusted.as_ref().unwrap_or(&self.curve)
+    }
+
+    /// The file alone, but only while the knobs have moved it off itself —
+    /// otherwise the two lines would be one line drawn twice.
+    fn reference(&self) -> Option<&crate::hptf_profile::Curve> {
+        self.adjusted.as_ref().and(self.curve.as_ref().ok())
+    }
 }
 
 /// The drawing for `path` at `rate`, kept in `slot` and re-read from disk only
@@ -3642,6 +3743,7 @@ fn hptf_curve<'a>(
     slot: &'a mut Option<HptfDrawing>,
     path: &str,
     rate: u32,
+    adjustment: crate::hptf_profile::Adjustment,
 ) -> Option<&'a HptfDrawing> {
     if path.is_empty() {
         *slot = None;
@@ -3676,9 +3778,30 @@ fn hptf_curve<'a>(
         *slot = Some(HptfDrawing {
             path: path.to_owned(),
             rate,
-            curve: ours.map(|ours| crate::hptf_profile::Curve::of(&ours, rate)),
+            curve: ours
+                .as_ref()
+                .map_err(Clone::clone)
+                .map(|ours| crate::hptf_profile::Curve::of(ours, rate)),
+            profile: ours,
             disagreement,
+            adjustment: crate::hptf_profile::Adjustment::default(),
+            adjusted: None,
         });
+    }
+    let drawing = slot.as_mut()?;
+    // The knobs move far more often than the file does, and designing a cascade
+    // is cheap where reading one is not, so they key a second, smaller cache.
+    if drawing.adjustment != adjustment {
+        let adjusted = (!adjustment.is_flat()).then(|| {
+            drawing
+                .profile
+                .as_ref()
+                .map_err(Clone::clone)
+                .and_then(|profile| profile.with(adjustment))
+                .map(|profile| crate::hptf_profile::Curve::of(&profile, rate))
+        });
+        drawing.adjustment = adjustment;
+        drawing.adjusted = adjusted;
     }
     slot.as_ref()
 }
@@ -3701,7 +3824,7 @@ fn hptf_ghost<'a>(hovered: Option<&'a str>, drawn: &str) -> Option<&'a str> {
 /// destroys. A curve that runs past either end extends the range instead — and
 /// the ghost counts, because a comparison drawn outside the frame is worse than
 /// no comparison.
-fn hptf_axis(curves: [Option<&crate::hptf_profile::Curve>; 2]) -> (f32, f32) {
+fn hptf_axis(curves: [Option<&crate::hptf_profile::Curve>; 3]) -> (f32, f32) {
     let shown = || curves.into_iter().flatten();
     (
         shown().fold(3.0_f32, |top, curve| top.max(curve.max_response_db.ceil())),
@@ -3709,8 +3832,9 @@ fn hptf_axis(curves: [Option<&crate::hptf_profile::Curve>; 2]) -> (f32, f32) {
     )
 }
 
-/// The response a profile's cascade applies to the headphone feed, with
-/// whatever is being pointed at drawn faintly behind it.
+/// The response a profile's cascade applies to the headphone feed: what the
+/// output runs, the file alone behind it once a knob has moved them apart, and
+/// whatever is being pointed at fainter still.
 ///
 /// Drawn with the preamp folded in, so the top rule is full scale and the height
 /// of the curve below it is the headroom the preamp bought.
@@ -3722,6 +3846,7 @@ fn hptf_axis(curves: [Option<&crate::hptf_profile::Curve>; 2]) -> (f32, f32) {
 fn draw_hptf_curve(
     ui: &mut egui::Ui,
     curve: Option<&crate::hptf_profile::Curve>,
+    reference: Option<&crate::hptf_profile::Curve>,
     ghost: Option<&crate::hptf_profile::Curve>,
 ) {
     const LABELS: f32 = 13.0;
@@ -3740,7 +3865,7 @@ fn draw_hptf_curve(
     );
 
     let plot = egui::Rect::from_min_max(rect.min, egui::pos2(rect.max.x, rect.max.y - LABELS));
-    let (top, bottom) = hptf_axis([ghost, curve]);
+    let (top, bottom) = hptf_axis([ghost, reference, curve]);
     let y = |db: f32| plot.top() + (top - db) / (top - bottom) * plot.height();
     let x = |hz: f64| plot.left() + crate::hptf_profile::Curve::position(hz) * plot.width();
 
@@ -3795,22 +3920,35 @@ fn draw_hptf_curve(
     // The stored curve is far denser than any panel is wide, and the extra
     // vertices only cost tessellation. COLUMNS still leaves more than one sample
     // per pixel at the settings window's width.
-    let trace = |curve: &crate::hptf_profile::Curve, stroke: Stroke| {
+    let points_of = |curve: &crate::hptf_profile::Curve| -> Vec<egui::Pos2> {
         let last = curve.points.len().saturating_sub(1);
         let step = curve.points.len().div_ceil(COLUMNS).max(1);
-        let points: Vec<_> = (0..curve.points.len())
+        (0..curve.points.len())
             .step_by(step)
             .chain(std::iter::once(last))
             .map(|index| {
                 let across = index as f32 / last.max(1) as f32;
                 egui::pos2(plot.left() + across * plot.width(), y(curve.points[index]))
             })
-            .collect();
-        painter.add(egui::Shape::line(points, stroke));
+            .collect()
+    };
+    let trace = |curve: &crate::hptf_profile::Curve, stroke: Stroke| {
+        painter.add(egui::Shape::line(points_of(curve), stroke));
     };
     // Behind, and thin enough to read as the question rather than the answer.
     if let Some(ghost) = ghost {
         trace(ghost, Stroke::new(1.4, theme::MUTED.gamma_multiply(0.55)));
+    }
+    // Dashed rather than another shade: the file alone is the same profile as
+    // the solid line, not a different one, and a dash says "before" where a
+    // third colour would say "other".
+    if let Some(reference) = reference {
+        painter.extend(egui::Shape::dashed_line(
+            &points_of(reference),
+            Stroke::new(1.4, theme::TEXT.gamma_multiply(0.6)),
+            4.0,
+            3.0,
+        ));
     }
     if let Some(curve) = curve {
         trace(curve, Stroke::new(1.5, theme::ACCENT));
@@ -4474,6 +4612,88 @@ Filter 10: ON WAT Fc 500 Hz Gain 1 dB Q 1
         let drifted =
             crate::hptf_profile::Profile::parse(&PROFILE.replace("Q 0.37", "Q 0.38")).unwrap();
         assert!(drifted.disagreement(&renderer).is_some());
+    }
+
+    /// The knobs invent bands that no file wrote, so nothing pins them but the
+    /// renderer: this designs a real cascade from a real adjustment and checks
+    /// the peak against the curve the panel draws for it.
+    #[cfg(macinrender_output)]
+    #[test]
+    fn the_renderer_designs_the_derived_bands_the_way_they_are_drawn() {
+        use macindecode_macinrender as native;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("one-dip.txt");
+        std::fs::write(
+            &path,
+            b"Preamp: 0 dB\nFilter 1: ON PK Fc 1000 Hz Gain -3 dB Q 1\n",
+        )
+        .unwrap();
+        let mut session = native::Session::new(&native::Config {
+            renderer: native::RendererSettings {
+                binaural: true,
+                layout: "4+7+0".into(),
+                sofa: String::new(),
+                split_lfe: true,
+            },
+            output: native::OutputKind::Null,
+            device_id: String::new(),
+            input_rate: 48_000,
+        })
+        .unwrap();
+        let control = session.control();
+        let profile = path.to_str().unwrap();
+
+        // Both knobs off their rest, so the request goes through the in-memory
+        // entrypoint and carries all four derived bands.
+        let adjustment = crate::hptf_profile::Adjustment {
+            bass_db: 4.0,
+            tilt_db_per_octave: -1.0,
+        };
+        let request = crate::backend::HptfRequest {
+            settings: native::HptfSettings {
+                profile: profile.to_owned(),
+                auto_trim: false,
+            },
+            adjustment,
+        };
+        assert_eq!(request.apply(&control, 1), Ok(true));
+        session.reset(1, 0).unwrap();
+        let status = control.hptf_status().unwrap();
+        assert_eq!(status.applied_revision, 1);
+        // One from the file, one shelf for the bass and three for the tilt.
+        assert_eq!(
+            status.bands,
+            1 + u32::try_from(adjustment.bands().len()).unwrap()
+        );
+
+        let text = std::fs::read_to_string(profile).unwrap();
+        let adjusted = crate::hptf_profile::Profile::parse(&text)
+            .unwrap()
+            .with(adjustment)
+            .unwrap();
+        let drawn = crate::hptf_profile::Curve::of(&adjusted, status.rate);
+        assert!(
+            (drawn.preamp_db - status.preamp_db).abs() < 0.01,
+            "preamp drawn {:+.3} vs designed {:+.3}",
+            drawn.preamp_db,
+            status.preamp_db
+        );
+        assert!(
+            (drawn.max_response_db - status.max_response_db).abs() < 0.1,
+            "peak drawn {:+.3} vs designed {:+.3}",
+            drawn.max_response_db,
+            status.max_response_db
+        );
+
+        // Back to rest is back to the file's own cascade, through the file
+        // entrypoint, with nothing of the adjustment left in it.
+        let plain = crate::backend::HptfRequest {
+            adjustment: crate::hptf_profile::Adjustment::default(),
+            ..request
+        };
+        assert_eq!(plain.apply(&control, 2), Ok(true));
+        session.reset(2, 0).unwrap();
+        assert_eq!(control.hptf_status().unwrap().bands, 1);
     }
 
     #[cfg(macinrender_output)]
@@ -5188,23 +5408,63 @@ Filter 10: ON WAT Fc 500 Hz Gain 1 dB Q 1
         let bands =
             |slot: &Option<HptfDrawing>| slot.as_ref().unwrap().curve.as_ref().unwrap().bands;
 
-        assert!(hptf_curve(&mut slot, first, 48_000).is_some());
+        assert!(
+            hptf_curve(
+                &mut slot,
+                first,
+                48_000,
+                crate::hptf_profile::Adjustment::default()
+            )
+            .is_some()
+        );
         assert_eq!(bands(&slot), 1);
 
         // Rewriting the file behind the cache is how the next call proves it did
         // not go back to disk.
         std::fs::write(first, band.repeat(3)).unwrap();
-        assert!(hptf_curve(&mut slot, first, 48_000).is_some());
+        assert!(
+            hptf_curve(
+                &mut slot,
+                first,
+                48_000,
+                crate::hptf_profile::Adjustment::default()
+            )
+            .is_some()
+        );
         assert_eq!(bands(&slot), 1);
 
         // A rate change is a different curve from the same file, so it re-reads.
-        assert!(hptf_curve(&mut slot, first, 44_100).is_some());
+        assert!(
+            hptf_curve(
+                &mut slot,
+                first,
+                44_100,
+                crate::hptf_profile::Adjustment::default()
+            )
+            .is_some()
+        );
         assert_eq!(bands(&slot), 3);
-        assert!(hptf_curve(&mut slot, second, 44_100).is_some());
+        assert!(
+            hptf_curve(
+                &mut slot,
+                second,
+                44_100,
+                crate::hptf_profile::Adjustment::default()
+            )
+            .is_some()
+        );
         assert_eq!(bands(&slot), 2);
 
         // Turning the profile off has to take its picture with it.
-        assert!(hptf_curve(&mut slot, "", 44_100).is_none());
+        assert!(
+            hptf_curve(
+                &mut slot,
+                "",
+                44_100,
+                crate::hptf_profile::Adjustment::default()
+            )
+            .is_none()
+        );
         assert!(slot.is_none());
     }
 
@@ -5224,15 +5484,33 @@ Filter 10: ON WAT Fc 500 Hz Gain 1 dB Q 1
         // Inside the fixed frame nothing rescales, which is the whole point of
         // fixing it.
         let quiet = curve(1.5, -4.0);
-        assert!(axis(3.0, -12.0, hptf_axis([None, None])));
-        assert!(axis(3.0, -12.0, hptf_axis([None, Some(&quiet)])));
-        assert!(axis(3.0, -12.0, hptf_axis([Some(&quiet), Some(&quiet)])));
+        assert!(axis(3.0, -12.0, hptf_axis([None, None, None])));
+        assert!(axis(3.0, -12.0, hptf_axis([None, None, Some(&quiet)])));
+        assert!(axis(
+            3.0,
+            -12.0,
+            hptf_axis([Some(&quiet), Some(&quiet), Some(&quiet)])
+        ));
 
-        // Either curve running past either end extends the frame, so a ghost is
-        // never cropped to keep the drawn one's scale.
+        // Any of the three running past either end extends the frame, so
+        // neither a ghost nor the unadjusted reference is cropped to keep the
+        // drawn one's scale.
         let loud = curve(7.2, -20.4);
-        assert!(axis(8.0, -21.0, hptf_axis([Some(&loud), Some(&quiet)])));
-        assert!(axis(8.0, -21.0, hptf_axis([Some(&quiet), Some(&loud)])));
+        assert!(axis(
+            8.0,
+            -21.0,
+            hptf_axis([Some(&loud), None, Some(&quiet)])
+        ));
+        assert!(axis(
+            8.0,
+            -21.0,
+            hptf_axis([Some(&quiet), Some(&loud), None])
+        ));
+        assert!(axis(
+            8.0,
+            -21.0,
+            hptf_axis([None, Some(&quiet), Some(&loud)])
+        ));
     }
 
     #[test]

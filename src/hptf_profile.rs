@@ -31,6 +31,111 @@ pub const MAX_HZ: f64 = 20_000.0;
 /// `app` compares them at, and cheap enough to hold for drawing.
 const POINTS: usize = 960;
 
+/// `AutoEq`'s `--bass-boost` is a low shelf at exactly these two numbers, so a
+/// bass knob set to +6 on a `wo_bass` profile reproduces the published preset
+/// rather than approximating it. That is what makes the knob checkable.
+pub const BASS_HZ: f64 = 105.0;
+pub const BASS_Q: f64 = 0.70;
+/// Past this the shelf stops being a tweak, and +6 is already the whole of
+/// `AutoEq`'s own bass boost.
+pub const BASS_LIMIT_DB: f32 = 6.0;
+
+/// The frequency the tilt turns about, and does not move.
+pub const TILT_PIVOT_HZ: f64 = 1000.0;
+/// Two decibels per octave is a twenty-decibel swing across the audible band —
+/// far past any target difference, and a sensible end for the travel.
+pub const TILT_LIMIT_DB: f32 = 2.0;
+/// A constant slope in decibels per octave is not a biquad: it is a
+/// fractional-order response, approached by stacking shelves whose corners lie
+/// **outside** the band being tilted, so the audible decade and a half sits in
+/// the straight part. Three of them at this Q hold the line to 0.25 dB at
+/// 1 dB/oct and 0.5 dB at the 2 dB/oct limit, at every rate an output runs at;
+/// `the_tilt_is_a_straight_line_in_log_frequency` measures exactly that, and is
+/// what entitles the panel to print a number in dB/oct at all.
+const TILT_SHELVES: usize = 3;
+const TILT_Q: f64 = 0.38;
+const TILT_LOW_HZ: f64 = 1.0;
+const TILT_HIGH_HZ: f64 = 20_000.0;
+/// Decibels the shelf stack lifts the whole response by, per dB/oct of tilt.
+/// Measured rather than derived — the ideal step would be `log2(20000/1000)`,
+/// but real shelves are not steps. Rate moves it by 0.02 dB across 44.1 kHz to
+/// 192 kHz, which is why one constant can be taken back out of the preamp.
+const TILT_PIVOT_TRIM_DB: f64 = 4.38;
+
+/// The two knobs: what the listener adds on top of a profile, kept apart from
+/// it so the file and the adjustment never have to be told apart afterwards.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Adjustment {
+    /// Gain of the bass shelf, in decibels.
+    pub bass_db: f64,
+    /// Slope about [`TILT_PIVOT_HZ`], in decibels per octave. Negative tips the
+    /// treble down, which is the direction a diffuse-field target sits from a
+    /// Harman one.
+    pub tilt_db_per_octave: f64,
+}
+
+impl Adjustment {
+    pub fn clamped(self) -> Self {
+        Self {
+            bass_db: self
+                .bass_db
+                .clamp(-f64::from(BASS_LIMIT_DB), f64::from(BASS_LIMIT_DB)),
+            tilt_db_per_octave: self
+                .tilt_db_per_octave
+                .clamp(-f64::from(TILT_LIMIT_DB), f64::from(TILT_LIMIT_DB)),
+        }
+    }
+
+    /// Nothing to add. A knob at rest costs no band and no preamp, so a profile
+    /// goes to the renderer exactly as its file reads.
+    pub fn is_flat(self) -> bool {
+        self.bass_db == 0.0 && self.tilt_db_per_octave == 0.0
+    }
+
+    /// The bands this adjustment appends to a profile's cascade.
+    pub fn bands(self) -> Vec<Band> {
+        let mut bands = Vec::new();
+        if self.bass_db != 0.0 {
+            bands.push(Band {
+                kind: BandType::LowShelf,
+                fc: BASS_HZ,
+                gain_db: self.bass_db,
+                q: BASS_Q,
+            });
+        }
+        if self.tilt_db_per_octave != 0.0 {
+            let span = (TILT_HIGH_HZ / TILT_LOW_HZ).log2();
+            #[allow(clippy::cast_precision_loss, reason = "TILT_SHELVES is a single digit")]
+            let shelves = TILT_SHELVES as f64;
+            // Each shelf lifts everything below its corner by the same step, so
+            // the stack is a staircase; at this Q the steps blend into a ramp.
+            let gain_db = -self.tilt_db_per_octave * span / shelves;
+            bands.extend((0..TILT_SHELVES).map(|index| Band {
+                kind: BandType::LowShelf,
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "the shelf index is a single digit"
+                )]
+                fc: TILT_LOW_HZ * (TILT_HIGH_HZ / TILT_LOW_HZ).powf((index as f64 + 0.5) / shelves),
+                gain_db,
+                q: TILT_Q,
+            }));
+        }
+        bands
+    }
+
+    /// What the preamp has to give back so that the pivot stays where it is.
+    ///
+    /// The shelf stack is built from low shelves alone, so it lifts the whole
+    /// response rather than see-sawing about the pivot. Taking that lift back
+    /// out here is what makes the control a tilt rather than a tilt plus a
+    /// volume change; the bass shelf needs nothing, because lifting the bass is
+    /// the entire point of it.
+    pub fn preamp_db(self) -> f64 {
+        TILT_PIVOT_TRIM_DB * self.tilt_db_per_octave
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BandType {
     Peaking,
@@ -265,6 +370,29 @@ impl Profile {
         Self { preamp_db, bands }
     }
 
+    /// This profile with an adjustment appended — never merged into it, so the
+    /// file's own bands and preamp stay readable as the file's.
+    ///
+    /// Fails rather than silently dropping bands when the two together outrun
+    /// the renderer's fixed cascade, because the renderer would refuse it and a
+    /// picture of a cascade nothing will play is worse than a refusal here.
+    pub fn with(&self, adjustment: Adjustment) -> Result<Self, String> {
+        let extra = adjustment.bands();
+        if self.bands.len() + extra.len() > MAX_BANDS {
+            return Err(format!(
+                "This profile uses {} of {MAX_BANDS} filters and the adjustment needs {} more",
+                self.bands.len(),
+                extra.len()
+            ));
+        }
+        let mut bands = self.bands.clone();
+        bands.extend(extra);
+        Ok(Self {
+            preamp_db: self.preamp_db + adjustment.preamp_db(),
+            bands,
+        })
+    }
+
     /// Where this reading of a profile and the renderer's differ.
     ///
     /// The renderer owns the authoritative parse, so a difference means the
@@ -310,6 +438,18 @@ impl Profile {
             }
         }
         None
+    }
+
+    /// The bands that reach the audio, in file order.
+    #[cfg_attr(
+        not(macinrender_output),
+        allow(
+            dead_code,
+            reason = "only the renderer-backed build submits a cascade from memory"
+        )
+    )]
+    pub fn cascade(&self) -> &[Band] {
+        &self.bands
     }
 
     pub fn bands(&self) -> u32 {
@@ -544,6 +684,136 @@ Filter 10: ON HSC Fc 10000 Hz Gain -2.2 dB Q 0.70
         assert!(Profile::parse("Filter 1: ON PK Fc 100 Hz Gain 3 dB Q -1\n").is_err());
         assert!(Profile::parse("Filter 1: ON PK Fc x Hz Gain 3 dB Q 1\n").is_err());
         assert!(Profile::parse("\n# nothing but a comment\n").is_err());
+    }
+
+    /// The claim the panel makes when it prints a number in dB/oct. A shelf
+    /// pair — the obvious way to build a tilt — misses a straight line by
+    /// almost six decibels at 1 dB/oct, so the label would be false rather than
+    /// merely vague; three shelves with their corners outside the band earn it.
+    #[test]
+    fn the_tilt_is_a_straight_line_in_log_frequency() {
+        // Nothing under it, so what is measured is the adjustment alone.
+        let flat = Profile::of_bands(0.0, Vec::new());
+        for rate in [44_100, 48_000, 96_000] {
+            for tilt in [-2.0, -1.0, -0.5, 0.5, 1.0, 2.0] {
+                let tilted = flat
+                    .with(Adjustment {
+                        tilt_db_per_octave: tilt,
+                        ..Adjustment::default()
+                    })
+                    .unwrap();
+                let mut worst = 0.0_f64;
+                for index in 0..=200 {
+                    let hz = MIN_HZ * (MAX_HZ / MIN_HZ).powf(f64::from(index) / 200.0);
+                    let straight = tilt * (hz / TILT_PIVOT_HZ).log2();
+                    worst = worst.max((tilted.response_db(hz, rate) - straight).abs());
+                }
+                assert!(
+                    worst < 0.5,
+                    "{tilt:+} dB/oct at {rate} Hz strays {worst:.3} dB from its line"
+                );
+                // The pivot is the promise the preamp term exists to keep, and
+                // it is kept an order tighter than the line as a whole.
+                assert!(
+                    tilted.response_db(TILT_PIVOT_HZ, rate).abs() < 0.03,
+                    "{tilt:+} dB/oct at {rate} Hz moves the pivot"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_bass_knob_is_the_shelf_autoeq_boosts_with() {
+        let bands = Adjustment {
+            bass_db: 6.0,
+            ..Adjustment::default()
+        }
+        .bands();
+        assert_eq!(bands.len(), 1);
+        assert_eq!(bands[0].kind, BandType::LowShelf);
+        for (got, want) in [
+            (bands[0].fc, 105.0),
+            (bands[0].q, 0.70),
+            (bands[0].gain_db, 6.0),
+        ] {
+            assert!((got - want).abs() < 1e-9, "{got} is not {want}");
+        }
+        // And it is a shelf where it matters: the whole gain well below, half of
+        // it at the corner, nothing left by the midrange.
+        let boosted = Profile::of_bands(0.0, Vec::new())
+            .with(Adjustment {
+                bass_db: 6.0,
+                ..Adjustment::default()
+            })
+            .unwrap();
+        assert!((boosted.response_db(1.0, 48_000) - 6.0).abs() < 0.05);
+        assert!((boosted.response_db(BASS_HZ, 48_000) - 3.0).abs() < 0.05);
+        assert!(boosted.response_db(4_000.0, 48_000).abs() < 0.05);
+        // The bass shelf asks nothing back from the preamp: lifting the bass is
+        // the whole of what it is for.
+        assert!(
+            Adjustment {
+                bass_db: 6.0,
+                ..Adjustment::default()
+            }
+            .preamp_db()
+            .abs()
+                < 1e-12
+        );
+    }
+
+    #[test]
+    fn a_knob_at_rest_costs_nothing_and_a_full_cascade_refuses_the_rest() {
+        let rest = Adjustment::default();
+        assert!(rest.is_flat());
+        assert!(rest.bands().is_empty());
+
+        let band = Band {
+            kind: BandType::Peaking,
+            fc: 1_000.0,
+            gain_db: 1.0,
+            q: 1.0,
+        };
+        // A profile with no room left still takes an adjustment that adds
+        // nothing, and refuses one that adds a band rather than dropping one.
+        let full = Profile::of_bands(-1.0, vec![band; MAX_BANDS]);
+        assert_eq!(
+            full.with(rest).unwrap().bands(),
+            u32::try_from(MAX_BANDS).unwrap()
+        );
+        assert!(
+            full.with(Adjustment {
+                bass_db: 1.0,
+                ..Adjustment::default()
+            })
+            .is_err()
+        );
+        // Room for the shelf but not for the whole tilt is still a refusal.
+        let nearly = Profile::of_bands(-1.0, vec![band; MAX_BANDS - 1]);
+        assert!(
+            nearly
+                .with(Adjustment {
+                    bass_db: 1.0,
+                    ..Adjustment::default()
+                })
+                .is_ok()
+        );
+        assert!(
+            nearly
+                .with(Adjustment {
+                    tilt_db_per_octave: 1.0,
+                    ..Adjustment::default()
+                })
+                .is_err()
+        );
+
+        let past = Adjustment {
+            bass_db: 99.0,
+            tilt_db_per_octave: -99.0,
+        }
+        .clamped();
+        assert!((past.bass_db - f64::from(BASS_LIMIT_DB)).abs() < 1e-12);
+        assert!((past.tilt_db_per_octave + f64::from(TILT_LIMIT_DB)).abs() < 1e-12);
     }
 
     #[test]

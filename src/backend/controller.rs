@@ -54,9 +54,9 @@ pub struct SpatialOutputController {
     /// Separate the last accepted profile from the request still being prepared.
     /// Both belong to the current native output and reset with it.
     #[cfg(macinrender_output)]
-    hptf_accepted: Option<(macindecode_macinrender::HptfSettings, u64)>,
+    hptf_accepted: Option<(super::HptfRequest, u64)>,
     #[cfg(macinrender_output)]
-    hptf_pending: Option<(macindecode_macinrender::HptfSettings, u64)>,
+    hptf_pending: Option<(super::HptfRequest, u64)>,
     #[cfg(macinrender_output)]
     hptf_revision: u64,
     hptf_error: Option<String>,
@@ -162,13 +162,16 @@ impl SpatialOutputController {
         let Some(runtime) = &self.runtime else {
             return;
         };
-        let wanted = self.settings.hptf();
+        let wanted = super::HptfRequest {
+            settings: self.settings.hptf(),
+            adjustment: self.settings.hptf_adjustment(),
+        };
         if self.hptf_pending.is_some()
             || self
                 .hptf_accepted
                 .as_ref()
                 .is_some_and(|(accepted, _)| accepted == &wanted)
-            || (self.hptf_accepted.is_none() && wanted.profile.is_empty())
+            || (self.hptf_accepted.is_none() && wanted.settings.profile.is_empty())
         {
             return;
         }
@@ -194,10 +197,36 @@ impl SpatialOutputController {
         {
             let status = runtime.hptf_status();
             if status.enabled && status.applied_revision == *revision {
-                return Some(&accepted.profile);
+                return Some(&accepted.settings.profile);
             }
         }
         None
+    }
+    /// The adjustment the running cascade was built with, on the same terms as
+    /// [`Self::active_hptf`].
+    ///
+    /// A knob is a setting like any other, so it takes a round trip to reach the
+    /// audio. Without this the panel would call a curve applied the instant a
+    /// slider moved, and compare it against a readout still describing the
+    /// cascade before it.
+    #[cfg_attr(
+        not(macinrender_output),
+        allow(
+            clippy::unused_self,
+            reason = "no native headphone feed exists in inspection builds"
+        )
+    )]
+    pub fn active_hptf_adjustment(&self) -> crate::hptf_profile::Adjustment {
+        #[cfg(macinrender_output)]
+        if let Some(runtime) = &self.runtime
+            && let Some((accepted, revision)) = &self.hptf_accepted
+        {
+            let status = runtime.hptf_status();
+            if status.enabled && status.applied_revision == *revision {
+                return accepted.adjustment;
+            }
+        }
+        crate::hptf_profile::Adjustment::default()
     }
     #[cfg_attr(
         not(macinrender_output),
@@ -485,10 +514,29 @@ impl SpatialOutputController {
                     ),
                     Err(error) => Some(error),
                 };
-                if self.hptf_error.is_some() && self.settings.hptf() == wanted {
-                    let previous = self.hptf_accepted.as_ref().map(|(settings, _)| settings);
-                    self.settings.hptf = previous.map_or_else(String::new, |s| s.profile.clone());
-                    self.settings.hptf_auto_trim = previous.is_some_and(|s| s.auto_trim);
+                if self.hptf_error.is_some()
+                    && self.settings.hptf() == wanted.settings
+                    && self.settings.hptf_adjustment() == wanted.adjustment
+                {
+                    // Put the knobs back with the profile: a rejected cascade is
+                    // rejected as a whole, and leaving a knob where it caused the
+                    // refusal would make the next sync try the same thing again.
+                    let previous = self.hptf_accepted.as_ref().map(|(request, _)| request);
+                    self.settings.hptf = previous
+                        .map_or_else(String::new, |request| request.settings.profile.clone());
+                    self.settings.hptf_auto_trim =
+                        previous.is_some_and(|request| request.settings.auto_trim);
+                    #[allow(
+                        clippy::cast_possible_truncation,
+                        reason = "the knobs are stored as the widget's f32 and \
+                                  only widened to design the bands"
+                    )]
+                    {
+                        self.settings.hptf_bass_db =
+                            previous.map_or(0.0, |request| request.adjustment.bass_db as f32);
+                        self.settings.hptf_tilt_db = previous
+                            .map_or(0.0, |request| request.adjustment.tilt_db_per_octave as f32);
+                    }
                 }
                 // A newer desired setting may have arrived while this request ran.
                 self.sync_hptf();

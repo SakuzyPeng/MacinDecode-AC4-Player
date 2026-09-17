@@ -175,7 +175,11 @@ live and do not interrupt decoding of the current track.
   one you are listening to. Every profile is checked band for band against the renderer's own
   reading of the same text the moment it is read — type, frequency, gain, Q and preamp — and the
   panel says so if the two differ; nothing has to be playing, and the one under the pointer is
-  checked too.
+  checked too. Two knobs sit on top of a profile: **Bass** (a low shelf at 105 Hz, Q 0.70 — the one
+  behind AutoEq's own `--bass-boost`) and **Tilt** (a straight slope through 1 kHz, up to ±2 dB/oct,
+  measured to stay within 0.25 dB of straight). What they add is appended to the profile rather than
+  merged into it: the panel counts it separately, draws the profile alone as a dashed line beside it,
+  and turning both back to zero returns the file exactly as written.
   Which target a profile equalises towards is decided by the file and is not recorded in it, so the
   player shows only the file name and the bands and preamp actually running. Pair it with the
   reference field your SOFA was equalised to — a diffuse-field-equalised HRTF wants a

@@ -38,7 +38,7 @@ impl SpeakerLayout {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[allow(
     clippy::struct_excessive_bools,
@@ -58,6 +58,11 @@ pub struct OutputSettings {
     /// `AutoEq` `ParametricEQ.txt` headphone compensation; empty is off.
     pub hptf: String,
     pub hptf_auto_trim: bool,
+    /// The listener's own two knobs on top of that profile, in decibels and in
+    /// decibels per octave. Both at rest means the profile reaches the renderer
+    /// exactly as its file reads.
+    pub hptf_bass_db: f32,
+    pub hptf_tilt_db: f32,
     pub native_device: OutputDeviceSelection,
     pub stereo_device: OutputDeviceSelection,
     pub head_source: HeadSource,
@@ -74,6 +79,8 @@ impl Default for OutputSettings {
             sofa: String::new(),
             hptf: String::new(),
             hptf_auto_trim: false,
+            hptf_bass_db: 0.0,
+            hptf_tilt_db: 0.0,
             native_device: OutputDeviceSelection::SystemDefault,
             stereo_device: OutputDeviceSelection::SystemDefault,
             head_source: HeadSource::Automatic,
@@ -115,6 +122,25 @@ impl OutputSettings {
             auto_trim: self.hptf_auto_trim,
         }
     }
+    /// The adjustment as the profile code understands it, already clamped and
+    /// already silent on an output with no headphone feed to adjust.
+    #[cfg_attr(
+        not(macinrender_output),
+        allow(
+            dead_code,
+            reason = "only the renderer-backed build forms a headphone feed to adjust"
+        )
+    )]
+    pub fn hptf_adjustment(&self) -> crate::hptf_profile::Adjustment {
+        if !self.hptf_applicable() || self.hptf.is_empty() {
+            return crate::hptf_profile::Adjustment::default();
+        }
+        crate::hptf_profile::Adjustment {
+            bass_db: f64::from(self.hptf_bass_db),
+            tilt_db_per_octave: f64::from(self.hptf_tilt_db),
+        }
+        .clamped()
+    }
     pub fn validated(mut self) -> Self {
         if !self.mode.supported() {
             self.mode = SpatialBackendKind::Automatic;
@@ -124,6 +150,13 @@ impl OutputSettings {
         }
         if self.hptf.contains('\0') {
             self.hptf.clear();
+        }
+        // A stored file is not a trusted one: a knob that came back as NaN would
+        // reach the biquad design as NaN, and `clamped` cannot fix that.
+        for knob in [&mut self.hptf_bass_db, &mut self.hptf_tilt_db] {
+            if !knob.is_finite() {
+                *knob = 0.0;
+            }
         }
         if self.head_source == HeadSource::AirPods && !cfg!(target_os = "macos") {
             self.head_source = HeadSource::Manual;

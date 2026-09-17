@@ -196,6 +196,93 @@ pub struct HptfReadout {
 /// `None` means there is no renderer in this binary to ask. That is not the
 /// same as agreement, but the panel treats both the same way — it says nothing
 /// — because a cross-check can only ever report the difference it found.
+/// Everything that decides what the headphone feed runs: the file, the preamp
+/// policy, and the listener's own two knobs.
+///
+/// The knobs are kept beside the profile rather than folded into it, all the
+/// way down to the renderer: a cascade is submitted as the file's bands
+/// followed by the derived ones, so what the file asked for and what the
+/// listener asked for never have to be told apart afterwards.
+#[cfg(macinrender_output)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct HptfRequest {
+    pub settings: macindecode_macinrender::HptfSettings,
+    pub adjustment: crate::hptf_profile::Adjustment,
+}
+
+#[cfg(macinrender_output)]
+impl HptfRequest {
+    /// Hand this request to an output, synchronously. Call it from a
+    /// preparation thread: both entrypoints design coefficients on the caller.
+    pub fn apply(
+        &self,
+        control: &macindecode_macinrender::Control,
+        revision: u64,
+    ) -> Result<bool, String> {
+        // With the knobs at rest there is nothing to append, so the renderer
+        // reads the file itself — through the v1.39 entrypoint that does not
+        // hold the output's controls while it does. Turning them back to zero
+        // therefore restores exactly the path a build without knobs takes.
+        if self.adjustment.is_flat() || self.settings.profile.is_empty() {
+            return control.set_hptf(&self.settings, revision);
+        }
+        let text =
+            std::fs::read_to_string(&self.settings.profile).map_err(|error| error.to_string())?;
+        let profile = crate::hptf_profile::Profile::parse(&text)?.with(self.adjustment)?;
+        control.set_hptf_parameters(
+            &macindecode_macinrender::HptfProfile {
+                preamp_db: profile.preamp_db,
+                bands: profile
+                    .cascade()
+                    .iter()
+                    .map(|band| macindecode_macinrender::HptfBand {
+                        kind: hptf_band_kind(band.kind),
+                        // Everything this side keeps is the cascade itself; a
+                        // band that was switched off never got this far.
+                        enabled: true,
+                        fc_hz: band.fc,
+                        gain_db: band.gain_db,
+                        q: band.q,
+                    })
+                    .collect(),
+            },
+            self.settings.auto_trim,
+            revision,
+        )
+    }
+}
+
+/// The two halves of one mapping, kept adjacent so they cannot drift apart.
+#[cfg(macinrender_output)]
+fn hptf_band_kind(kind: crate::hptf_profile::BandType) -> macindecode_macinrender::HptfBandKind {
+    use crate::hptf_profile::BandType;
+    use macindecode_macinrender::HptfBandKind;
+    match kind {
+        BandType::Peaking => HptfBandKind::Peaking,
+        BandType::LowShelf => HptfBandKind::LowShelf,
+        BandType::HighShelf => HptfBandKind::HighShelf,
+        BandType::LowPass => HptfBandKind::LowPass,
+        BandType::HighPass => HptfBandKind::HighPass,
+        BandType::BandPass => HptfBandKind::BandPass,
+        BandType::Notch => HptfBandKind::Notch,
+    }
+}
+
+#[cfg(macinrender_output)]
+fn hptf_band_type(kind: macindecode_macinrender::HptfBandKind) -> crate::hptf_profile::BandType {
+    use crate::hptf_profile::BandType;
+    use macindecode_macinrender::HptfBandKind;
+    match kind {
+        HptfBandKind::Peaking => BandType::Peaking,
+        HptfBandKind::LowShelf => BandType::LowShelf,
+        HptfBandKind::HighShelf => BandType::HighShelf,
+        HptfBandKind::LowPass => BandType::LowPass,
+        HptfBandKind::HighPass => BandType::HighPass,
+        HptfBandKind::BandPass => BandType::BandPass,
+        HptfBandKind::Notch => BandType::Notch,
+    }
+}
+
 #[cfg(macinrender_output)]
 #[allow(
     clippy::unnecessary_wraps,
@@ -203,8 +290,7 @@ pub struct HptfReadout {
               is only ever None on the build below"
 )]
 pub fn hptf_parse(text: &str) -> Option<Result<crate::hptf_profile::Profile, String>> {
-    use crate::hptf_profile::{Band, BandType};
-    use macindecode_macinrender::HptfBandKind;
+    use crate::hptf_profile::Band;
     Some(
         macindecode_macinrender::parse_parametric_eq(text).map(|parsed| {
             crate::hptf_profile::Profile::of_bands(
@@ -217,15 +303,7 @@ pub fn hptf_parse(text: &str) -> Option<Result<crate::hptf_profile::Profile, Str
                     // band reaches neither the audio nor the picture.
                     .filter(|band| band.enabled)
                     .map(|band| Band {
-                        kind: match band.kind {
-                            HptfBandKind::Peaking => BandType::Peaking,
-                            HptfBandKind::LowShelf => BandType::LowShelf,
-                            HptfBandKind::HighShelf => BandType::HighShelf,
-                            HptfBandKind::LowPass => BandType::LowPass,
-                            HptfBandKind::HighPass => BandType::HighPass,
-                            HptfBandKind::BandPass => BandType::BandPass,
-                            HptfBandKind::Notch => BandType::Notch,
-                        },
+                        kind: hptf_band_type(band.kind),
                         fc: band.fc_hz,
                         gain_db: band.gain_db,
                         q: band.q,
