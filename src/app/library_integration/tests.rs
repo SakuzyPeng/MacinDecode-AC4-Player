@@ -92,6 +92,7 @@ fn ui_frame(
             app.draw_source_sidebar(ui);
             app.draw_transport(ui);
             app.draw_visual_settings(context);
+            app.draw_output_settings(context);
             for action in crate::playlist_ui::management(
                 context,
                 &app.library.summaries,
@@ -146,6 +147,80 @@ fn click_with_modifiers(
             modifiers,
         }],
     )
+}
+
+#[test]
+fn drawing_a_fallback_audio_page_keeps_the_remembered_choice() {
+    use crate::app::OutputPage;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (mut app, context) = open(dir.path());
+    app.output_settings_open = true;
+    app.output_page = OutputPage::Headphones;
+    for time in [0.0, 0.1] {
+        let _ = ui_frame(&mut app, &context, time, vec![]);
+    }
+    // Automatic has no Headphones page on any platform. Drawing its fallback
+    // must not forget the choice to restore when returning to binaural.
+    assert_eq!(app.output_page, OutputPage::Headphones);
+}
+
+#[test]
+#[cfg(macinrender_output)]
+fn audio_page_round_trips_preserve_choices_until_a_tab_is_clicked() {
+    use crate::app::OutputPage;
+    use crate::backend::{OutputSettings, SpatialBackendKind};
+
+    let dir = tempfile::tempdir().unwrap();
+    let (mut app, context) = open(dir.path());
+    crate::theme::install(&context);
+    app.output_settings_open = true;
+    let mut settings = OutputSettings {
+        null_output: true,
+        mode: SpatialBackendKind::SafBinaural,
+        head_source: crate::head_tracking::HeadSource::Manual,
+        ..Default::default()
+    };
+    app.output.install_settings(settings.clone());
+    let _ = ui_frame(&mut app, &context, 0.0, vec![]);
+    let output = ui_frame(&mut app, &context, 0.1, vec![]);
+    let widget = |output: &egui::FullOutput, label: &str| {
+        painted_text(output)
+            .into_iter()
+            .find(|(text, _, _)| text == label)
+            .unwrap_or_else(|| panic!("missing widget {label}"))
+            .1
+            .center()
+    };
+    let _ = click_widget(&mut app, &context, widget(&output, "Headphones"), 1.0);
+    assert_eq!(app.output_page, OutputPage::Headphones);
+
+    settings.mode = SpatialBackendKind::SystemSpatial;
+    app.output.install_settings(settings.clone());
+    let output = ui_frame(&mut app, &context, 2.0, vec![]);
+    let _ = widget(&output, "Speaker layout");
+    assert_eq!(app.output_page, OutputPage::Headphones);
+
+    settings.mode = SpatialBackendKind::SafBinaural;
+    app.output.install_settings(settings.clone());
+    let output = ui_frame(&mut app, &context, 3.0, vec![]);
+    let _ = widget(&output, "Choose AutoEq profile…");
+    assert_eq!(app.output_page, OutputPage::Headphones);
+
+    // Even clicking the already displayed fallback is an explicit choice:
+    // Response::changed() would miss this click and retain Headphones.
+    settings.mode = SpatialBackendKind::SystemSpatial;
+    app.output.install_settings(settings.clone());
+    let _ = ui_frame(&mut app, &context, 4.0, vec![]);
+    let output = ui_frame(&mut app, &context, 4.1, vec![]);
+    let _ = click_widget(&mut app, &context, widget(&output, "Speakers"), 5.0);
+    assert_eq!(app.output_page, OutputPage::Speakers);
+
+    settings.mode = SpatialBackendKind::SafBinaural;
+    app.output.install_settings(settings);
+    let output = ui_frame(&mut app, &context, 6.0, vec![]);
+    let _ = widget(&output, "HRTF: built-in KEMAR");
+    assert_eq!(app.output_page, OutputPage::Speakers);
 }
 
 #[test]

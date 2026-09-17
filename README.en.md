@@ -133,6 +133,12 @@ where they are. Neither is a smaller copy of the other.
 Switch under **Audio settings**. Picking the wrong one costs nothing — mode changes are applied
 live and do not interrupt decoding of the current track.
 
+The mode sits at the top of the window and a row of pages sits under it, **and the mode decides
+which pages there are**: `Speakers` / `Head` for system spatial audio, `HRTF` / `Headphones` /
+`Head` for SAF binaural, and `Head` alone for Windows object passthrough. Paging is not only about
+being shorter — the row stays above the content, so no amount of page can push the way out of that
+page off the screen.
+
 | Mode | Available on | What it does |
 | --- | --- | --- |
 | **Automatic** (default) | all | Object passthrough on Windows, system spatial audio on macOS |
@@ -158,7 +164,9 @@ live and do not interrupt decoding of the current track.
 - **Custom HRTFs:** a SOFA file you pick is copied into the `sofa/` folder in the app's data
   directory, so later you can select it straight from the list. **available** means it can be
   selected; **in use** means the current binaural renderer has successfully loaded it.
-  Loading failures show a specific error.
+  Loading failures show a specific error. The list itself shows four rows and scrolls in place past
+  that, and it opens scrolled to whatever is selected — a folder has no upper bound, and the
+  settings window does not grow with it.
 - **Headphone compensation (HpTF):** load an [AutoEq](https://github.com/jaakkopasanen/AutoEq)
   `ParametricEQ.txt` to take the headphone's own response out of binaural monitoring. Available in
   **SAF binaural** only: system spatial audio and Windows object passthrough hand a multichannel bed

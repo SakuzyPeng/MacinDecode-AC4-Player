@@ -94,6 +94,22 @@ pub struct PlayerApp {
     /// of it. Its presence is also what marks that import as a save, so the
     /// knobs come off in the same settings change that selects the new file.
     hptf_saving: Option<tempfile::TempDir>,
+    /// The row each managed folder's list was last scrolled to.
+    ///
+    /// A bounded list can hold the selected file off screen, and the moment
+    /// that matters most is a selection that moves without a click on its row
+    /// — the import behind Save as profile… picks the new file itself.
+    /// Remembering what was last brought into view makes the scroll a one-shot:
+    /// it fires when the selection moves and leaves the list alone afterwards,
+    /// so it never fights a hand on the wheel.
+    sofa_shown: Option<PathBuf>,
+    hptf_shown: Option<PathBuf>,
+    /// Which page of the audio settings is showing. A page the current mode
+    /// does not have resolves to that mode's first page at draw time rather
+    /// than being corrected on every mode change, so the starting value only
+    /// has to be *a* page: `Speakers` is not one of the binaural pages, so a
+    /// binaural session opens on the first of its own.
+    output_page: OutputPage,
     skin_picker: Option<Pin<Box<dyn Future<Output = Option<rfd::FileHandle>>>>>,
     camera: scene3d::camera::Camera,
     /// Whether zero-based LFE / one-based dynamic-object numbers are printed
@@ -777,6 +793,10 @@ impl PlayerApp {
         )
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one construction site naming every field is what keeps a new one from being forgotten"
+    )]
     fn from_storage(
         context: &egui::Context,
         storage: Option<&dyn eframe::Storage>,
@@ -872,6 +892,9 @@ impl PlayerApp {
             hptf_drawing: None,
             hptf_ghost: None,
             hptf_saving: None,
+            sofa_shown: None,
+            hptf_shown: None,
+            output_page: OutputPage::Speakers,
             skin_picker: None,
             camera,
             object_numbers_visible: true,
@@ -1687,10 +1710,6 @@ impl PlayerApp {
         }
     }
 
-    #[allow(
-        clippy::too_many_lines,
-        reason = "audio settings share a single transactional update"
-    )]
     fn draw_output_settings(&mut self, context: &egui::Context) {
         if !self.output_settings_open {
             return;
@@ -1714,9 +1733,14 @@ impl PlayerApp {
                 ui.add_enabled_ui(
                     !self.output.settings_pending()
                         && self.pending_output_change.is_none()
-                        && self.sofa_picker.is_none() && !self.sofa.busy()
-                        && self.hptf_picker.is_none() && !self.hptf.busy(),
+                        && self.sofa_picker.is_none()
+                        && !self.sofa.busy()
+                        && self.hptf_picker.is_none()
+                        && !self.hptf.busy(),
                     |ui| {
+                        // Not one of the pages: the mode decides which pages
+                        // exist, so it sits above the bar where no page can
+                        // push it off the screen.
                         ui.horizontal(|ui| {
                             ui.label("Playback mode");
                             egui::ComboBox::from_id_salt("spatial-output-mode")
@@ -1734,476 +1758,34 @@ impl PlayerApp {
                                 });
                         });
                         let mode = settings.mode.resolved();
-                        if mode == SpatialBackendKind::SystemSpatial {
-                            ui.horizontal(|ui| {
-                                ui.label("Speaker layout");
-                                egui::ComboBox::from_id_salt("speaker-layout")
-                                    .selected_text(settings.layout.label())
-                                    .show_ui(ui, |ui| {
-                                        for layout in SpeakerLayout::ALL {
-                                            ui.selectable_value(
-                                                &mut settings.layout,
-                                                layout,
-                                                layout.label(),
-                                            );
-                                        }
-                                    });
-                            });
-                            ui.label("Apple speaker geometry · system default output");
-                            #[cfg(all(target_os = "macos", macinrender_output))]
-                            {
-                                let applicable = settings.atmos_label_applicable();
-                                ui.add_enabled(applicable, egui::Checkbox::new(
-                                    &mut settings.atmos_label_assist, "Control Center Atmos label"
-                                )).on_hover_text("Available only for 7.1.4 system spatial output. Changes system content identification; AC-4 audio rendering stays the same.");
-                            }
-                            if settings.layout == SpeakerLayout::TwentyTwoTwo {
-                                ui.horizontal(|ui| {
-                                    ui.label("LFE routing");
-                                    ui.selectable_value(
-                                        &mut settings.split_lfe,
-                                        true,
-                                        "Equal-power copy",
-                                    );
-                                    ui.selectable_value(&mut settings.split_lfe, false, "Direct");
-                                });
-                            }
-                        }
-                        if mode == SpatialBackendKind::SafBinaural {
+                        let pages = OutputPage::of(mode);
+                        let mut page = self.output_page.resolve(mode);
+                        // A lone page needs no bar to choose it.
+                        if pages.len() > 1 {
                             ui.separator();
-                            ui.label(if settings.sofa.is_empty() {
-                                "HRTF: built-in KEMAR".to_owned()
-                            } else {
-                                format!(
-                                    "HRTF: {}",
-                                    Path::new(&settings.sofa)
-                                        .file_name()
-                                        .unwrap_or_default()
-                                        .to_string_lossy()
-                                )
-                            });
                             ui.horizontal(|ui| {
-                                if ui.button("Choose SOFA…").clicked() {
-                                    self.sofa_picker = Some(Box::pin(
-                                        rfd::AsyncFileDialog::new()
-                                            .set_directory(&self.sofa.root)
-                                            .add_filter("SOFA HRIR", &["sofa"])
-                                            .pick_file(),
-                                    ));
-                                    context.request_repaint();
-                                }
-                                if ui.button("Use KEMAR").clicked() {
-                                    settings.sofa.clear();
-                                }
-                                if ui.button("Refresh SOFA folder").clicked() { self.sofa.refresh(None, context); }
-                            });
-                            ui.label(self.sofa.root.display().to_string());
-                            ui.label(&self.sofa.message);
-                            for file in &self.sofa.files {
-                                let full_path = self.sofa.root.join(&file.path);
-                                let selected = Path::new(&settings.sofa) == full_path;
-                                let active = self.output.active_sofa().is_some_and(|path| Path::new(path) == full_path);
-                                let status = file.display_status(active);
-                                if ui.add_enabled(file.selectable(), egui::Button::selectable(selected, format!("{} · {status}", file.path.display()))).clicked() {
-                                    if let Some(path) = full_path.to_str() { path.clone_into(&mut settings.sofa); }
-                                    else { self.audio_settings_error = Some("This renderer requires a Unicode SOFA path".into()); }
-                                }
-                            }
-                            ui.separator();
-                            // Name the file and nothing else. A ParametricEQ profile
-                            // carries no target or measurement provenance, so the
-                            // player cannot tell what a given one equalises towards
-                            // and must not imply that it knows.
-                            ui.label(if settings.hptf.is_empty() {
-                                "Profile: none".to_owned()
-                            } else {
-                                format!("Profile: {}", profile_name(&settings.hptf))
-                            })
-                            .on_hover_text(
-                                "An AutoEq ParametricEQ profile, applied to the headphone feed exactly as written. Which target it equalises towards is decided by whoever generated it and is not recorded in the file; pair it with the reference field your SOFA was equalised to.",
-                            );
-                            ui.horizontal(|ui| {
-                                if ui.button("Choose AutoEq profile…").clicked() {
-                                    self.hptf_picker = Some(Box::pin(
-                                        rfd::AsyncFileDialog::new()
-                                            .set_directory(&self.hptf.root)
-                                            .add_filter("AutoEq ParametricEQ", &["txt"])
-                                            .pick_file(),
-                                    ));
-                                    context.request_repaint();
-                                }
-                                if ui.button("Turn off").clicked() {
-                                    settings.hptf.clear();
-                                }
-                                if ui.button("Refresh profile folder").clicked() {
-                                    // The curves are read from the files this
-                                    // re-reads, so drop them with it rather than
-                                    // let an edited profile keep its old picture.
-                                    self.hptf_drawing = None;
-                                    self.hptf_ghost = None;
-                                    self.hptf.refresh(None, context);
-                                }
-                            });
-                            ui.label(self.hptf.root.display().to_string());
-                            ui.label(&self.hptf.message);
-                            let mut hovered: Option<String> = None;
-                            for file in &self.hptf.files {
-                                let full_path = self.hptf.root.join(&file.path);
-                                let selected = Path::new(&settings.hptf) == full_path;
-                                let active = self
-                                    .output
-                                    .active_hptf()
-                                    .is_some_and(|path| Path::new(path) == full_path);
-                                let status = file.display_status(active);
-                                let row = ui.add_enabled(
-                                    file.selectable(),
-                                    egui::Button::selectable(
-                                        selected,
-                                        format!("{} · {status}", file.path.display()),
-                                    ),
-                                );
-                                // Only a row that can be chosen can be asked
-                                // about; one still importing has no settled file
-                                // to read.
-                                if file.selectable() && row.hovered() {
-                                    hovered = full_path.to_str().map(str::to_owned);
-                                }
-                                if row.clicked() {
-                                    if let Some(path) = full_path.to_str() {
-                                        path.clone_into(&mut settings.hptf);
-                                    } else {
-                                        self.audio_settings_error = Some(
-                                            "This renderer requires a Unicode profile path".into(),
-                                        );
-                                    }
-                                }
-                            }
-                            ui.checkbox(
-                                &mut settings.hptf_auto_trim,
-                                "Trim further if the curve still peaks above 0 dB",
-                            )
-                            .on_hover_text(
-                                "Off uses the profile's own Preamp line verbatim. This bounds the frequency response, not transient peaks.",
-                            );
-                            // Two knobs, and only two. A row of biquads to
-                            // sculpt with would argue against every other
-                            // decision in an inspection tool; two named,
-                            // checkable controls do not.
-                            let mut save_requested = false;
-                            ui.add_enabled_ui(!settings.hptf.is_empty(), |ui| {
-                                ui.add(
-                                    egui::Slider::new(
-                                        &mut settings.hptf_bass_db,
-                                        -crate::hptf_profile::BASS_LIMIT_DB
-                                            ..=crate::hptf_profile::BASS_LIMIT_DB,
-                                    )
-                                    .text("Bass")
-                                    .suffix(" dB")
-                                    .fixed_decimals(1),
-                                )
-                                .on_hover_text(
-                                    "A low shelf at 105 Hz, Q 0.70 — the shape behind AutoEq's own --bass-boost, so +6 dB on a bass-free profile gives the published preset rather than something like it.",
-                                );
-                                ui.add(
-                                    egui::Slider::new(
-                                        &mut settings.hptf_tilt_db,
-                                        -crate::hptf_profile::TILT_LIMIT_DB
-                                            ..=crate::hptf_profile::TILT_LIMIT_DB,
-                                    )
-                                    .text("Tilt")
-                                    .suffix(" dB/oct")
-                                    .fixed_decimals(2),
-                                )
-                                .on_hover_text(format!(
-                                    "A straight slope turning about {:.0} Hz, held within a quarter of a decibel of straight across 20 Hz–20 kHz. A diffuse-field target sits roughly -1 dB/oct from a Harman one.",
-                                    crate::hptf_profile::TILT_PIVOT_HZ
-                                ));
-                                let moved =
-                                    settings.hptf_bass_db != 0.0 || settings.hptf_tilt_db != 0.0;
-                                ui.horizontal(|ui| {
+                                for &candidate in pages {
                                     if ui
-                                        .add_enabled(moved, egui::Button::new("Reset"))
+                                        .selectable_value(&mut page, candidate, candidate.label())
                                         .clicked()
                                     {
-                                        settings.hptf_bass_db = 0.0;
-                                        settings.hptf_tilt_db = 0.0;
+                                        // A fallback only changes what is drawn; an
+                                        // explicit tab choice changes what is remembered.
+                                        self.output_page = page;
                                     }
-                                    if ui
-                                        .add_enabled(moved, egui::Button::new("Save as profile…"))
-                                        .on_hover_text(
-                                            "Writes the profile with the adjustment baked in into the hptf/ folder, selects it and returns the knobs to rest. A setting worth keeping becomes an ordinary, portable profile rather than a number in settings.json.",
-                                        )
-                                        .clicked()
-                                    {
-                                        save_requested = true;
-                                    }
-                                });
+                                }
                             });
-                            let adjustment = settings.hptf_adjustment();
-                            let hptf = self.output.hptf_readout();
-                            // Running means this profile *and* these knobs: a
-                            // slider that has moved but not yet reached the
-                            // audio must not be called applied.
-                            let running = self.output.active_hptf() == Some(settings.hptf.as_str())
-                                && self.output.active_hptf_adjustment() == adjustment;
-                            // The renderer designs at the rate its output runs;
-                            // 48 kHz is what a Scene output is created with, so
-                            // that is the curve to draw before one exists.
-                            let rate = if hptf.rate == 0 { 48_000 } else { hptf.rate };
-                            let profile = settings.hptf.clone();
-                            let ghost_path = hptf_ghost(hovered.as_deref(), &profile);
-                            let drawn = hptf_curve(&mut self.hptf_drawing, &profile, rate, adjustment);
-                            // A ghost answers "what does that file do", so it is
-                            // drawn as written — the knobs belong to the chain,
-                            // not to the file being pointed at.
-                            let ghost = hptf_curve(
-                                &mut self.hptf_ghost,
-                                ghost_path.unwrap_or_default(),
-                                rate,
-                                crate::hptf_profile::Adjustment::default(),
-                            );
-                            // The drawn line is what the output does, so it takes
-                            // the renderer's extra trim — but only while it is
-                            // this profile that is running. A ghost never is one,
-                            // so a ghost is drawn the way its own file reads.
-                            let drawn_curve = drawn
-                                .and_then(|drawing| drawing.running().as_ref().ok())
-                                .map(|curve| {
-                                    curve.with_output_trim(if running {
-                                        hptf.auto_trim_db
-                                    } else {
-                                        0.0
-                                    })
-                                });
-                            let reference_curve = drawn.and_then(HptfDrawing::reference);
-                            let ghost_curve =
-                                ghost.and_then(|drawing| drawing.curve.as_ref().ok());
-                            if drawn_curve.is_some() {
-                                ui.label(if running {
-                                    "Applied response"
-                                } else if settings.hptf_auto_trim {
-                                    "Profile response · before automatic trim"
-                                } else {
-                                    "Profile response"
-                                });
-                            }
-                            if drawn_curve.is_some()
-                                || reference_curve.is_some()
-                                || ghost_curve.is_some()
-                            {
-                                draw_hptf_curve(
-                                    ui,
-                                    drawn_curve.as_ref(),
-                                    reference_curve,
-                                    ghost_curve,
-                                );
-                            }
-                            if reference_curve.is_some() {
-                                ui.colored_label(
-                                    theme::MUTED,
-                                    "Dashed: the profile alone, without the adjustment.",
-                                );
-                            }
-                            if let Some(path) = ghost_path {
-                                // Which line is which. Nothing else in the panel
-                                // names the profile being pointed at, and the
-                                // pointer is about to leave it.
-                                if let Some(Err(error)) = ghost.map(|drawing| &drawing.curve) {
-                                    ui.colored_label(
-                                        theme::MUTED,
-                                        format!("{}: {error}", profile_name(path)),
-                                    );
-                                } else {
-                                    ui.horizontal_wrapped(|ui| {
-                                        if drawn_curve.is_some() {
-                                            ui.colored_label(theme::ACCENT, profile_name(&profile));
-                                            ui.label("vs");
-                                        }
-                                        // The heading above describes the drawn
-                                        // line alone. When the output is trimming
-                                        // that one, the two are not the same kind
-                                        // of curve, and the legend has to say so.
-                                        ui.colored_label(
-                                            theme::MUTED,
-                                            if running && hptf.auto_trim_db != 0.0 {
-                                                format!("{} · as written", profile_name(path))
-                                            } else {
-                                                profile_name(path)
-                                            },
-                                        );
-                                    });
-                                }
-                            }
-                            // A profile nobody is pointing at gets no second
-                            // line; one being pointed at says so quietly, the
-                            // way its read errors already do.
-                            if let Some(note) = ghost.and_then(|drawing| drawing.disagreement.as_deref())
-                            {
-                                ui.colored_label(theme::MUTED, note);
-                            }
-                            if let Some(Err(error)) = drawn.map(HptfDrawing::running) {
-                                ui.colored_label(
-                                    theme::WARNING,
-                                    format!("Cannot read this profile: {error}"),
-                                );
-                            }
-                            // The parse comparison wins over the running one: it
-                            // names the band, it does not wait for playback, and
-                            // when the two parses differ the running comparison
-                            // would only report the same fault as a moved peak.
-                            if let Some(note) = drawn.and_then(|drawing| drawing.disagreement.as_deref())
-                            {
-                                ui.colored_label(theme::WARNING, note);
-                            } else if running
-                                && let Some(curve) = &drawn_curve
-                                && let Some(note) = hptf_disagreement(curve, &hptf)
-                            {
-                                ui.colored_label(theme::WARNING, note);
-                            }
-                            if running {
-                                // Count the adjustment apart from the file, so
-                                // that the file and the listener never have to
-                                // be told apart afterwards.
-                                let added =
-                                    u32::try_from(adjustment.bands().len()).unwrap_or_default();
-                                ui.label(format!(
-                                    "In use · {} · preamp {:+.1} dB{}",
-                                    if added == 0 {
-                                        format!("{} bands", hptf.bands)
-                                    } else {
-                                        format!(
-                                            "{} bands + {added} adjustment",
-                                            hptf.bands.saturating_sub(added)
-                                        )
-                                    },
-                                    hptf.preamp_db,
-                                    if hptf.auto_trim_db == 0.0 {
-                                        String::new()
-                                    } else {
-                                        format!(" · trimmed {:+.1} dB", hptf.auto_trim_db)
-                                    }
-                                ));
-                                if hptf.max_response_db > 0.0 {
-                                    ui.colored_label(
-                                        theme::WARNING,
-                                        format!(
-                                            "Peaks {:+.1} dB above full scale; the output ceiling will pull it back.",
-                                            hptf.max_response_db
-                                        ),
-                                    );
-                                }
-                            } else if !settings.hptf.is_empty() {
-                                ui.label("Selected; not yet running.");
-                            }
-                            if save_requested {
-                                let staged = drawn
-                                    .ok_or_else(|| "no profile is selected".to_owned())
-                                    .and_then(|drawing| {
-                                        drawing.profile.as_ref().map_err(Clone::clone)
-                                    })
-                                    .and_then(|base| base.with(adjustment))
-                                    .and_then(|tuned| {
-                                        let directory =
-                                            tempfile::tempdir().map_err(|e| e.to_string())?;
-                                        let file = directory
-                                            .path()
-                                            .join(adjusted_profile_name(&profile, adjustment));
-                                        // The provenance goes in a comment both
-                                        // parsers skip. The knobs stop being
-                                        // separate here, and that line is the
-                                        // only thing that will still say so.
-                                        std::fs::write(
-                                            &file,
-                                            format!(
-                                                "# {} with {}\n{}",
-                                                profile_name(&profile),
-                                                adjustment_summary(adjustment),
-                                                tuned.to_parametric_eq()
-                                            ),
-                                        )
-                                        .map_err(|e| e.to_string())?;
-                                        Ok((directory, file))
-                                    });
-                                match staged {
-                                    Ok((directory, file)) => {
-                                        self.hptf_saving = Some(directory);
-                                        self.hptf.refresh(Some(file), context);
-                                    }
-                                    Err(error) => {
-                                        self.audio_settings_error =
-                                            Some(format!("Cannot save this profile: {error}"));
-                                    }
-                                }
-                            }
                         }
                         ui.separator();
-                        if matches!(
-                            mode,
-                            SpatialBackendKind::SafBinaural
-                                | SpatialBackendKind::WindowsSpatialAudio
-                        ) {
-                            ui.horizontal(|ui| {
-                                ui.label("Head orientation");
-                                egui::ComboBox::from_id_salt("head-source")
-                                    .selected_text(settings.head_source.label())
-                                    .show_ui(ui, |ui| {
-                                        for source in crate::head_tracking::HeadSource::ALL {
-                                            ui.add_enabled_ui(
-                                                source != crate::head_tracking::HeadSource::AirPods
-                                                    || cfg!(target_os = "macos"),
-                                                |ui| {
-                                                    ui.selectable_value(
-                                                        &mut settings.head_source,
-                                                        source,
-                                                        source.label(),
-                                                    );
-                                                },
-                                            );
-                                        }
-                                    });
-                            });
-                            let mut angles = head.pose.euler();
-                            let mut changed = false;
-                            ui.horizontal(|ui| {
-                                for (index, label) in
-                                    ["Yaw", "Pitch", "Roll"].into_iter().enumerate()
-                                {
-                                    ui.label(label);
-                                    let limit = if index == 1 { 85.0 } else { 180.0 };
-                                    changed |= ui
-                                        .add(
-                                            egui::DragValue::new(&mut angles[index])
-                                                .speed(0.5)
-                                                .range(-limit..=limit)
-                                                .suffix("°"),
-                                        )
-                                        .changed();
-                                }
-                            });
-                            let (rect, response) = ui
-                                .allocate_exact_size(egui::vec2(370.0, 54.0), egui::Sense::drag());
-                            ui.painter().rect_filled(rect, 4.0, theme::SURFACE);
-                            ui.painter().text(
-                                rect.center(),
-                                Align2::CENTER_CENTER,
-                                "Drag here to turn your head",
-                                egui::FontId::proportional(12.0),
-                                theme::MUTED,
-                            );
-                            if response.dragged() {
-                                let delta = ui.input(|input| input.pointer.delta());
-                                angles[0] -= delta.x * 0.35;
-                                angles[1] = (angles[1] - delta.y * 0.35).clamp(-85.0, 85.0);
-                                changed = true;
+                        match page {
+                            OutputPage::Speakers => draw_speakers_page(ui, &mut settings),
+                            OutputPage::Hrtf => self.draw_hrtf_page(ui, &mut settings, context),
+                            OutputPage::Headphones => {
+                                self.draw_headphones_page(ui, &mut settings, context);
                             }
-                            if changed {
-                                manual = Some(angles);
-                                settings.head_source = crate::head_tracking::HeadSource::Manual;
+                            OutputPage::Head => {
+                                (manual, recenter) = draw_head_page(ui, &mut settings, mode, &head);
                             }
-                            recenter = ui.button("Recenter").clicked();
-                            ui.label(head.status.label());
-                        } else {
-                            ui.label("Head orientation is controlled by the system spatializer.");
                         }
                     },
                 );
@@ -2217,6 +1799,253 @@ impl PlayerApp {
         if recenter {
             self.output.recenter_head();
             self.preferences.manual_head = [0.0; 3];
+        }
+    }
+
+    /// The HRTF page: which ears the binaural renderer borrows.
+    fn draw_hrtf_page(
+        &mut self,
+        ui: &mut egui::Ui,
+        settings: &mut OutputSettings,
+        context: &egui::Context,
+    ) {
+        ui.label(if settings.sofa.is_empty() {
+            "HRTF: built-in KEMAR".to_owned()
+        } else {
+            format!(
+                "HRTF: {}",
+                Path::new(&settings.sofa)
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+            )
+        });
+        ui.horizontal(|ui| {
+            if ui.button("Choose SOFA…").clicked() {
+                self.sofa_picker = Some(Box::pin(
+                    rfd::AsyncFileDialog::new()
+                        .set_directory(&self.sofa.root)
+                        .add_filter("SOFA HRIR", &["sofa"])
+                        .pick_file(),
+                ));
+                context.request_repaint();
+            }
+            if ui.button("Use KEMAR").clicked() {
+                settings.sofa.clear();
+            }
+            if ui.button("Refresh SOFA folder").clicked() {
+                self.sofa.refresh(None, context);
+            }
+        });
+        ui.label(self.sofa.root.display().to_string());
+        ui.label(&self.sofa.message);
+        let (clicked, _) = draw_catalog_files(
+            ui,
+            &self.sofa,
+            self.output.active_sofa(),
+            Path::new(&settings.sofa),
+            &mut self.sofa_shown,
+        );
+        if let Some(full_path) = clicked {
+            if let Some(path) = full_path.to_str() {
+                path.clone_into(&mut settings.sofa);
+            } else {
+                self.audio_settings_error =
+                    Some("This renderer requires a Unicode SOFA path".into());
+            }
+        }
+    }
+
+    /// The headphones page: which profile, the two knobs on top of it, and
+    /// everything that follows from the two — in that order, because that is
+    /// the order in which each answer depends on the one before it.
+    fn draw_headphones_page(
+        &mut self,
+        ui: &mut egui::Ui,
+        settings: &mut OutputSettings,
+        context: &egui::Context,
+    ) {
+        let hovered = self.draw_hptf_chooser(ui, settings, context);
+        let save_requested = draw_hptf_knobs(ui, settings);
+        self.draw_hptf_response(ui, settings, hovered.as_deref(), save_requested, context);
+    }
+
+    /// Which profile, out of the managed folder.
+    ///
+    /// Reports the row under the pointer, which is the profile the response
+    /// half draws as a ghost behind the chosen one.
+    fn draw_hptf_chooser(
+        &mut self,
+        ui: &mut egui::Ui,
+        settings: &mut OutputSettings,
+        context: &egui::Context,
+    ) -> Option<String> {
+        // Name the file and nothing else. A ParametricEQ profile
+        // carries no target or measurement provenance, so the
+        // player cannot tell what a given one equalises towards
+        // and must not imply that it knows.
+        ui.label(if settings.hptf.is_empty() {
+            "Profile: none".to_owned()
+        } else {
+            format!("Profile: {}", profile_name(&settings.hptf))
+        })
+        .on_hover_text(
+            "An AutoEq ParametricEQ profile, applied to the headphone feed exactly as written. Which target it equalises towards is decided by whoever generated it and is not recorded in the file; pair it with the reference field your SOFA was equalised to.",
+        );
+        ui.horizontal(|ui| {
+            if ui.button("Choose AutoEq profile…").clicked() {
+                self.hptf_picker = Some(Box::pin(
+                    rfd::AsyncFileDialog::new()
+                        .set_directory(&self.hptf.root)
+                        .add_filter("AutoEq ParametricEQ", &["txt"])
+                        .pick_file(),
+                ));
+                context.request_repaint();
+            }
+            if ui.button("Turn off").clicked() {
+                settings.hptf.clear();
+            }
+            if ui.button("Refresh profile folder").clicked() {
+                // The curves are read from the files this
+                // re-reads, so drop them with it rather than
+                // let an edited profile keep its old picture.
+                self.hptf_drawing = None;
+                self.hptf_ghost = None;
+                self.hptf.refresh(None, context);
+            }
+        });
+        ui.label(self.hptf.root.display().to_string());
+        ui.label(&self.hptf.message);
+        let (clicked, hovered) = draw_catalog_files(
+            ui,
+            &self.hptf,
+            self.output.active_hptf(),
+            Path::new(&settings.hptf),
+            &mut self.hptf_shown,
+        );
+        let hovered = hovered.and_then(|path| path.to_str().map(str::to_owned));
+        if let Some(full_path) = clicked {
+            if let Some(path) = full_path.to_str() {
+                path.clone_into(&mut settings.hptf);
+            } else {
+                self.audio_settings_error =
+                    Some("This renderer requires a Unicode profile path".into());
+            }
+        }
+        hovered
+    }
+
+    /// Everything that follows from the profile and the knobs: the curve, the
+    /// lines drawn behind it, whatever disagrees about it, and what the
+    /// renderer reports about the one it is actually running.
+    fn draw_hptf_response(
+        &mut self,
+        ui: &mut egui::Ui,
+        settings: &OutputSettings,
+        hovered: Option<&str>,
+        save_requested: bool,
+        context: &egui::Context,
+    ) {
+        let adjustment = settings.hptf_adjustment();
+        let hptf = self.output.hptf_readout();
+        // Running means this profile *and* these knobs: a
+        // slider that has moved but not yet reached the
+        // audio must not be called applied.
+        let running = self.output.active_hptf() == Some(settings.hptf.as_str())
+            && self.output.active_hptf_adjustment() == adjustment;
+        // The renderer designs at the rate its output runs;
+        // 48 kHz is what a Scene output is created with, so
+        // that is the curve to draw before one exists.
+        let rate = if hptf.rate == 0 { 48_000 } else { hptf.rate };
+        let profile = settings.hptf.clone();
+        let ghost_path = hptf_ghost(hovered, &profile);
+        let drawn = hptf_curve(&mut self.hptf_drawing, &profile, rate, adjustment);
+        // A ghost answers "what does that file do", so it is
+        // drawn as written — the knobs belong to the chain,
+        // not to the file being pointed at.
+        let ghost = hptf_curve(
+            &mut self.hptf_ghost,
+            ghost_path.unwrap_or_default(),
+            rate,
+            crate::hptf_profile::Adjustment::default(),
+        );
+        // The drawn line is what the output does, so it takes
+        // the renderer's extra trim — but only while it is
+        // this profile that is running. A ghost never is one,
+        // so a ghost is drawn the way its own file reads.
+        let drawn_curve = drawn
+            .and_then(|drawing| drawing.running().as_ref().ok())
+            .map(|curve| curve.with_output_trim(if running { hptf.auto_trim_db } else { 0.0 }));
+        let reference_curve = drawn.and_then(HptfDrawing::reference);
+        let ghost_curve = ghost.and_then(|drawing| drawing.curve.as_ref().ok());
+        if drawn_curve.is_some() {
+            ui.label(if running {
+                "Applied response"
+            } else if settings.hptf_auto_trim {
+                "Profile response · before automatic trim"
+            } else {
+                "Profile response"
+            });
+        }
+        if drawn_curve.is_some() || reference_curve.is_some() || ghost_curve.is_some() {
+            draw_hptf_curve(ui, drawn_curve.as_ref(), reference_curve, ghost_curve);
+        }
+        if reference_curve.is_some() {
+            ui.colored_label(
+                theme::MUTED,
+                "Dashed: the profile alone, without the adjustment.",
+            );
+        }
+        if let Some(path) = ghost_path {
+            draw_ghost_legend(
+                ui,
+                ghost,
+                path,
+                drawn_curve.is_some().then_some(profile.as_str()),
+                running && hptf.auto_trim_db != 0.0,
+            );
+        }
+        // A profile nobody is pointing at gets no second
+        // line; one being pointed at says so quietly, the
+        // way its read errors already do.
+        if let Some(note) = ghost.and_then(|drawing| drawing.disagreement.as_deref()) {
+            ui.colored_label(theme::MUTED, note);
+        }
+        if let Some(Err(error)) = drawn.map(HptfDrawing::running) {
+            ui.colored_label(theme::WARNING, format!("Cannot read this profile: {error}"));
+        }
+        // The parse comparison wins over the running one: it
+        // names the band, it does not wait for playback, and
+        // when the two parses differ the running comparison
+        // would only report the same fault as a moved peak.
+        if let Some(note) = drawn.and_then(|drawing| drawing.disagreement.as_deref()) {
+            ui.colored_label(theme::WARNING, note);
+        } else if running
+            && let Some(curve) = &drawn_curve
+            && let Some(note) = hptf_disagreement(curve, &hptf)
+        {
+            ui.colored_label(theme::WARNING, note);
+        }
+        if running {
+            draw_hptf_readout(ui, &hptf, adjustment);
+        } else if !settings.hptf.is_empty() {
+            ui.label("Selected; not yet running.");
+        }
+        if save_requested {
+            let staged = drawn
+                .ok_or_else(|| "no profile is selected".to_owned())
+                .and_then(|drawing| drawing.profile.as_ref().map_err(Clone::clone))
+                .and_then(|base| base.with(adjustment))
+                .and_then(|tuned| stage_tuned_profile(&tuned, &profile, adjustment));
+            match staged {
+                Ok((directory, file)) => {
+                    self.hptf_saving = Some(directory);
+                    self.hptf.refresh(Some(file), context);
+                }
+                Err(error) => {
+                    self.audio_settings_error = Some(format!("Cannot save this profile: {error}"));
+                }
+            }
         }
     }
 
@@ -3767,6 +3596,405 @@ enum StatusKind {
     Idle,
     Ready,
     Warning,
+}
+
+/// The two knobs that sit on top of a profile, and the trim under them.
+///
+/// Two knobs, and only two. A row of biquads to sculpt with would argue
+/// against every other decision in an inspection tool; two named, checkable
+/// controls do not. Reports whether the listener asked for what they add to
+/// be written out as a profile of its own.
+fn draw_hptf_knobs(ui: &mut egui::Ui, settings: &mut OutputSettings) -> bool {
+    ui.checkbox(
+        &mut settings.hptf_auto_trim,
+        "Trim further if the curve still peaks above 0 dB",
+    )
+    .on_hover_text(
+        "Off uses the profile's own Preamp line verbatim. This bounds the frequency response, not transient peaks.",
+    );
+    // Two knobs, and only two. A row of biquads to
+    // sculpt with would argue against every other
+    // decision in an inspection tool; two named,
+    // checkable controls do not.
+    let mut save_requested = false;
+    ui.add_enabled_ui(!settings.hptf.is_empty(), |ui| {
+        ui.add(
+            egui::Slider::new(
+                &mut settings.hptf_bass_db,
+                -crate::hptf_profile::BASS_LIMIT_DB
+                    ..=crate::hptf_profile::BASS_LIMIT_DB,
+            )
+            .text("Bass")
+            .suffix(" dB")
+            .fixed_decimals(1),
+        )
+        .on_hover_text(
+            "A low shelf at 105 Hz, Q 0.70 — the shape behind AutoEq's own --bass-boost, so +6 dB on a bass-free profile gives the published preset rather than something like it.",
+        );
+        ui.add(
+            egui::Slider::new(
+                &mut settings.hptf_tilt_db,
+                -crate::hptf_profile::TILT_LIMIT_DB
+                    ..=crate::hptf_profile::TILT_LIMIT_DB,
+            )
+            .text("Tilt")
+            .suffix(" dB/oct")
+            .fixed_decimals(2),
+        )
+        .on_hover_text(format!(
+            "A straight slope turning about {:.0} Hz, held within a quarter of a decibel of straight across 20 Hz–20 kHz. A diffuse-field target sits roughly -1 dB/oct from a Harman one.",
+            crate::hptf_profile::TILT_PIVOT_HZ
+        ));
+        let moved =
+            settings.hptf_bass_db != 0.0 || settings.hptf_tilt_db != 0.0;
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(moved, egui::Button::new("Reset"))
+                .clicked()
+            {
+                settings.hptf_bass_db = 0.0;
+                settings.hptf_tilt_db = 0.0;
+            }
+            if ui
+                .add_enabled(moved, egui::Button::new("Save as profile…"))
+                .on_hover_text(
+                    "Writes the profile with the adjustment baked in into the hptf/ folder, selects it and returns the knobs to rest. A setting worth keeping becomes an ordinary, portable profile rather than a number in settings.json.",
+                )
+                .clicked()
+            {
+                save_requested = true;
+            }
+        });
+    });
+    save_requested
+}
+
+/// Name the two lines when a second profile is drawn behind the chosen one.
+///
+/// Nothing else on the page names the profile being pointed at, and the
+/// pointer is about to leave it. `drawn` is the chosen profile when it has a
+/// line of its own, and `as_written` says the two are not the same kind of
+/// curve, because the output is trimming the chosen one and never a ghost.
+fn draw_ghost_legend(
+    ui: &mut egui::Ui,
+    ghost: Option<&HptfDrawing>,
+    path: &str,
+    drawn: Option<&str>,
+    as_written: bool,
+) {
+    if let Some(Err(error)) = ghost.map(|drawing| &drawing.curve) {
+        ui.colored_label(theme::MUTED, format!("{}: {error}", profile_name(path)));
+    } else {
+        ui.horizontal_wrapped(|ui| {
+            if let Some(drawn) = drawn {
+                ui.colored_label(theme::ACCENT, profile_name(drawn));
+                ui.label("vs");
+            }
+            ui.colored_label(
+                theme::MUTED,
+                if as_written {
+                    format!("{} · as written", profile_name(path))
+                } else {
+                    profile_name(path)
+                },
+            );
+        });
+    }
+}
+
+/// What the renderer reports about the profile it is running — the only
+/// numbers on the page that are its rather than ours.
+fn draw_hptf_readout(
+    ui: &mut egui::Ui,
+    hptf: &crate::backend::HptfReadout,
+    adjustment: crate::hptf_profile::Adjustment,
+) {
+    // Count the adjustment apart from the file, so
+    // that the file and the listener never have to
+    // be told apart afterwards.
+    let added = u32::try_from(adjustment.bands().len()).unwrap_or_default();
+    ui.label(format!(
+        "In use · {} · preamp {:+.1} dB{}",
+        if added == 0 {
+            format!("{} bands", hptf.bands)
+        } else {
+            format!(
+                "{} bands + {added} adjustment",
+                hptf.bands.saturating_sub(added)
+            )
+        },
+        hptf.preamp_db,
+        if hptf.auto_trim_db == 0.0 {
+            String::new()
+        } else {
+            format!(" · trimmed {:+.1} dB", hptf.auto_trim_db)
+        }
+    ));
+    if hptf.max_response_db > 0.0 {
+        ui.colored_label(
+            theme::WARNING,
+            format!(
+                "Peaks {:+.1} dB above full scale; the output ceiling will pull it back.",
+                hptf.max_response_db
+            ),
+        );
+    }
+}
+
+/// Write a tuned profile into a staging directory for the catalog to import.
+///
+/// The provenance goes in a comment both parsers skip. The knobs stop being
+/// separate here, and that line is the only thing that will still say so.
+///
+/// Reports the directory alongside the file, because the file only lives as
+/// long as it does: the caller holds it until the import has read it.
+fn stage_tuned_profile(
+    tuned: &crate::hptf_profile::Profile,
+    source: &str,
+    adjustment: crate::hptf_profile::Adjustment,
+) -> Result<(tempfile::TempDir, PathBuf), String> {
+    let directory = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let file = directory
+        .path()
+        .join(adjusted_profile_name(source, adjustment));
+    std::fs::write(
+        &file,
+        format!(
+            "# {} with {}\n{}",
+            profile_name(source),
+            adjustment_summary(adjustment),
+            tuned.to_parametric_eq()
+        ),
+    )
+    .map_err(|e| e.to_string())?;
+    Ok((directory, file))
+}
+
+/// One page of the audio settings.
+///
+/// The window used to stack every block that the playback mode left switched
+/// on, so its height was their sum and the controls at the bottom could sit
+/// past the edge of the screen. As pages its height is the tallest one
+/// instead, and — the reason a bar beats a column of collapsing headers — the
+/// bar sits outside the content, so no amount of page can push the way out of
+/// that page off screen.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum OutputPage {
+    Speakers,
+    Hrtf,
+    Headphones,
+    Head,
+}
+
+impl OutputPage {
+    /// The pages a mode has, in the order the bar shows them.
+    ///
+    /// The mode is what decides this, which is why it is not itself a page:
+    /// it stays in the fixed row above the bar.
+    fn of(mode: SpatialBackendKind) -> &'static [Self] {
+        match mode {
+            SpatialBackendKind::SystemSpatial => &[Self::Speakers, Self::Head],
+            SpatialBackendKind::SafBinaural => &[Self::Hrtf, Self::Headphones, Self::Head],
+            _ => &[Self::Head],
+        }
+    }
+
+    /// The page to draw: the remembered one when this mode has it, and this
+    /// mode's first otherwise. Resolving at draw time rather than correcting
+    /// the stored page on every mode change is what lets a page survive a
+    /// round trip through another mode.
+    fn resolve(self, mode: SpatialBackendKind) -> Self {
+        let pages = Self::of(mode);
+        if pages.contains(&self) {
+            self
+        } else {
+            pages[0]
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Speakers => "Speakers",
+            Self::Hrtf => "HRTF",
+            Self::Headphones => "Headphones",
+            Self::Head => "Head",
+        }
+    }
+}
+
+/// The speakers page: the bed the system spatializer is handed.
+fn draw_speakers_page(ui: &mut egui::Ui, settings: &mut OutputSettings) {
+    ui.horizontal(|ui| {
+        ui.label("Speaker layout");
+        egui::ComboBox::from_id_salt("speaker-layout")
+            .selected_text(settings.layout.label())
+            .show_ui(ui, |ui| {
+                for layout in SpeakerLayout::ALL {
+                    ui.selectable_value(&mut settings.layout, layout, layout.label());
+                }
+            });
+    });
+    ui.label("Apple speaker geometry · system default output");
+    #[cfg(all(target_os = "macos", macinrender_output))]
+    {
+        let applicable = settings.atmos_label_applicable();
+        ui.add_enabled(applicable, egui::Checkbox::new(
+                &mut settings.atmos_label_assist, "Control Center Atmos label"
+            )).on_hover_text("Available only for 7.1.4 system spatial output. Changes system content identification; AC-4 audio rendering stays the same.");
+    }
+    if settings.layout == SpeakerLayout::TwentyTwoTwo {
+        ui.horizontal(|ui| {
+            ui.label("LFE routing");
+            ui.selectable_value(&mut settings.split_lfe, true, "Equal-power copy");
+            ui.selectable_value(&mut settings.split_lfe, false, "Direct");
+        });
+    }
+}
+
+/// The head page: where the listener is facing, and who decides that.
+///
+/// Reports the orientation to apply and whether the listener asked to be
+/// recentred; under system spatial audio neither is ours to answer.
+fn draw_head_page(
+    ui: &mut egui::Ui,
+    settings: &mut OutputSettings,
+    mode: SpatialBackendKind,
+    head: &crate::head_tracking::HeadSnapshot,
+) -> (Option<[f32; 3]>, bool) {
+    let mut manual = None;
+    let mut recenter = false;
+    if matches!(
+        mode,
+        SpatialBackendKind::SafBinaural | SpatialBackendKind::WindowsSpatialAudio
+    ) {
+        ui.horizontal(|ui| {
+            ui.label("Head orientation");
+            egui::ComboBox::from_id_salt("head-source")
+                .selected_text(settings.head_source.label())
+                .show_ui(ui, |ui| {
+                    for source in crate::head_tracking::HeadSource::ALL {
+                        ui.add_enabled_ui(
+                            source != crate::head_tracking::HeadSource::AirPods
+                                || cfg!(target_os = "macos"),
+                            |ui| {
+                                ui.selectable_value(
+                                    &mut settings.head_source,
+                                    source,
+                                    source.label(),
+                                );
+                            },
+                        );
+                    }
+                });
+        });
+        let mut angles = head.pose.euler();
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            for (index, label) in ["Yaw", "Pitch", "Roll"].into_iter().enumerate() {
+                ui.label(label);
+                let limit = if index == 1 { 85.0 } else { 180.0 };
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut angles[index])
+                            .speed(0.5)
+                            .range(-limit..=limit)
+                            .suffix("°"),
+                    )
+                    .changed();
+            }
+        });
+        let (rect, response) = ui.allocate_exact_size(egui::vec2(370.0, 54.0), egui::Sense::drag());
+        ui.painter().rect_filled(rect, 4.0, theme::SURFACE);
+        ui.painter().text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            "Drag here to turn your head",
+            egui::FontId::proportional(12.0),
+            theme::MUTED,
+        );
+        if response.dragged() {
+            let delta = ui.input(|input| input.pointer.delta());
+            angles[0] -= delta.x * 0.35;
+            angles[1] = (angles[1] - delta.y * 0.35).clamp(-85.0, 85.0);
+            changed = true;
+        }
+        if changed {
+            manual = Some(angles);
+            settings.head_source = crate::head_tracking::HeadSource::Manual;
+        }
+        recenter = ui.button("Recenter").clicked();
+        ui.label(head.status.label());
+    } else {
+        ui.label("Head orientation is controlled by the system spatializer.");
+    }
+    (manual, recenter)
+}
+
+/// How many rows of a managed folder the settings panel shows at once.
+///
+/// A managed folder has no upper bound — one row per file, each costing a full
+/// interactive height — so these two lists are the one part of the panel that
+/// can outgrow any screen. Four rows read as a list rather than as a stack of
+/// buttons, and the cap is computed from the style rather than written in
+/// pixels so it follows the theme instead of drifting from it. That also
+/// leaves a sliver of the fifth row showing, which is the cheapest way to say
+/// there is more below.
+const CATALOG_ROWS_SHOWN: f32 = 4.0;
+
+/// Draw one managed folder as a bounded list, and report the file that was
+/// clicked and the one under the pointer.
+///
+/// `shown` is the row this list last scrolled to, and it is what keeps
+/// bringing the selection into view a one-shot rather than a scroll position
+/// the panel re-asserts every frame. It is cleared when the selection is not
+/// one of the rows, so a file that comes back — reimported, or dropped into
+/// the folder again — is scrolled to instead of being taken for already shown.
+fn draw_catalog_files(
+    ui: &mut egui::Ui,
+    catalog: &crate::file_catalog::Catalog,
+    in_use: Option<&str>,
+    selected: &Path,
+    shown: &mut Option<PathBuf>,
+) -> (Option<PathBuf>, Option<PathBuf>) {
+    let row = ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
+    let bring_into_view = shown.as_deref() != Some(selected);
+    let (mut clicked, mut hovered, mut present) = (None, None, false);
+    egui::ScrollArea::vertical()
+        .id_salt(("catalog-files", catalog.kind.slug))
+        .max_height(row * CATALOG_ROWS_SHOWN)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            for file in &catalog.files {
+                let full_path = catalog.root.join(&file.path);
+                let is_selected = selected == full_path;
+                let active = in_use.is_some_and(|path| Path::new(path) == full_path);
+                let response = ui.add_enabled(
+                    file.selectable(),
+                    egui::Button::selectable(
+                        is_selected,
+                        format!("{} · {}", file.path.display(), file.display_status(active)),
+                    ),
+                );
+                // Only a row that can be chosen can be asked about; one still
+                // importing has no settled file to read.
+                if file.selectable() && response.hovered() {
+                    hovered = Some(full_path.clone());
+                }
+                if is_selected {
+                    present = true;
+                    if bring_into_view {
+                        // Minimal scrolling: a row already on screen stays
+                        // where it is rather than being jerked to the middle.
+                        response.scroll_to_me(None);
+                    }
+                }
+                if response.clicked() {
+                    clicked = Some(full_path);
+                }
+            }
+        });
+    *shown = present.then(|| selected.to_path_buf());
+    (clicked, hovered)
 }
 
 /// The name a profile goes by on screen. The folder is one line above it and the
@@ -5622,6 +5850,43 @@ Filter 10: ON WAT Fc 500 Hz Gain 1 dB Q 1
         ));
     }
 
+    /// The provenance line is the only record left that the knobs were ever
+    /// separate from the file, so it has to be a comment both parsers skip:
+    /// carrying it must not change one thing about what the file says.
+    #[test]
+    fn a_staged_profile_carries_its_provenance_without_changing_what_it_says() {
+        use crate::hptf_profile::{Adjustment, Profile};
+        let adjustment = Adjustment {
+            bass_db: 2.5,
+            tilt_db_per_octave: -1.0,
+        };
+        let tuned =
+            Profile::parse("Preamp: -3.0 dB\nFilter 1: ON PK Fc 120 Hz Gain 4.0 dB Q 1.10\n")
+                .unwrap()
+                .with(adjustment)
+                .unwrap();
+        let (directory, file) =
+            stage_tuned_profile(&tuned, "/hptf/Sony_MDR-MV1.txt", adjustment).unwrap();
+
+        assert_eq!(
+            file.file_name().and_then(std::ffi::OsStr::to_str),
+            Some("Sony_MDR-MV1 (bass +2.5 dB, tilt -1.00 dB per octave).txt")
+        );
+        let written = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(
+            written.lines().next(),
+            Some("# Sony_MDR-MV1.txt with bass +2.5 dB, tilt -1.00 dB per octave")
+        );
+        // Read back with that line still on it: preamp and every band the
+        // same, which is what makes it provenance rather than content.
+        assert_eq!(tuned.disagreement(&Profile::parse(&written).unwrap()), None);
+
+        // The file lives exactly as long as the directory does, which is why
+        // the directory is handed back beside it rather than dropped here.
+        drop(directory);
+        assert!(!file.exists());
+    }
+
     #[test]
     fn a_saved_profile_is_named_after_the_file_and_what_was_done_to_it() {
         use crate::hptf_profile::Adjustment;
@@ -5648,6 +5913,140 @@ Filter 10: ON WAT Fc 500 Hz Gain 1 dB Q 1
         // as the same kind of thing beside a "-1.0".
         assert!(adjustment_summary(bass).starts_with("bass +"));
         assert!(adjustment_summary(Adjustment::default()).is_empty());
+    }
+
+    /// Build a folder listing of `count` selectable files.
+    fn folder_of(count: usize) -> crate::file_catalog::Catalog {
+        let mut catalog =
+            crate::file_catalog::Catalog::new(crate::file_catalog::HPTF, PathBuf::from("/hptf"));
+        catalog.files = (0..count)
+            .map(|index| crate::file_catalog::Entry {
+                path: PathBuf::from(format!("profile-{index}.txt")),
+                sha256: None,
+                status: "unverified".to_owned(),
+            })
+            .collect();
+        catalog
+    }
+
+    /// Draw one folder listing and hand back the height it took and the row it
+    /// remembered. Twice, because a scroll area sizes itself from the content
+    /// it measured on the previous pass.
+    fn drawn_list(
+        catalog: &crate::file_catalog::Catalog,
+        selected: &Path,
+    ) -> (f32, Option<PathBuf>, egui::style::Spacing) {
+        let context = egui::Context::default();
+        let mut shown = None;
+        let (mut height, mut spacing) = (0.0, egui::style::Spacing::default());
+        for _ in 0..2 {
+            shown = None;
+            context
+                .run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(390.0, 2000.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        spacing = ui.spacing().clone();
+                        height = ui
+                            .scope(|ui| {
+                                draw_catalog_files(ui, catalog, None, selected, &mut shown);
+                            })
+                            .response
+                            .rect
+                            .height();
+                    },
+                )
+                .drop_without_applying_deltas();
+        }
+        (height, shown, spacing)
+    }
+
+    /// The one thing a managed folder cannot promise is how much of it there
+    /// is, so the panel decides how much of it it shows. Without this the two
+    /// file lists are the only part of the window whose height has no bound at
+    /// all, and a folder of profiles pushes everything under it off the screen.
+    /// The pages are chosen by the playback mode, and the remembered page is
+    /// not corrected when the mode changes — so every mode has to be able to
+    /// answer a page belonging to some other mode.
+    #[test]
+    fn every_mode_opens_on_a_page_it_actually_has() {
+        const EVERY: [OutputPage; 4] = [
+            OutputPage::Speakers,
+            OutputPage::Hrtf,
+            OutputPage::Headphones,
+            OutputPage::Head,
+        ];
+        for mode in SpatialBackendKind::ALL.map(SpatialBackendKind::resolved) {
+            let pages = OutputPage::of(mode);
+            assert!(!pages.is_empty(), "{mode:?} has no page to draw");
+            for remembered in EVERY {
+                assert!(
+                    pages.contains(&remembered.resolve(mode)),
+                    "{mode:?} resolved {remembered:?} to a page it does not have"
+                );
+            }
+            // A page this mode does have is kept, which is what lets it
+            // survive a round trip through another mode.
+            for &page in pages {
+                assert_eq!(page.resolve(mode), page);
+            }
+        }
+        // The starting value is deliberately not one of the binaural pages, so
+        // a binaural session opens on the first of its own rather than on
+        // whichever page the two modes happen to share.
+        assert_eq!(
+            OutputPage::Speakers.resolve(SpatialBackendKind::SafBinaural),
+            OutputPage::Hrtf
+        );
+    }
+
+    #[test]
+    fn a_folder_list_stops_growing_at_the_rows_the_panel_shows() {
+        let (three, _, spacing) = drawn_list(&folder_of(3), Path::new(""));
+        let row = spacing.interact_size.y + spacing.item_spacing.y;
+        let cap = row * CATALOG_ROWS_SHOWN;
+
+        // A short folder is bounded, not padded: the cap is a ceiling and the
+        // panel keeps the space a small folder does not need.
+        assert!(
+            three < cap,
+            "three files took {three} of a {cap} cap; the list is being padded out"
+        );
+
+        // Past the ceiling the list stops growing, and goes on not growing.
+        let (forty, _, _) = drawn_list(&folder_of(40), Path::new(""));
+        let (four_hundred, _, _) = drawn_list(&folder_of(400), Path::new(""));
+        assert!(
+            forty <= cap + 0.5,
+            "forty files took {forty}, past the {cap} cap"
+        );
+        assert!(
+            (forty - four_hundred).abs() < 0.5,
+            "{forty} for forty files and {four_hundred} for four hundred: the list still grows"
+        );
+    }
+
+    /// The cap can hold the chosen file off screen, so the list scrolls to it —
+    /// once. What makes it once is the remembered row, and remembering a row
+    /// the folder does not have would leave that file unscrolled-to when it
+    /// arrived, which is exactly the case the save flow lands in.
+    #[test]
+    fn a_folder_list_remembers_only_a_selection_it_could_show() {
+        let folder = folder_of(40);
+        let (_, shown, _) = drawn_list(&folder, Path::new("/hptf/profile-30.txt"));
+        assert_eq!(shown.as_deref(), Some(Path::new("/hptf/profile-30.txt")));
+
+        // Nothing selected, and a selection this folder does not hold, are the
+        // same answer: there was no row to bring into view.
+        let (_, shown, _) = drawn_list(&folder, Path::new(""));
+        assert_eq!(shown, None);
+        let (_, shown, _) = drawn_list(&folder, Path::new("/hptf/not-here.txt"));
+        assert_eq!(shown, None);
     }
 
     #[test]
