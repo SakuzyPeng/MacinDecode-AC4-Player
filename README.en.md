@@ -133,6 +133,12 @@ where they are. Neither is a smaller copy of the other.
 Switch under **Audio settings**. Picking the wrong one costs nothing — mode changes are applied
 live and do not interrupt decoding of the current track.
 
+The mode sits at the top of the window and a row of pages sits under it, **and the mode decides
+which pages there are**: `Speakers` / `Head` for system spatial audio, `HRTF` / `Headphones` /
+`Head` for SAF binaural, and `Head` alone for Windows object passthrough. Paging is not only about
+being shorter — the row stays above the content, so no amount of page can push the way out of that
+page off the screen.
+
 | Mode | Available on | What it does |
 | --- | --- | --- |
 | **Automatic** (default) | all | Object passthrough on Windows, system spatial audio on macOS |
