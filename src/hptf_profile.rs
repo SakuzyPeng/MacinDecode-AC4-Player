@@ -529,14 +529,7 @@ impl Curve {
     /// A biquad's response depends on the rate it was designed at, so a curve is
     /// only the profile's curve for the rate the output is running; the caller
     /// keys its cache on both.
-    #[cfg_attr(
-        not(macinrender_output),
-        allow(
-            dead_code,
-            reason = "the panel parses the text itself, so that both readings get \
-                      the same bytes; only the renderer-gated tests read by path"
-        )
-    )]
+    #[cfg(all(test, macinrender_output))]
     pub fn read(path: &str, rate: u32) -> Result<Self, String> {
         let text = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
         Ok(Self::of(&Profile::parse(&text)?, rate))

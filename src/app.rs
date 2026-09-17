@@ -1601,7 +1601,12 @@ impl PlayerApp {
                 }
             }
         }
-        if let Some((files, imported)) = self.hptf.poll() {
+        let hptf_update = self.hptf.poll();
+        // The catalog runs one operation at a time. Release that operation's
+        // staging directory when it ends, including a failed import or worker
+        // spawn, so a later ordinary import cannot inherit its save marker.
+        let saved = !self.hptf.busy() && self.hptf_saving.take().is_some();
+        if let Some((files, imported)) = hptf_update {
             self.library
                 .save_file_index(crate::file_catalog::HPTF, files);
             // A save arrives here like any other import. Taking the staging
@@ -1609,7 +1614,6 @@ impl PlayerApp {
             // have to come off in the same settings change that selects the
             // file they are now baked into — otherwise a frame of the new
             // profile would run with the adjustment applied twice.
-            let saved = self.hptf_saving.take().is_some();
             if let Some(path) = imported {
                 if let Some(path) = path.to_str() {
                     let mut settings = self.output.settings().clone();
