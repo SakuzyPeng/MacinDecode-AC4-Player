@@ -36,6 +36,11 @@ Audio settings 的内容按**播放模式**分页，页签由 `OutputPage::of` �
 就用它，没有就用该模式的第一页。因此绕到别的模式再回来，原来那一页还在。初值取 `Speakers`
 ——它不属于双耳的任何一页，于是双耳会话开在自己的第一页而不是两种模式碰巧共有的那一页。
 
+`Headphones` 一页本身按「选 → 调 → 看结果」再分三段（`draw_hptf_chooser` /
+`draw_hptf_knobs` / `draw_hptf_response`），这也是三者相互依赖的顺序：ghost 画哪一份由选择页
+报出的悬停行决定，曲线画什么由旋钮决定。写盘那一步是 `stage_tuned_profile`，不碰任何应用状态，
+因此那条 `#` 来源注释与文件名可以脱离 GUI 直接测。
+
 ## 耳机补偿（HpTF）
 
 载入 AutoEq 的 `ParametricEQ.txt`，由渲染器把它设计成双二阶级联，施加在交给耳机的两声道上。

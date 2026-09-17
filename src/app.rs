@@ -1846,18 +1846,30 @@ impl PlayerApp {
         }
     }
 
-    /// The headphones page: the compensation profile, the two knobs on top of
-    /// it, and the response all three add up to.
-    #[allow(
-        clippy::too_many_lines,
-        reason = "one profile read once, and every consequence of it drawn from that one reading"
-    )]
+    /// The headphones page: which profile, the two knobs on top of it, and
+    /// everything that follows from the two — in that order, because that is
+    /// the order in which each answer depends on the one before it.
     fn draw_headphones_page(
         &mut self,
         ui: &mut egui::Ui,
         settings: &mut OutputSettings,
         context: &egui::Context,
     ) {
+        let hovered = self.draw_hptf_chooser(ui, settings, context);
+        let save_requested = draw_hptf_knobs(ui, settings);
+        self.draw_hptf_response(ui, settings, hovered.as_deref(), save_requested, context);
+    }
+
+    /// Which profile, out of the managed folder.
+    ///
+    /// Reports the row under the pointer, which is the profile the response
+    /// half draws as a ghost behind the chosen one.
+    fn draw_hptf_chooser(
+        &mut self,
+        ui: &mut egui::Ui,
+        settings: &mut OutputSettings,
+        context: &egui::Context,
+    ) -> Option<String> {
         // Name the file and nothing else. A ParametricEQ profile
         // carries no target or measurement provenance, so the
         // player cannot tell what a given one equalises towards
@@ -1910,67 +1922,20 @@ impl PlayerApp {
                     Some("This renderer requires a Unicode profile path".into());
             }
         }
-        ui.checkbox(
-            &mut settings.hptf_auto_trim,
-            "Trim further if the curve still peaks above 0 dB",
-        )
-        .on_hover_text(
-            "Off uses the profile's own Preamp line verbatim. This bounds the frequency response, not transient peaks.",
-        );
-        // Two knobs, and only two. A row of biquads to
-        // sculpt with would argue against every other
-        // decision in an inspection tool; two named,
-        // checkable controls do not.
-        let mut save_requested = false;
-        ui.add_enabled_ui(!settings.hptf.is_empty(), |ui| {
-            ui.add(
-                egui::Slider::new(
-                    &mut settings.hptf_bass_db,
-                    -crate::hptf_profile::BASS_LIMIT_DB
-                        ..=crate::hptf_profile::BASS_LIMIT_DB,
-                )
-                .text("Bass")
-                .suffix(" dB")
-                .fixed_decimals(1),
-            )
-            .on_hover_text(
-                "A low shelf at 105 Hz, Q 0.70 — the shape behind AutoEq's own --bass-boost, so +6 dB on a bass-free profile gives the published preset rather than something like it.",
-            );
-            ui.add(
-                egui::Slider::new(
-                    &mut settings.hptf_tilt_db,
-                    -crate::hptf_profile::TILT_LIMIT_DB
-                        ..=crate::hptf_profile::TILT_LIMIT_DB,
-                )
-                .text("Tilt")
-                .suffix(" dB/oct")
-                .fixed_decimals(2),
-            )
-            .on_hover_text(format!(
-                "A straight slope turning about {:.0} Hz, held within a quarter of a decibel of straight across 20 Hz–20 kHz. A diffuse-field target sits roughly -1 dB/oct from a Harman one.",
-                crate::hptf_profile::TILT_PIVOT_HZ
-            ));
-            let moved =
-                settings.hptf_bass_db != 0.0 || settings.hptf_tilt_db != 0.0;
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(moved, egui::Button::new("Reset"))
-                    .clicked()
-                {
-                    settings.hptf_bass_db = 0.0;
-                    settings.hptf_tilt_db = 0.0;
-                }
-                if ui
-                    .add_enabled(moved, egui::Button::new("Save as profile…"))
-                    .on_hover_text(
-                        "Writes the profile with the adjustment baked in into the hptf/ folder, selects it and returns the knobs to rest. A setting worth keeping becomes an ordinary, portable profile rather than a number in settings.json.",
-                    )
-                    .clicked()
-                {
-                    save_requested = true;
-                }
-            });
-        });
+        hovered
+    }
+
+    /// Everything that follows from the profile and the knobs: the curve, the
+    /// lines drawn behind it, whatever disagrees about it, and what the
+    /// renderer reports about the one it is actually running.
+    fn draw_hptf_response(
+        &mut self,
+        ui: &mut egui::Ui,
+        settings: &OutputSettings,
+        hovered: Option<&str>,
+        save_requested: bool,
+        context: &egui::Context,
+    ) {
         let adjustment = settings.hptf_adjustment();
         let hptf = self.output.hptf_readout();
         // Running means this profile *and* these knobs: a
@@ -1983,7 +1948,7 @@ impl PlayerApp {
         // that is the curve to draw before one exists.
         let rate = if hptf.rate == 0 { 48_000 } else { hptf.rate };
         let profile = settings.hptf.clone();
-        let ghost_path = hptf_ghost(hovered.as_deref(), &profile);
+        let ghost_path = hptf_ghost(hovered, &profile);
         let drawn = hptf_curve(&mut self.hptf_drawing, &profile, rate, adjustment);
         // A ghost answers "what does that file do", so it is
         // drawn as written — the knobs belong to the chain,
@@ -2022,31 +1987,13 @@ impl PlayerApp {
             );
         }
         if let Some(path) = ghost_path {
-            // Which line is which. Nothing else in the panel
-            // names the profile being pointed at, and the
-            // pointer is about to leave it.
-            if let Some(Err(error)) = ghost.map(|drawing| &drawing.curve) {
-                ui.colored_label(theme::MUTED, format!("{}: {error}", profile_name(path)));
-            } else {
-                ui.horizontal_wrapped(|ui| {
-                    if drawn_curve.is_some() {
-                        ui.colored_label(theme::ACCENT, profile_name(&profile));
-                        ui.label("vs");
-                    }
-                    // The heading above describes the drawn
-                    // line alone. When the output is trimming
-                    // that one, the two are not the same kind
-                    // of curve, and the legend has to say so.
-                    ui.colored_label(
-                        theme::MUTED,
-                        if running && hptf.auto_trim_db != 0.0 {
-                            format!("{} · as written", profile_name(path))
-                        } else {
-                            profile_name(path)
-                        },
-                    );
-                });
-            }
+            draw_ghost_legend(
+                ui,
+                ghost,
+                path,
+                drawn_curve.is_some().then_some(profile.as_str()),
+                running && hptf.auto_trim_db != 0.0,
+            );
         }
         // A profile nobody is pointing at gets no second
         // line; one being pointed at says so quietly, the
@@ -2070,36 +2017,7 @@ impl PlayerApp {
             ui.colored_label(theme::WARNING, note);
         }
         if running {
-            // Count the adjustment apart from the file, so
-            // that the file and the listener never have to
-            // be told apart afterwards.
-            let added = u32::try_from(adjustment.bands().len()).unwrap_or_default();
-            ui.label(format!(
-                "In use · {} · preamp {:+.1} dB{}",
-                if added == 0 {
-                    format!("{} bands", hptf.bands)
-                } else {
-                    format!(
-                        "{} bands + {added} adjustment",
-                        hptf.bands.saturating_sub(added)
-                    )
-                },
-                hptf.preamp_db,
-                if hptf.auto_trim_db == 0.0 {
-                    String::new()
-                } else {
-                    format!(" · trimmed {:+.1} dB", hptf.auto_trim_db)
-                }
-            ));
-            if hptf.max_response_db > 0.0 {
-                ui.colored_label(
-                    theme::WARNING,
-                    format!(
-                        "Peaks {:+.1} dB above full scale; the output ceiling will pull it back.",
-                        hptf.max_response_db
-                    ),
-                );
-            }
+            draw_hptf_readout(ui, &hptf, adjustment);
         } else if !settings.hptf.is_empty() {
             ui.label("Selected; not yet running.");
         }
@@ -2108,27 +2026,7 @@ impl PlayerApp {
                 .ok_or_else(|| "no profile is selected".to_owned())
                 .and_then(|drawing| drawing.profile.as_ref().map_err(Clone::clone))
                 .and_then(|base| base.with(adjustment))
-                .and_then(|tuned| {
-                    let directory = tempfile::tempdir().map_err(|e| e.to_string())?;
-                    let file = directory
-                        .path()
-                        .join(adjusted_profile_name(&profile, adjustment));
-                    // The provenance goes in a comment both
-                    // parsers skip. The knobs stop being
-                    // separate here, and that line is the
-                    // only thing that will still say so.
-                    std::fs::write(
-                        &file,
-                        format!(
-                            "# {} with {}\n{}",
-                            profile_name(&profile),
-                            adjustment_summary(adjustment),
-                            tuned.to_parametric_eq()
-                        ),
-                    )
-                    .map_err(|e| e.to_string())?;
-                    Ok((directory, file))
-                });
+                .and_then(|tuned| stage_tuned_profile(&tuned, &profile, adjustment));
             match staged {
                 Ok((directory, file)) => {
                     self.hptf_saving = Some(directory);
@@ -3688,6 +3586,178 @@ enum StatusKind {
     Idle,
     Ready,
     Warning,
+}
+
+/// The two knobs that sit on top of a profile, and the trim under them.
+///
+/// Two knobs, and only two. A row of biquads to sculpt with would argue
+/// against every other decision in an inspection tool; two named, checkable
+/// controls do not. Reports whether the listener asked for what they add to
+/// be written out as a profile of its own.
+fn draw_hptf_knobs(ui: &mut egui::Ui, settings: &mut OutputSettings) -> bool {
+    ui.checkbox(
+        &mut settings.hptf_auto_trim,
+        "Trim further if the curve still peaks above 0 dB",
+    )
+    .on_hover_text(
+        "Off uses the profile's own Preamp line verbatim. This bounds the frequency response, not transient peaks.",
+    );
+    // Two knobs, and only two. A row of biquads to
+    // sculpt with would argue against every other
+    // decision in an inspection tool; two named,
+    // checkable controls do not.
+    let mut save_requested = false;
+    ui.add_enabled_ui(!settings.hptf.is_empty(), |ui| {
+        ui.add(
+            egui::Slider::new(
+                &mut settings.hptf_bass_db,
+                -crate::hptf_profile::BASS_LIMIT_DB
+                    ..=crate::hptf_profile::BASS_LIMIT_DB,
+            )
+            .text("Bass")
+            .suffix(" dB")
+            .fixed_decimals(1),
+        )
+        .on_hover_text(
+            "A low shelf at 105 Hz, Q 0.70 — the shape behind AutoEq's own --bass-boost, so +6 dB on a bass-free profile gives the published preset rather than something like it.",
+        );
+        ui.add(
+            egui::Slider::new(
+                &mut settings.hptf_tilt_db,
+                -crate::hptf_profile::TILT_LIMIT_DB
+                    ..=crate::hptf_profile::TILT_LIMIT_DB,
+            )
+            .text("Tilt")
+            .suffix(" dB/oct")
+            .fixed_decimals(2),
+        )
+        .on_hover_text(format!(
+            "A straight slope turning about {:.0} Hz, held within a quarter of a decibel of straight across 20 Hz–20 kHz. A diffuse-field target sits roughly -1 dB/oct from a Harman one.",
+            crate::hptf_profile::TILT_PIVOT_HZ
+        ));
+        let moved =
+            settings.hptf_bass_db != 0.0 || settings.hptf_tilt_db != 0.0;
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(moved, egui::Button::new("Reset"))
+                .clicked()
+            {
+                settings.hptf_bass_db = 0.0;
+                settings.hptf_tilt_db = 0.0;
+            }
+            if ui
+                .add_enabled(moved, egui::Button::new("Save as profile…"))
+                .on_hover_text(
+                    "Writes the profile with the adjustment baked in into the hptf/ folder, selects it and returns the knobs to rest. A setting worth keeping becomes an ordinary, portable profile rather than a number in settings.json.",
+                )
+                .clicked()
+            {
+                save_requested = true;
+            }
+        });
+    });
+    save_requested
+}
+
+/// Name the two lines when a second profile is drawn behind the chosen one.
+///
+/// Nothing else on the page names the profile being pointed at, and the
+/// pointer is about to leave it. `drawn` is the chosen profile when it has a
+/// line of its own, and `as_written` says the two are not the same kind of
+/// curve, because the output is trimming the chosen one and never a ghost.
+fn draw_ghost_legend(
+    ui: &mut egui::Ui,
+    ghost: Option<&HptfDrawing>,
+    path: &str,
+    drawn: Option<&str>,
+    as_written: bool,
+) {
+    if let Some(Err(error)) = ghost.map(|drawing| &drawing.curve) {
+        ui.colored_label(theme::MUTED, format!("{}: {error}", profile_name(path)));
+    } else {
+        ui.horizontal_wrapped(|ui| {
+            if let Some(drawn) = drawn {
+                ui.colored_label(theme::ACCENT, profile_name(drawn));
+                ui.label("vs");
+            }
+            ui.colored_label(
+                theme::MUTED,
+                if as_written {
+                    format!("{} · as written", profile_name(path))
+                } else {
+                    profile_name(path)
+                },
+            );
+        });
+    }
+}
+
+/// What the renderer reports about the profile it is running — the only
+/// numbers on the page that are its rather than ours.
+fn draw_hptf_readout(
+    ui: &mut egui::Ui,
+    hptf: &crate::backend::HptfReadout,
+    adjustment: crate::hptf_profile::Adjustment,
+) {
+    // Count the adjustment apart from the file, so
+    // that the file and the listener never have to
+    // be told apart afterwards.
+    let added = u32::try_from(adjustment.bands().len()).unwrap_or_default();
+    ui.label(format!(
+        "In use · {} · preamp {:+.1} dB{}",
+        if added == 0 {
+            format!("{} bands", hptf.bands)
+        } else {
+            format!(
+                "{} bands + {added} adjustment",
+                hptf.bands.saturating_sub(added)
+            )
+        },
+        hptf.preamp_db,
+        if hptf.auto_trim_db == 0.0 {
+            String::new()
+        } else {
+            format!(" · trimmed {:+.1} dB", hptf.auto_trim_db)
+        }
+    ));
+    if hptf.max_response_db > 0.0 {
+        ui.colored_label(
+            theme::WARNING,
+            format!(
+                "Peaks {:+.1} dB above full scale; the output ceiling will pull it back.",
+                hptf.max_response_db
+            ),
+        );
+    }
+}
+
+/// Write a tuned profile into a staging directory for the catalog to import.
+///
+/// The provenance goes in a comment both parsers skip. The knobs stop being
+/// separate here, and that line is the only thing that will still say so.
+///
+/// Reports the directory alongside the file, because the file only lives as
+/// long as it does: the caller holds it until the import has read it.
+fn stage_tuned_profile(
+    tuned: &crate::hptf_profile::Profile,
+    source: &str,
+    adjustment: crate::hptf_profile::Adjustment,
+) -> Result<(tempfile::TempDir, PathBuf), String> {
+    let directory = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let file = directory
+        .path()
+        .join(adjusted_profile_name(source, adjustment));
+    std::fs::write(
+        &file,
+        format!(
+            "# {} with {}\n{}",
+            profile_name(source),
+            adjustment_summary(adjustment),
+            tuned.to_parametric_eq()
+        ),
+    )
+    .map_err(|e| e.to_string())?;
+    Ok((directory, file))
 }
 
 /// One page of the audio settings.
@@ -5768,6 +5838,43 @@ Filter 10: ON WAT Fc 500 Hz Gain 1 dB Q 1
             -21.0,
             hptf_axis([None, Some(&quiet), Some(&loud)])
         ));
+    }
+
+    /// The provenance line is the only record left that the knobs were ever
+    /// separate from the file, so it has to be a comment both parsers skip:
+    /// carrying it must not change one thing about what the file says.
+    #[test]
+    fn a_staged_profile_carries_its_provenance_without_changing_what_it_says() {
+        use crate::hptf_profile::{Adjustment, Profile};
+        let adjustment = Adjustment {
+            bass_db: 2.5,
+            tilt_db_per_octave: -1.0,
+        };
+        let tuned =
+            Profile::parse("Preamp: -3.0 dB\nFilter 1: ON PK Fc 120 Hz Gain 4.0 dB Q 1.10\n")
+                .unwrap()
+                .with(adjustment)
+                .unwrap();
+        let (directory, file) =
+            stage_tuned_profile(&tuned, "/hptf/Sony_MDR-MV1.txt", adjustment).unwrap();
+
+        assert_eq!(
+            file.file_name().and_then(std::ffi::OsStr::to_str),
+            Some("Sony_MDR-MV1 (bass +2.5 dB, tilt -1.00 dB per octave).txt")
+        );
+        let written = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(
+            written.lines().next(),
+            Some("# Sony_MDR-MV1.txt with bass +2.5 dB, tilt -1.00 dB per octave")
+        );
+        // Read back with that line still on it: preamp and every band the
+        // same, which is what makes it provenance rather than content.
+        assert_eq!(tuned.disagreement(&Profile::parse(&written).unwrap()), None);
+
+        // The file lives exactly as long as the directory does, which is why
+        // the directory is handed back beside it rather than dropped here.
+        drop(directory);
+        assert!(!file.exists());
     }
 
     #[test]
