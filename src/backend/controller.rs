@@ -271,6 +271,15 @@ impl SpatialOutputController {
         }
         #[cfg(macinrender_output)]
         if self.uses_macinrender()
+            && self.config.is_none()
+            && self.settings.needs_rebuild(&settings)
+        {
+            // A retained, paused session is not a same-format target once its
+            // output mode/layout/device changes between tracks.
+            self.reset();
+        }
+        #[cfg(macinrender_output)]
+        if self.uses_macinrender()
             && self.settings.renderer() != settings.renderer()
             && let Some(runtime) = &self.runtime
         {
@@ -1234,6 +1243,17 @@ mod tests {
         }
         assert!(control.status().unwrap().epoch > old_epoch);
         assert!(output.is_configured_for_playback(42, 1));
+        // Changing format while the next decoder opens must release the held
+        // output, rather than requesting an incompatible same-format hot swap.
+        output.suspend_for_source_change();
+        let desired = OutputSettings {
+            mode: SpatialBackendKind::SystemSpatial,
+            ..output.settings().clone()
+        };
+        output.hot_settings(desired.clone());
+        assert_eq!(output.take_settings_result(), Some(Ok(())));
+        assert_eq!(output.settings(), &desired);
+        assert!(output.runtime.is_none());
     }
 
     #[test]
