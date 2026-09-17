@@ -48,7 +48,8 @@ jobs:
           rustup target add "$TARGET"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          # OpenBLAS SDKs have their own source/compiler/configuration key.
+          # Cargo/native outputs still follow the renderer revision. Keep the
+          # legacy paths so existing archives can seed the independent SDK cache.
           key: ${{ matrix.target }}-static-v1-xcode26.3-${{ hashFiles('crates/macinrender/native/CMakeLists.txt') }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-workspace-crates: true
@@ -58,10 +59,27 @@ jobs:
             .ci-inputs/native-dependencies
             .ci-inputs/macinrender
             .ci-inputs/openblas-static
+      - name: Compute Windows OpenBLAS SDK cache identity
+        if: runner.os == 'Windows'
+        id: openblas_sdk
+        run: python scripts/prepare_openblas.py --cache-info
+      - name: Restore Windows OpenBLAS SDK
+        if: runner.os == 'Windows'
+        id: openblas_restore
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: ${{ matrix.target }}-${{ steps.openblas_sdk.outputs.key }}
+          path: ${{ steps.openblas_sdk.outputs.path }}
       - name: Prepare pinned native build tools and full decoder inputs
         run: |
           python -m pip install cmake==3.31.6 ninja==1.11.1.4
           python scripts/prepare_inputs.py
+      - name: Save verified Windows OpenBLAS SDK
+        if: runner.os == 'Windows' && steps.openblas_restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: ${{ matrix.target }}-${{ steps.openblas_sdk.outputs.key }}
+          path: ${{ steps.openblas_sdk.outputs.path }}
       - name: Format
         run: cargo fmt --all -- --check
       - name: Storage, SOFA and application tests

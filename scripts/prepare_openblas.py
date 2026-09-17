@@ -1,17 +1,18 @@
 """Build a checksum-pinned, MSVC-ABI OpenBLAS SDK with no redistributable DLLs."""
+import argparse
 import hashlib
 import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
-import sys
 import tarfile
 
 VERSION = "0.3.34"
 SOURCE_SHA = "cd7e129868320cc2d033afa920e31202dfe0b8066a5b66661900ccc0f197dfed"
 LLVM_VERSION = "21.1.8"
 LLVM_SHA = "7a5386c26497db1691f320121e5b113364dd0274b98e55f15f4dbc00c0450113"
+CMAKE_VERSION = "3.31.6"
 OPTIONS = {
     "CMAKE_BUILD_TYPE": "Release", "CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreaded",
     "MSVC_STATIC_CRT": "ON", "BUILD_STATIC_LIBS": "ON", "BUILD_SHARED_LIBS": "OFF",
@@ -50,14 +51,63 @@ def toolchain(llvm):
     return env, {"llvm": LLVM_VERSION, "msvc": vc.name, "windows_sdk": sdk_version}
 
 
+def build_spec(compiler):
+    return {"version": VERSION, "source_sha256": SOURCE_SHA, "llvm_sha256": LLVM_SHA,
+            "toolchain": compiler, "cmake": CMAKE_VERSION, "options": OPTIONS, "linkage": "static"}
+
+
+def build_key(spec):
+    # Preserve the existing on-disk key so the first independent CI cache can
+    # reuse an SDK restored from the older, combined Rust cache.
+    return hashlib.sha256(json.dumps(spec, sort_keys=True).encode()).hexdigest()[:16]
+
+
+def cache_info(root):
+    _, compiler = toolchain(root / ".ci-tools/static" / f"llvm-{LLVM_VERSION}")
+    key = build_key(build_spec(compiler))
+    probe = digest(root / "scripts/native/openblas_probe.c")
+    return {"key": f"openblas-sdk-v1-{key}-{probe}",
+            "path": f".ci-inputs/openblas-static/{key}"}
+
+
+def valid_sdk(install, spec, probe_sha):
+    try:
+        saved = json.loads((install / "build.json").read_text())
+        if not isinstance(saved, dict) or any(saved.get(name) != value for name, value in spec.items()):
+            return False
+        headers = install / "include/openblas"
+        return (all((headers / name).is_file() for name in ("cblas.h", "lapacke.h", "openblas_config.h"))
+                and saved.get("library_sha256") == digest(install / "lib/openblas.lib")
+                and saved.get("probe_sha256") == probe_sha
+                and isinstance(saved.get("numerical_probe"), dict)
+                and saved["numerical_probe"].get("ok") is True)
+    except (OSError, ValueError):
+        return False
+
+
 def prepare(root, download):
     from verify_runtime import pe_imports, require, verify_windows_imports
 
     cache = root / ".ci-tools/static"
+    llvm = cache / f"llvm-{LLVM_VERSION}"
+    env, compiler = toolchain(llvm)
+    spec = build_spec(compiler)
+    key = build_key(spec)
+    install = root / ".ci-inputs/openblas-static" / key
+    manifest = install / "build.json"
+    library = install / "lib/openblas.lib"
+    probe_source = root / "scripts/native/openblas_probe.c"
+    probe_sha = digest(probe_source)
+    if valid_sdk(install, spec, probe_sha):
+        print(f"Using verified cached static OpenBLAS {VERSION}: {library}", flush=True)
+        return settings(install)
+
+    # A restored SDK needs neither the LLVM distribution nor OpenBLAS sources.
+    # Download/extract build tools only after the SDK itself has missed validation.
+    print(f"Building static OpenBLAS {VERSION}: SDK cache unavailable or invalid", flush=True)
     cache.mkdir(parents=True, exist_ok=True)
     llvm_archive = cache / f"LLVM-{LLVM_VERSION}-win64.exe"
     download(f"https://github.com/llvm/llvm-project/releases/download/llvmorg-{LLVM_VERSION}/{llvm_archive.name}", llvm_archive, LLVM_SHA)
-    llvm = cache / f"llvm-{LLVM_VERSION}"
     if not (llvm / "bin/clang-cl.exe").is_file():
         seven = shutil.which("7z") or str(Path(os.environ["ProgramFiles"]) / "7-Zip/7z.exe")
         run([seven, "x", "-y", f"-o{llvm}", llvm_archive], stdout=subprocess.DEVNULL)
@@ -69,25 +119,13 @@ def prepare(root, download):
     if not (source / "CMakeLists.txt").is_file():
         with tarfile.open(archive) as tar:
             tar.extractall(cache, filter="data")
-    env, compiler = toolchain(llvm)
     # Keep ambient MSVC flags out of the pinned build. In particular, _CL_
     # cannot append flags to OpenBLAS assembly commands after their '--'.
     for variable in ("CL", "_CL_", "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "LIBRARY_PATH", "CFLAGS", "CXXFLAGS", "LDFLAGS"):
         env.pop(variable, None)
     cmake = shutil.which("cmake")
-    require(cmake is not None, "Install CMake 3.31.6")
-    require("cmake version 3.31.6" in run([cmake, "--version"], capture_output=True, text=True).stdout, "CMake 3.31.6 is required")
-    spec = {"version": VERSION, "source_sha256": SOURCE_SHA, "llvm_sha256": LLVM_SHA,
-            "toolchain": compiler, "cmake": "3.31.6", "options": OPTIONS, "linkage": "static"}
-    key = hashlib.sha256(json.dumps(spec, sort_keys=True).encode()).hexdigest()[:16]
-    install = root / ".ci-inputs/openblas-static" / key
-    manifest = install / "build.json"
-    library = install / "lib/openblas.lib"
-    probe_source = root / "scripts/native/openblas_probe.c"
-    if manifest.is_file() and library.is_file():
-        saved = json.loads(manifest.read_text())
-        if saved.get("library_sha256") == digest(library) and saved.get("probe_sha256") == digest(probe_source):
-            return settings(install)
+    require(cmake is not None, f"Install CMake {CMAKE_VERSION}")
+    require(f"cmake version {CMAKE_VERSION}" in run([cmake, "--version"], capture_output=True, text=True).stdout, f"CMake {CMAKE_VERSION} is required")
     build = root / "target/openblas-static" / key
     build.mkdir(parents=True, exist_ok=True)
     log = build / "build.log"
@@ -106,7 +144,7 @@ def prepare(root, download):
         result = run([probe], env=dict(env, OPENBLAS_NUM_THREADS="2"), text=True, capture_output=True, timeout=60)
         report = json.loads(result.stdout)
         require(report["ok"], "OpenBLAS numerical probe failed")
-        spec.update(library_sha256=digest(library), probe_sha256=digest(probe_source), numerical_probe=report)
+        spec.update(library_sha256=digest(library), probe_sha256=probe_sha, numerical_probe=report)
         manifest.write_text(json.dumps(spec, indent=2), encoding="utf-8")
         print(f"Verified static OpenBLAS {VERSION}: {library}", flush=True)
     except Exception as error:
@@ -127,3 +165,16 @@ def settings(install):
             "OPENBLAS_HEADER_PATH": str(install / "include/openblas"),
             "LAPACKE_HEADER_PATH": str(install / "include/openblas"),
             "OPENBLAS_BUILD_MANIFEST": str(install / "build.json")}
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--cache-info", action="store_true", required=True,
+                        help="emit the Windows SDK cache identity without downloading or building")
+    parser.parse_args()
+    info = cache_info(Path(__file__).resolve().parents[1])
+    print(json.dumps(info), flush=True)
+    if os.getenv("GITHUB_OUTPUT"):
+        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+            for name, value in info.items():
+                output.write(f"{name}={value}\n")

@@ -29,6 +29,17 @@ python3 scripts/package.py --target aarch64-apple-darwin
 
 PR、main 推送和手动执行使用同一 Windows x64 / macOS ARM64 矩阵，运行 workspace 测试、Clippy、打包回归、完整构建、窗口与安装生命周期检查。硬件和真实媒体测试仍按原文档单独运行，不用空输出测试替代实际听验。
 
+Windows OpenBLAS SDK 使用独立的 GitHub Actions 缓存。`prepare_openblas.py --cache-info` 在不下载 LLVM
+或源码的情况下读取 MSVC / Windows SDK 版本，与锁定的 OpenBLAS、LLVM、CMake、完整构建选项及数值探针
+一起生成缓存身份；它不包含 MacinRender 提交或 Cargo 依赖，因此更新渲染器不会连带重建 OpenBLAS。
+恢复只接受精确的 SDK 缓存键；使用前还要核对构建清单、库哈希、头文件和数值探针验证记录。命中后直接
+使用 SDK，不再下载或解包仅用于构建它的工具链和源码。缓存缺失或校验失败时才执行完整构建与数值验证。
+
+SDK 验证完成后立即保存独立缓存，不等待播放器测试、Release 构建或安装检查完成；分支上的重试也可复用
+该分支保存的 SDK，但仍遵循 GitHub 的分支缓存可见性规则。Cargo 缓存暂保留旧的附加目录列表，让已经存在
+的主线缓存能填充首次独立 SDK 缓存，避免迁移时再进行一次冷构建。之后即使 Cargo / 渲染器缓存失效，仍可
+单独恢复 SDK。
+
 Windows 打包回归还使用独立产品 GUID、注册表键和临时安装目录复现同版本重打包的 1638 错误，并验证旧标识迁移、同版本内容替换、同包重开、修复、跨版本升级、禁止降级和卸载。实际应用的 CI 生命周期检查另外覆盖同版本替换后的用户数据保留。静默安装测试不能替代交互界面的人工验收。
 
 应用在 macOS 使用 ad-hoc 签名，MSI/PKG 本轮未正式签名。PKG 只启用当前用户安装域，无安装脚本；MSI 只写当前用户安装记录。安装器不修改业务数据。
