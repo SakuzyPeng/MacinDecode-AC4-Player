@@ -172,7 +172,10 @@ live and do not interrupt decoding of the current track.
   folded in, so full scale is the top rule and you can see what it lifts and how much headroom is
   left. Point at another row in the list and that profile is drawn faintly behind the current one,
   as its own file reads — drawn only, never sent, so comparing two profiles cannot interrupt the
-  one you are listening to.
+  one you are listening to. Every profile is checked band for band against the renderer's own
+  reading of the same text the moment it is read — type, frequency, gain, Q and preamp — and the
+  panel says so if the two differ; nothing has to be playing, and the one under the pointer is
+  checked too.
   Which target a profile equalises towards is decided by the file and is not recorded in it, so the
   player shows only the file name and the bands and preamp actually running. Pair it with the
   reference field your SOFA was equalised to — a diffuse-field-equalised HRTF wants a

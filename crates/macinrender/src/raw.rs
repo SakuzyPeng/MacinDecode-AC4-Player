@@ -161,6 +161,33 @@ pub struct HptfConfig {
     pub reserved: u32,
     pub revision: u64,
 }
+/// One band of an editable cascade. `size` is the array stride, set on **every**
+/// element, which is how the renderer walks a caller-owned array it did not
+/// allocate. `kind` is `adm_hptf_band_type_t`; shelves carry `Q`, not slope `S`.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct HptfBand {
+    pub size: u32,
+    pub kind: i32,
+    pub enabled: i32,
+    pub reserved: u32,
+    pub fc_hz: f64,
+    pub gain_db: f64,
+    pub q: f64,
+}
+/// A complete, sample-rate-independent snapshot of a cascade. Nothing here is
+/// retained past the setter that reads it.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct HptfParameters {
+    pub size: u32,
+    pub band_count: u32,
+    pub bands: *const HptfBand,
+    pub preamp_db: f64,
+    pub preamp_mode: i32,
+    pub reserved: u32,
+    pub revision: u64,
+}
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct HptfInfo {

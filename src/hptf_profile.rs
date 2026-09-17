@@ -5,18 +5,21 @@
 //! and it exists for one reason: a profile is otherwise a filename, and a
 //! filename says nothing about what it does to the sound.
 //!
-//! Being independent is the point rather than a cost. Band count, preamp and the
-//! peak of the designed response are all reported back by the renderer, so
-//! `app::hptf_disagreement` can compare the two and say so when they differ —
-//! the same posture as `backend::state`'s cross-check against `ebur128`, where
-//! agreement with a separate implementation is what pins the arithmetic.
+//! Being independent is the point rather than a cost, because the two readings
+//! are checked against each other twice. [`Profile::disagreement`] compares this
+//! parse band for band against the renderer's own, which needs no output and so
+//! runs the moment a file is read; `app::hptf_disagreement` then compares the
+//! designed peak against a cascade that is actually running. Same posture as
+//! `backend::state`'s cross-check against `ebur128`: agreement with a separate
+//! implementation is what pins the arithmetic.
 //!
 //! Nothing here touches audio, the filesystem beyond one read, or any OS API.
 
 use std::f64::consts::PI;
 
 /// The renderer's cascade is a fixed-length POD so it can be published to the
-/// audio callback by value; bands past this never reach it.
+/// audio callback by value, and it refuses a profile asking for more rather
+/// than shortening one.
 const MAX_BANDS: usize = 32;
 /// `Q` for a filter line that omits it, matching the renderer's `k_default_q`.
 const DEFAULT_Q: f64 = 0.707;
@@ -29,7 +32,7 @@ pub const MAX_HZ: f64 = 20_000.0;
 const POINTS: usize = 960;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum BandType {
+pub enum BandType {
     Peaking,
     LowShelf,
     HighShelf,
@@ -58,11 +61,11 @@ impl BandType {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct Band {
-    kind: BandType,
-    fc: f64,
-    gain_db: f64,
-    q: f64,
+pub struct Band {
+    pub kind: BandType,
+    pub fc: f64,
+    pub gain_db: f64,
+    pub q: f64,
 }
 
 impl Band {
@@ -183,6 +186,9 @@ impl Profile {
                     .get(1)
                     .and_then(|value| value.parse::<f64>().ok())
                     .ok_or_else(|| format!("Preamp is not a number: {line}"))?;
+                if !profile.preamp_db.is_finite() {
+                    return Err(format!("Preamp must be a finite number: {line}"));
+                }
                 saw_any = true;
                 continue;
             }
@@ -232,8 +238,78 @@ impl Profile {
         if !saw_any {
             return Err("No Preamp or Filter line found".into());
         }
-        profile.bands.truncate(MAX_BANDS);
+        // The renderer refuses a cascade this long rather than shortening it, and
+        // a drawn curve for a file it will not accept is worse than an error.
+        if profile.bands.len() > MAX_BANDS {
+            return Err(format!(
+                "More than {MAX_BANDS} filters are enabled: {}",
+                profile.bands.len()
+            ));
+        }
         Ok(profile)
+    }
+
+    /// A cascade someone else parsed, so two readings of one file can be
+    /// compared as the same kind of thing. `bands` is the cascade — the bands
+    /// that are switched on — because that is what this side keeps and what
+    /// reaches the audio.
+    #[cfg_attr(
+        not(macinrender_output),
+        allow(
+            dead_code,
+            reason = "the only other parse of this format is the renderer's, and \
+                      there is no renderer to ask on a build without one"
+        )
+    )]
+    pub fn of_bands(preamp_db: f64, bands: Vec<Band>) -> Self {
+        Self { preamp_db, bands }
+    }
+
+    /// Where this reading of a profile and the renderer's differ.
+    ///
+    /// The renderer owns the authoritative parse, so a difference means the
+    /// picture is wrong, not the sound. Reported at the first difference and
+    /// named down to the band, because "they disagree" is not something a
+    /// person can act on and "filter 7's Q" is.
+    pub fn disagreement(&self, renderer: &Self) -> Option<String> {
+        // Both sides convert the same decimal text with a correctly rounded
+        // parse, so this tolerance is not for rounding — it is there so a future
+        // normalisation on either side shows up as itself rather than as noise.
+        const SAME: f64 = 1e-9;
+        if (self.preamp_db - renderer.preamp_db).abs() > SAME {
+            return Some(format!(
+                "Reading a preamp of {:+.3} dB, but the renderer reads {:+.3} dB.",
+                self.preamp_db, renderer.preamp_db
+            ));
+        }
+        if self.bands.len() != renderer.bands.len() {
+            return Some(format!(
+                "Reading {} enabled filters, but the renderer reads {}.",
+                self.bands.len(),
+                renderer.bands.len()
+            ));
+        }
+        for (index, (ours, theirs)) in self.bands.iter().zip(&renderer.bands).enumerate() {
+            let band = index + 1;
+            if ours.kind != theirs.kind {
+                return Some(format!(
+                    "Reading filter {band} as {:?}, but the renderer reads {:?}.",
+                    ours.kind, theirs.kind
+                ));
+            }
+            for (label, ours, theirs) in [
+                ("Fc", ours.fc, theirs.fc),
+                ("gain", ours.gain_db, theirs.gain_db),
+                ("Q", ours.q, theirs.q),
+            ] {
+                if (ours - theirs).abs() > SAME {
+                    return Some(format!(
+                        "Reading filter {band}'s {label} as {ours}, but the renderer reads {theirs}."
+                    ));
+                }
+            }
+        }
+        None
     }
 
     pub fn bands(&self) -> u32 {
@@ -278,6 +354,14 @@ impl Curve {
     /// A biquad's response depends on the rate it was designed at, so a curve is
     /// only the profile's curve for the rate the output is running; the caller
     /// keys its cache on both.
+    #[cfg_attr(
+        not(macinrender_output),
+        allow(
+            dead_code,
+            reason = "the panel parses the text itself, so that both readings get \
+                      the same bytes; only the renderer-gated tests read by path"
+        )
+    )]
     pub fn read(path: &str, rate: u32) -> Result<Self, String> {
         let text = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
         Ok(Self::of(&Profile::parse(&text)?, rate))
@@ -289,7 +373,7 @@ impl Curve {
         reason = "the sample index is a small integer, and a decibel readout for \
                   drawing does not need f64 range"
     )]
-    fn of(profile: &Profile, rate: u32) -> Self {
+    pub fn of(profile: &Profile, rate: u32) -> Self {
         let mut points = Vec::with_capacity(POINTS);
         let mut peak = (f64::NEG_INFINITY, MIN_HZ);
         for index in 0..POINTS {
@@ -460,6 +544,60 @@ Filter 10: ON HSC Fc 10000 Hz Gain -2.2 dB Q 0.70
         assert!(Profile::parse("Filter 1: ON PK Fc 100 Hz Gain 3 dB Q -1\n").is_err());
         assert!(Profile::parse("Filter 1: ON PK Fc x Hz Gain 3 dB Q 1\n").is_err());
         assert!(Profile::parse("\n# nothing but a comment\n").is_err());
+    }
+
+    #[test]
+    fn the_two_rejections_the_renderer_makes_are_made_here_too() {
+        let band = "Filter 1: ON PK Fc 1000 Hz Gain 1 dB Q 1\n";
+        // The renderer refuses a cascade past its fixed length rather than
+        // shortening it, so a shortened curve here would picture a file it will
+        // not play.
+        assert!(Profile::parse(&band.repeat(MAX_BANDS)).is_ok());
+        assert!(Profile::parse(&band.repeat(MAX_BANDS + 1)).is_err());
+        // The limit counts the cascade, not the file: a disabled band is
+        // validated and dropped, and never spends a slot.
+        let off = "Filter 1: OFF PK Fc 1000 Hz Gain 1 dB Q 1\n";
+        assert!(Profile::parse(&format!("{}{}", band.repeat(MAX_BANDS), off.repeat(8))).is_ok());
+
+        // `strtod` and Rust both read these as numbers; it is the validation
+        // after the parse that has to agree.
+        for preamp in ["inf", "-inf", "nan"] {
+            assert!(
+                Profile::parse(&format!("Preamp: {preamp} dB\n{band}")).is_err(),
+                "{preamp} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_disagreement_names_the_band_and_the_field_that_differs() {
+        let peak = |fc, gain_db, q| Band {
+            kind: BandType::Peaking,
+            fc,
+            gain_db,
+            q,
+        };
+        let ours = Profile::of_bands(-3.0, vec![peak(1000.0, 6.0, 1.0), peak(80.0, -2.0, 0.7)]);
+        assert_eq!(ours.disagreement(&ours), None);
+
+        let says = |other: &Profile| ours.disagreement(other).expect("must disagree");
+        assert!(says(&Profile::of_bands(-2.0, ours.bands.clone())).contains("preamp"));
+        assert!(
+            says(&Profile::of_bands(-3.0, vec![peak(1000.0, 6.0, 1.0)]))
+                .contains("enabled filters")
+        );
+
+        // The band is named by its position in the cascade, one-based, and the
+        // field by the token it was read from.
+        let second = |band: Band| Profile::of_bands(-3.0, vec![ours.bands[0], band]);
+        assert!(says(&second(peak(81.0, -2.0, 0.7))).contains("filter 2's Fc"));
+        assert!(says(&second(peak(80.0, -2.5, 0.7))).contains("filter 2's gain"));
+        assert!(says(&second(peak(80.0, -2.0, 0.71))).contains("filter 2's Q"));
+        let shelf = Band {
+            kind: BandType::LowShelf,
+            ..ours.bands[1]
+        };
+        assert!(says(&second(shelf)).contains("filter 2 as Peaking"));
     }
 
     #[test]

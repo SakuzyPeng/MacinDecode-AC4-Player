@@ -22,6 +22,8 @@ size_t macinrender_abi_size(uint32_t type) {
     case 10: return sizeof(mr_headmotion_sample_t);
     case 11: return sizeof(adm_hptf_config_t);
     case 12: return sizeof(adm_hptf_info_t);
+    case 13: return sizeof(adm_hptf_band_t);
+    case 14: return sizeof(adm_hptf_parameters_t);
     default: return 0;
     }
 }
@@ -50,6 +52,10 @@ size_t macinrender_abi_offset(uint32_t field) {
     case 19: return offsetof(adm_hptf_config_t, profile_path);
     case 20: return offsetof(adm_hptf_config_t, revision);
     case 21: return offsetof(adm_hptf_info_t, applied_revision);
+    case 22: return offsetof(adm_hptf_band_t, fc_hz);
+    case 23: return offsetof(adm_hptf_band_t, q);
+    case 24: return offsetof(adm_hptf_parameters_t, bands);
+    case 25: return offsetof(adm_hptf_parameters_t, revision);
     default: return (size_t)-1;
     }
 }

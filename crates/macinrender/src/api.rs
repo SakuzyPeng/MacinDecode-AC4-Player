@@ -62,6 +62,15 @@ api! {
     adm_scene_output_get_status(*mut c_void, *mut raw::OutputStatus) -> i32;
     adm_scene_output_set_hptf_ex(*const c_void, *const raw::HptfConfig, *mut *mut c_char) -> i32;
     adm_scene_output_get_hptf_info(*mut c_void, *mut raw::HptfInfo) -> i32;
+    adm_scene_output_set_hptf_parameters(*mut c_void, *const raw::HptfParameters) -> i32;
+    adm_hptf_parse_parametric_eq(
+        *mut c_void,
+        *const c_char,
+        *mut f64,
+        *mut raw::HptfBand,
+        u32,
+        *mut u32
+    ) -> i32;
     adm_monitor_output_devices_json(*mut c_void, *mut *mut c_char) -> i32;
     adm_free_string(*mut c_char) -> ();
 }

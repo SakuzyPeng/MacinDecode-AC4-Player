@@ -86,10 +86,10 @@ pub struct PlayerApp {
     sofa_picker: Option<Pin<Box<dyn Future<Output = Option<rfd::FileHandle>>>>>,
     hptf_picker: Option<Pin<Box<dyn Future<Output = Option<rfd::FileHandle>>>>>,
     /// The drawn profile, read once per path and design rate.
-    hptf_drawing: Option<(String, u32, Result<crate::hptf_profile::Curve, String>)>,
+    hptf_drawing: Option<HptfDrawing>,
     /// The profile under the pointer, cached the same way so that sweeping the
     /// folder re-reads a file only when the row changes.
-    hptf_ghost: Option<(String, u32, Result<crate::hptf_profile::Curve, String>)>,
+    hptf_ghost: Option<HptfDrawing>,
     skin_picker: Option<Pin<Box<dyn Future<Output = Option<rfd::FileHandle>>>>>,
     camera: scene3d::camera::Camera,
     /// Whether zero-based LFE / one-based dynamic-object numbers are printed
@@ -1838,15 +1838,17 @@ impl PlayerApp {
                             // the renderer's extra trim — but only while it is
                             // this profile that is running. A ghost never is one,
                             // so a ghost is drawn the way its own file reads.
-                            let drawn_curve =
-                                drawn.and_then(|curve| curve.as_ref().ok()).map(|curve| {
+                            let drawn_curve = drawn
+                                .and_then(|drawing| drawing.curve.as_ref().ok())
+                                .map(|curve| {
                                     curve.with_output_trim(if running {
                                         hptf.auto_trim_db
                                     } else {
                                         0.0
                                     })
                                 });
-                            let ghost_curve = ghost.and_then(|curve| curve.as_ref().ok());
+                            let ghost_curve =
+                                ghost.and_then(|drawing| drawing.curve.as_ref().ok());
                             if drawn_curve.is_some() {
                                 ui.label(if running {
                                     "Applied response"
@@ -1863,7 +1865,7 @@ impl PlayerApp {
                                 // Which line is which. Nothing else in the panel
                                 // names the profile being pointed at, and the
                                 // pointer is about to leave it.
-                                if let Some(Err(error)) = ghost {
+                                if let Some(Err(error)) = ghost.map(|drawing| &drawing.curve) {
                                     ui.colored_label(
                                         theme::MUTED,
                                         format!("{}: {error}", profile_name(path)),
@@ -1889,13 +1891,27 @@ impl PlayerApp {
                                     });
                                 }
                             }
-                            if let Some(Err(error)) = drawn {
+                            // A profile nobody is pointing at gets no second
+                            // line; one being pointed at says so quietly, the
+                            // way its read errors already do.
+                            if let Some(note) = ghost.and_then(|drawing| drawing.disagreement.as_deref())
+                            {
+                                ui.colored_label(theme::MUTED, note);
+                            }
+                            if let Some(Err(error)) = drawn.map(|drawing| &drawing.curve) {
                                 ui.colored_label(
                                     theme::WARNING,
                                     format!("Cannot read this profile: {error}"),
                                 );
                             }
-                            if running
+                            // The parse comparison wins over the running one: it
+                            // names the band, it does not wait for playback, and
+                            // when the two parses differ the running comparison
+                            // would only report the same fault as a moved peak.
+                            if let Some(note) = drawn.and_then(|drawing| drawing.disagreement.as_deref())
+                            {
+                                ui.colored_label(theme::WARNING, note);
+                            } else if running
                                 && let Some(curve) = &drawn_curve
                                 && let Some(note) = hptf_disagreement(curve, &hptf)
                             {
@@ -3603,31 +3619,68 @@ fn profile_name(path: &str) -> String {
         .into_owned()
 }
 
-/// The curve for `path` at `rate`, kept in `slot` and read from disk only when
-/// one of them changes. An empty path is "no profile", and clears the slot.
+/// A profile read once for drawing, with what the renderer's own parser made of
+/// the same text.
+struct HptfDrawing {
+    path: String,
+    rate: u32,
+    curve: Result<crate::hptf_profile::Curve, String>,
+    /// What the renderer read differently, if anything. `None` also covers
+    /// "there is no renderer in this binary to ask" — see `backend::hptf_parse`.
+    disagreement: Option<String>,
+}
+
+/// The drawing for `path` at `rate`, kept in `slot` and re-read from disk only
+/// when one of them changes. An empty path is "no profile", and clears the slot.
 ///
 /// A biquad's response depends on the rate it was designed at, so the rate is
-/// half of the key: the same file at two rates is two curves.
+/// half of the key: the same file at two rates is two curves. The cross-check
+/// against the renderer's own parser rides along here because it wants the same
+/// text and the same once-per-change cadence, and because it needs no output —
+/// a profile can be checked while it is being looked at, not only once it plays.
 fn hptf_curve<'a>(
-    slot: &'a mut Option<(String, u32, Result<crate::hptf_profile::Curve, String>)>,
+    slot: &'a mut Option<HptfDrawing>,
     path: &str,
     rate: u32,
-) -> Option<&'a Result<crate::hptf_profile::Curve, String>> {
+) -> Option<&'a HptfDrawing> {
     if path.is_empty() {
         *slot = None;
         return None;
     }
     if slot
         .as_ref()
-        .is_none_or(|(cached, at, _)| cached != path || *at != rate)
+        .is_none_or(|drawing| drawing.path != path || drawing.rate != rate)
     {
-        *slot = Some((
-            path.to_owned(),
+        let text = std::fs::read_to_string(path).map_err(|error| error.to_string());
+        let ours = text
+            .as_ref()
+            .map_err(Clone::clone)
+            .and_then(|text| crate::hptf_profile::Profile::parse(text));
+        // Two independent readings of one documented format. All four outcomes
+        // say something; only "both read it the same way" says nothing.
+        let renderer = text
+            .as_ref()
+            .ok()
+            .and_then(|text| crate::backend::hptf_parse(text));
+        let disagreement = match (&ours, &renderer) {
+            (Ok(ours), Some(Ok(renderer))) => ours.disagreement(renderer),
+            (Ok(_), Some(Err(error))) => {
+                Some(format!("The renderer will not read this profile: {error}"))
+            }
+            (Err(_), Some(Ok(_))) => Some(
+                "The renderer reads this profile without complaint, so it is this side's reading of it that is wrong."
+                    .to_owned(),
+            ),
+            _ => None,
+        };
+        *slot = Some(HptfDrawing {
+            path: path.to_owned(),
             rate,
-            crate::hptf_profile::Curve::read(path, rate),
-        ));
+            curve: ours.map(|ours| crate::hptf_profile::Curve::of(&ours, rate)),
+            disagreement,
+        });
     }
-    slot.as_ref().map(|(_, _, curve)| curve)
+    slot.as_ref()
 }
 
 /// Which profile to ghost behind the drawn one.
@@ -4384,6 +4437,45 @@ fn draw_drop_overlay(context: &egui::Context) {
 mod tests {
     use super::*;
 
+    /// The claim `hptf_profile` exists to make — that it reads the format the
+    /// way the renderer does — checked against the renderer rather than against
+    /// a hand-written expectation.
+    #[cfg(macinrender_output)]
+    #[test]
+    fn both_readings_of_one_profile_agree_band_for_band() {
+        // Every token the table maps, plus the shapes where a drift would hide:
+        // a disabled band, a missing Gain and Q, a slot with no type at all, an
+        // unknown type, a comment and a CRLF line.
+        const PROFILE: &str = "\
+# a profile written to exercise the token table\r
+Preamp: -4.1 dB
+Filter 1: ON LSC Fc 105 Hz Gain 9.7 dB Q 0.70
+Filter 2: ON PK Fc 46 Hz Gain -9.2 dB Q 0.37
+Filter 3: OFF PK Fc 900 Hz Gain 3.0 dB Q 2.00
+Filter 4: ON HSC Fc 10000 Hz Gain -1.1 dB Q 0.70
+Filter 5: ON LP Fc 19000 Hz
+Filter 6: ON HP Fc 21 Hz Q 0.50
+Filter 7: ON BP Fc 3000 Hz Gain 0 dB Q 1.41
+Filter 8: ON NO Fc 8000 Hz Gain 0 dB Q 6.00
+Filter 9: ON
+Filter 10: ON WAT Fc 500 Hz Gain 1 dB Q 1
+";
+        let ours = crate::hptf_profile::Profile::parse(PROFILE).unwrap();
+        let renderer = crate::backend::hptf_parse(PROFILE)
+            .expect("a build with a renderer must have one to ask")
+            .expect("the renderer must read this profile");
+        assert_eq!(ours.disagreement(&renderer), None);
+        // Seven enabled: the OFF band, the typeless slot and the unknown type
+        // are dropped, and both sides have to drop the same three.
+        assert_eq!(ours.bands(), 7);
+
+        // Agreement means nothing unless the comparison can fail, so move one
+        // digit of one Q and watch it.
+        let drifted =
+            crate::hptf_profile::Profile::parse(&PROFILE.replace("Q 0.37", "Q 0.38")).unwrap();
+        assert!(drifted.disagreement(&renderer).is_some());
+    }
+
     #[cfg(macinrender_output)]
     #[test]
     fn displayed_profile_response_matches_native_auto_trim() {
@@ -5093,9 +5185,8 @@ mod tests {
         // The band count says whether the file was read again, and says it in an
         // integer.
         let mut slot = None;
-        let bands = |slot: &Option<(String, u32, Result<crate::hptf_profile::Curve, String>)>| {
-            slot.as_ref().unwrap().2.as_ref().unwrap().bands
-        };
+        let bands =
+            |slot: &Option<HptfDrawing>| slot.as_ref().unwrap().curve.as_ref().unwrap().bands;
 
         assert!(hptf_curve(&mut slot, first, 48_000).is_some());
         assert_eq!(bands(&slot), 1);

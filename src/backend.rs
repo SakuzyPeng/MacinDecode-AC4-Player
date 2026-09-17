@@ -185,6 +185,62 @@ pub struct HptfReadout {
     pub max_response_db: f32,
 }
 
+/// The renderer's own reading of a profile, handed back in player-owned terms
+/// so it can be compared against `hptf_profile`'s.
+///
+/// It needs no output and opens no file, so the two readings can be checked
+/// against each other the moment a profile is looked at rather than only once
+/// one is playing. Both parsers get the same text rather than the same path,
+/// which rules out "the file changed in between".
+///
+/// `None` means there is no renderer in this binary to ask. That is not the
+/// same as agreement, but the panel treats both the same way — it says nothing
+/// — because a cross-check can only ever report the difference it found.
+#[cfg(macinrender_output)]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "the Option is the answer to \"is there a renderer to ask\", which \
+              is only ever None on the build below"
+)]
+pub fn hptf_parse(text: &str) -> Option<Result<crate::hptf_profile::Profile, String>> {
+    use crate::hptf_profile::{Band, BandType};
+    use macindecode_macinrender::HptfBandKind;
+    Some(
+        macindecode_macinrender::parse_parametric_eq(text).map(|parsed| {
+            crate::hptf_profile::Profile::of_bands(
+                parsed.preamp_db,
+                parsed
+                    .bands
+                    .iter()
+                    // Only the switched-on bands: those are the cascade, and the
+                    // cascade is what the other side keeps and draws. A disabled
+                    // band reaches neither the audio nor the picture.
+                    .filter(|band| band.enabled)
+                    .map(|band| Band {
+                        kind: match band.kind {
+                            HptfBandKind::Peaking => BandType::Peaking,
+                            HptfBandKind::LowShelf => BandType::LowShelf,
+                            HptfBandKind::HighShelf => BandType::HighShelf,
+                            HptfBandKind::LowPass => BandType::LowPass,
+                            HptfBandKind::HighPass => BandType::HighPass,
+                            HptfBandKind::BandPass => BandType::BandPass,
+                            HptfBandKind::Notch => BandType::Notch,
+                        },
+                        fc: band.fc_hz,
+                        gain_db: band.gain_db,
+                        q: band.q,
+                    })
+                    .collect(),
+            )
+        }),
+    )
+}
+
+#[cfg(not(macinrender_output))]
+pub fn hptf_parse(_text: &str) -> Option<Result<crate::hptf_profile::Profile, String>> {
+    None
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutputSnapshot {
     #[cfg(all(target_os = "macos", macinrender_output))]

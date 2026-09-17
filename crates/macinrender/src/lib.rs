@@ -72,6 +72,67 @@ pub struct HptfSettings {
     pub auto_trim: bool,
 }
 
+/// The filter shapes a `ParametricEQ` band can name. The C enumeration's
+/// integers are mapped by hand rather than transmuted: this is the one place
+/// that knows them, and a reordering upstream has to fail here loudly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HptfBandKind {
+    Peaking,
+    LowShelf,
+    HighShelf,
+    LowPass,
+    HighPass,
+    BandPass,
+    Notch,
+}
+
+impl HptfBandKind {
+    fn of(kind: i32) -> Result<Self, String> {
+        Ok(match kind {
+            0 => Self::Peaking,
+            1 => Self::LowShelf,
+            2 => Self::HighShelf,
+            3 => Self::LowPass,
+            4 => Self::HighPass,
+            5 => Self::BandPass,
+            6 => Self::Notch,
+            other => return Err(format!("MacinRender reported filter type {other}")),
+        })
+    }
+
+    const fn code(self) -> i32 {
+        match self {
+            Self::Peaking => 0,
+            Self::LowShelf => 1,
+            Self::HighShelf => 2,
+            Self::LowPass => 3,
+            Self::HighPass => 4,
+            Self::BandPass => 5,
+            Self::Notch => 6,
+        }
+    }
+}
+
+/// One band as the renderer reads it. A shelf's `q` is a Q, not a slope.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HptfBand {
+    pub kind: HptfBandKind,
+    /// A disabled band is still parsed and validated; it just never reaches the
+    /// cascade. Both sides keep it so a typo in one still reports.
+    pub enabled: bool,
+    pub fc_hz: f64,
+    pub gain_db: f64,
+    pub q: f64,
+}
+
+/// A cascade the way the renderer's own parser read it, independent of any
+/// sample rate and of any output existing.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct HptfProfile {
+    pub preamp_db: f64,
+    pub bands: Vec<HptfBand>,
+}
+
 /// What the headphone feed is actually running. `applied_revision` echoes the
 /// revision handed to [`Control::set_hptf`] once the audio callback has taken
 /// it up, so a caller can tell a selected profile from a live one.
@@ -539,6 +600,54 @@ impl Control {
             }),
         }
     }
+    /// Apply a cascade held in memory, with no file for it to go through.
+    ///
+    /// Same acceptance and same crossfade as [`Control::set_hptf`], and the same
+    /// `Ok(false)` for an output with no headphone feed. `revision` is echoed by
+    /// `applied_revision` once the callback has taken it up. Design is
+    /// synchronous on this thread; never call it from an audio callback.
+    pub fn set_hptf_parameters(
+        &self,
+        profile: &HptfProfile,
+        auto_trim: bool,
+        revision: u64,
+    ) -> Result<bool, String> {
+        let s = &self.inner;
+        // Every element carries the stride, because the renderer walks an array
+        // it did not allocate and a newer caller may append fields.
+        let bands: Vec<raw::HptfBand> = profile
+            .bands
+            .iter()
+            .map(|band| raw::HptfBand {
+                size: size::<raw::HptfBand>(),
+                kind: band.kind.code(),
+                enabled: i32::from(band.enabled),
+                reserved: 0,
+                fc_hz: band.fc_hz,
+                gain_db: band.gain_db,
+                q: band.q,
+            })
+            .collect();
+        let raw = raw::HptfParameters {
+            size: size::<raw::HptfParameters>(),
+            band_count: u32::try_from(bands.len())
+                .map_err(|_| "Too many filter bands to submit".to_owned())?,
+            bands: bands.as_ptr(),
+            preamp_db: profile.preamp_db,
+            preamp_mode: i32::from(auto_trim),
+            reserved: 0,
+            revision,
+        };
+        let _guard = s.gate.lock().unwrap();
+        // SAFETY: the Arc retains the output, and the snapshot plus its band
+        // array live until this synchronous call returns; nothing is retained.
+        let code =
+            unsafe { (s.api.adm_scene_output_set_hptf_parameters)(s.output, &raw const raw) };
+        if code == UNSUPPORTED {
+            return Ok(false);
+        }
+        s.error(code, 2).map(|()| true)
+    }
     /// The compensation the output is running now, or the disabled default when
     /// this output cannot carry one.
     pub fn hptf_status(&self) -> Result<HptfStatus, String> {
@@ -595,6 +704,100 @@ impl Control {
             recovering: raw.recovering != 0,
         })
     }
+}
+
+/// What the renderer's own parser makes of `ParametricEQ` text.
+///
+/// No file is opened and no output has to exist, which is what lets a caller
+/// check its own reading of a profile before committing anyone to it. Passing
+/// the same text to both parsers, rather than the same path, also removes "the
+/// file changed in between" as an explanation for a disagreement.
+pub fn parse_parametric_eq(text: &str) -> Result<HptfProfile, String> {
+    let api = Api::load()?;
+    let text = CString::new(text).map_err(|_| "A profile cannot contain a NUL byte".to_owned())?;
+    // SAFETY: constructor has no arguments; the temporary context is released below.
+    let context = unsafe { (api.adm_create_context)() };
+    if context.is_null() {
+        return Err("Cannot create a profile parsing context".into());
+    }
+    let parsed = parse_with(&api, context, &text);
+    // SAFETY: this context belongs to this function and nothing borrows it now.
+    unsafe { (api.adm_destroy_context)(context) };
+    parsed
+}
+
+/// The body of [`parse_parametric_eq`], split out so every exit releases the
+/// context.
+fn parse_with(api: &Api, context: *mut c_void, text: &CStr) -> Result<HptfProfile, String> {
+    let failure = || {
+        // SAFETY: the message is borrowed from the context, which outlives this
+        // copy of it.
+        let message = copy_text(unsafe { (api.adm_context_last_error_message)(context) });
+        if message.is_empty() {
+            "MacinRender cannot read this profile".to_owned()
+        } else {
+            message
+        }
+    };
+    let mut preamp_db = 0.0;
+    let mut count = 0_u32;
+    // A null array with zero capacity asks how many bands there are, disabled
+    // ones included, rather than writing any.
+    // SAFETY: the text and both out pointers are valid for this call.
+    let code = unsafe {
+        (api.adm_hptf_parse_parametric_eq)(
+            context,
+            text.as_ptr(),
+            &raw mut preamp_db,
+            std::ptr::null_mut(),
+            0,
+            &raw mut count,
+        )
+    };
+    if code != 0 {
+        return Err(failure());
+    }
+    let mut bands = vec![
+        raw::HptfBand {
+            size: size::<raw::HptfBand>(),
+            ..Default::default()
+        };
+        count as usize
+    ];
+    let mut written = 0_u32;
+    if count > 0 {
+        // SAFETY: the array is ours, `count` elements long, and each element
+        // carries the stride the renderer writes at.
+        let code = unsafe {
+            (api.adm_hptf_parse_parametric_eq)(
+                context,
+                text.as_ptr(),
+                &raw mut preamp_db,
+                bands.as_mut_ptr(),
+                count,
+                &raw mut written,
+            )
+        };
+        if code != 0 {
+            return Err(failure());
+        }
+        bands.truncate(written as usize);
+    }
+    Ok(HptfProfile {
+        preamp_db,
+        bands: bands
+            .into_iter()
+            .map(|band| {
+                Ok(HptfBand {
+                    kind: HptfBandKind::of(band.kind)?,
+                    enabled: band.enabled != 0,
+                    fc_hz: band.fc_hz,
+                    gain_db: band.gain_db,
+                    q: band.q,
+                })
+            })
+            .collect::<Result<_, String>>()?,
+    })
 }
 
 pub fn output_devices() -> Result<Vec<(String, String, bool)>, String> {
@@ -654,6 +857,8 @@ mod tests {
             size_of::<raw::HeadSample>(),
             size_of::<raw::HptfConfig>(),
             size_of::<raw::HptfInfo>(),
+            size_of::<raw::HptfBand>(),
+            size_of::<raw::HptfParameters>(),
         ];
         for (index, size) in sizes.into_iter().enumerate() {
             // SAFETY: probe is built from the upstream header and returns a scalar.
@@ -686,6 +891,10 @@ mod tests {
             std::mem::offset_of!(raw::HptfConfig, profile),
             std::mem::offset_of!(raw::HptfConfig, revision),
             std::mem::offset_of!(raw::HptfInfo, applied_revision),
+            std::mem::offset_of!(raw::HptfBand, fc_hz),
+            std::mem::offset_of!(raw::HptfBand, q),
+            std::mem::offset_of!(raw::HptfParameters, bands),
+            std::mem::offset_of!(raw::HptfParameters, revision),
         ];
         for (index, offset) in offsets.into_iter().enumerate() {
             // SAFETY: C's offsetof probe returns a scalar from the pinned headers.
