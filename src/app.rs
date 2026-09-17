@@ -1410,9 +1410,9 @@ impl PlayerApp {
                         );
                     });
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.button("About").clicked() { self.about.open = true; }
-                        if ui.button("Visual settings").clicked() { self.visual_settings_open = true; }
-                        if ui.button("Audio settings").clicked() { show_settings = true; }
+                        if ui.button("About").clicked() { self.about.open = !self.about.open; }
+                        if ui.button("Visual settings").clicked() { self.visual_settings_open = !self.visual_settings_open; }
+                        if ui.button("Audio settings").clicked() { show_settings = !show_settings; }
                         ui.add_enabled_ui(!system_output, |ui| {
                         egui::ComboBox::from_id_salt("output-device")
                             .selected_text(preferred_label)
