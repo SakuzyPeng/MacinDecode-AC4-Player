@@ -24,7 +24,7 @@ else()
 endif()
 FetchContent_Declare(macinrender
     GIT_REPOSITORY https://github.com/SakuzyPeng/MacinRender-ADM-Core.git
-    GIT_TAG f9f6d35f9892e7e5ff3f791fe1eed23d695633a4
+    GIT_TAG 1aecf1b57c081fb6ca0101972088e15c773b7c25
     # Share downloaded sources, but isolate each Cargo build's native outputs.
     BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/macinrender-build"
 )

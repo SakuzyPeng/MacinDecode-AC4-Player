@@ -167,6 +167,9 @@ page off the screen.
   Loading failures show a specific error. The list itself shows four rows and scrolls in place past
   that, and it opens scrolled to whatever is selected — a folder has no upper bound, and the
   settings window does not grow with it.
+  Large SOFA datasets use accelerated triangulation and sparse interpolation tables, with a separate
+  geometry cache. Seeking, repeating and changing tracks reuse the prepared HRTF when the output
+  format is compatible, preserving all measurement directions and the interpolation resolution.
 - **Headphone compensation (HpTF):** load an [AutoEq](https://github.com/jaakkopasanen/AutoEq)
   `ParametricEQ.txt` to take the headphone's own response out of binaural monitoring. Available in
   **SAF binaural** only: system spatial audio and Windows object passthrough hand a multichannel bed

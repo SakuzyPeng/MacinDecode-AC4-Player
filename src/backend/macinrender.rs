@@ -21,7 +21,6 @@ use crate::scene_view::{
 };
 use macindecode_macinrender as native;
 
-const NATIVE_EPOCH: u64 = 1;
 const HISTORY_BYTES: usize = 16 * 1024 * 1024;
 
 pub(super) struct PreparedSession {
@@ -92,11 +91,28 @@ fn native_config(
     }
 }
 
+#[derive(Clone)]
+struct SourceRequest {
+    config: OutputStreamConfig,
+    reader: SceneQueueReader,
+}
+
+// One lock makes replacing the source and hiding its old snapshot atomic.
+// Serial numbers order holds and replacements; readers retain their PlaybackKey.
+struct SourceState {
+    serial: u64,
+    pending: Option<SourceRequest>,
+    desired: Option<SourceRequest>,
+    holding: bool,
+    reset_failed: bool,
+    snapshot: OutputSnapshot,
+}
+
 struct Shared {
     stop: AtomicBool,
     playing: AtomicBool,
     volume: AtomicU32,
-    snapshot: Mutex<OutputSnapshot>,
+    source: Mutex<SourceState>,
     switch: Mutex<Option<native::RendererSettings>>,
     switch_result: Mutex<Option<Result<(), String>>>,
     hptf: Mutex<Option<(super::HptfRequest, u64)>>,
@@ -111,6 +127,7 @@ struct Shared {
     control: NativeTarget,
 }
 pub(super) struct Runtime {
+    format: native::Config,
     shared: Arc<Shared>,
     join: Option<JoinHandle<()>>,
 }
@@ -143,7 +160,17 @@ impl Runtime {
             stop: AtomicBool::new(false),
             playing: AtomicBool::new(playing),
             volume: AtomicU32::new(gain.to_bits()),
-            snapshot: Mutex::new(snapshot),
+            source: Mutex::new(SourceState {
+                serial: 0,
+                pending: None,
+                desired: Some(SourceRequest {
+                    config: config.clone(),
+                    reader: reader.clone(),
+                }),
+                holding: false,
+                reset_failed: false,
+                snapshot,
+            }),
             switch: Mutex::new(None),
             switch_result: Mutex::new(None),
             hptf: Mutex::new(None),
@@ -154,17 +181,20 @@ impl Runtime {
             hptf_status: Mutex::new(native::HptfStatus::default()),
             control: Arc::new(Mutex::new(None)),
         });
+        let format = native_config(&settings, config.sample_rate, &config.output_device);
         let worker = Arc::clone(&shared);
         let join = thread::Builder::new()
             .name("macinrender-scene-producer".into())
             .spawn(move || {
                 if let Err(error) = run(&worker, &config, &settings, &reader, &mirror, prepared) {
-                    let mut snapshot = worker
-                        .snapshot
+                    let mut source = worker
+                        .source
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    snapshot.phase = OutputPhase::Failed;
-                    snapshot.error = Some(error);
+                    // A terminated worker affects the latest request too, even
+                    // if another seek superseded the operation that failed.
+                    source.snapshot.phase = OutputPhase::Failed;
+                    source.snapshot.error = Some(error);
                 }
                 *worker
                     .control
@@ -173,6 +203,7 @@ impl Runtime {
             })
             .map_err(|error| error.to_string())?;
         Ok(Self {
+            format,
             shared,
             join: Some(join),
         })
@@ -182,10 +213,85 @@ impl Runtime {
     }
     pub fn snapshot(&self) -> OutputSnapshot {
         self.shared
-            .snapshot
+            .source
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .snapshot
             .clone()
+    }
+    /// Reuse the device and prepared renderer across playback keys, including
+    /// different media and different object/LFE topologies.
+    pub fn replace_source(
+        &self,
+        config: &OutputStreamConfig,
+        settings: &OutputSettings,
+        reader: SceneQueueReader,
+    ) -> bool {
+        let format = native_config(settings, config.sample_rate, &config.output_device);
+        if self.format.input_rate != format.input_rate
+            || self.format.output != format.output
+            || self.format.device_id != format.device_id
+            || self.format.renderer.binaural != format.renderer.binaural
+            || self.format.renderer.layout != format.renderer.layout
+            || self.join.as_ref().is_none_or(JoinHandle::is_finished)
+        {
+            return false;
+        }
+        let mut source = self
+            .shared
+            .source
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if source.snapshot.phase == OutputPhase::Failed {
+            return false;
+        }
+        let Some(serial) = source.serial.checked_add(1) else {
+            return false;
+        };
+        source.serial = serial;
+        let request = SourceRequest {
+            config: config.clone(),
+            reader,
+        };
+        source.pending = Some(request.clone());
+        source.desired = Some(request);
+        source.holding = false;
+        source.snapshot = OutputSnapshot::idle();
+        source.snapshot.phase = OutputPhase::Initializing;
+        source.snapshot.device_label = settings.mode.resolved().label().into();
+        source.snapshot.playhead_frames = config.start_frame;
+        true
+    }
+    /// Stop consuming the old song while its successor is being decoded.
+    pub fn hold_source(&self) {
+        self.play(false);
+        let mut source = self
+            .shared
+            .source
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !source.holding {
+            source.serial = source.serial.saturating_add(1);
+            source.pending = None;
+            source.desired = None;
+            source.holding = true;
+            source.snapshot = OutputSnapshot::idle();
+        }
+    }
+    pub fn take_reset_failure(&self) -> Option<(OutputStreamConfig, SceneQueueReader)> {
+        let mut source = self
+            .shared
+            .source
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !source.reset_failed || source.snapshot.phase != OutputPhase::Failed {
+            return None;
+        }
+        source.reset_failed = false;
+        source
+            .desired
+            .clone()
+            .map(|request| (request.config, request.reader))
     }
     pub fn play(&self, playing: bool) {
         self.shared.playing.store(playing, Ordering::Relaxed);
@@ -398,6 +504,7 @@ fn renderer_fields(core: u32) -> u64 {
 
 fn submit_block(
     session: &mut native::Session,
+    epoch: u64,
     block: &DecodedSceneBlock,
     offset: u32,
 ) -> Result<bool, String> {
@@ -469,7 +576,7 @@ fn submit_block(
     );
     filter_updates(&initial, &mut updates, block.duration_frames() - offset);
     session.submit(&native::Frame {
-        epoch: NATIVE_EPOCH,
+        epoch,
         generation: u64::from(block.configuration_generation()),
         start: block.start_frame().saturating_add(i64::from(offset)),
         duration: block.duration_frames() - offset,
@@ -512,6 +619,7 @@ fn filter_updates(
 
 fn submit_gap(
     session: &mut native::Session,
+    epoch: u64,
     signature: &SceneSignature,
     start: i64,
     duration: u32,
@@ -544,7 +652,7 @@ fn submit_gap(
         })
         .collect();
     session.submit(&native::Frame {
-        epoch: NATIVE_EPOCH,
+        epoch,
         generation: u64::from(signature.configuration_generation()),
         start,
         duration,
@@ -567,6 +675,11 @@ fn run(
     mirror: &SceneViewMirror,
     prepared: Option<PreparedSession>,
 ) -> Result<(), String> {
+    let mut config = config.clone();
+    let mut reader = reader.clone();
+    let mut epoch = 1_u64;
+    let mut serial = 0;
+    let mut holding = false;
     let native_config = native_config(settings, config.sample_rate, &config.output_device);
     let mut session = match prepared {
         Some(prepared) => prepared.take(&native_config)?,
@@ -575,9 +688,9 @@ fn run(
     if shared.stop.load(Ordering::Relaxed) {
         return Ok(());
     }
-    let target =
+    let mut target =
         i64::try_from(config.start_frame).map_err(|_| "Scene target exceeds signed time")?;
-    session.reset(NATIVE_EPOCH, target)?;
+    session.reset(epoch, target)?;
     let control = session.control();
     *shared
         .control
@@ -585,7 +698,7 @@ fn run(
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(control.clone());
     let mut signature = config.scene_signature.clone();
     session.configure(
-        NATIVE_EPOCH,
+        epoch,
         u64::from(signature.configuration_generation()),
         signature.object_element_ids(),
         signature.lfe_element_id(),
@@ -608,7 +721,60 @@ fn run(
     let mut last_view_time = target;
     let mut iterations = 0;
     while !shared.stop.load(Ordering::Relaxed) {
-        let wanted_playing = shared.playing.load(Ordering::Relaxed);
+        let changed = {
+            let mut source = shared
+                .source
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if source.serial == serial {
+                None
+            } else {
+                serial = source.serial;
+                holding = source.holding;
+                Some(source.pending.take())
+            }
+        };
+        if let Some(request) = changed {
+            control.play(false)?;
+            playing = false;
+            pending = None;
+            history.clear();
+            history_bytes = 0;
+            if let Some(request) = request {
+                config = request.config;
+                reader = request.reader;
+                epoch = epoch
+                    .checked_add(1)
+                    .ok_or("Native playback epoch exhausted")?;
+                target = i64::try_from(config.start_frame)
+                    .map_err(|_| "Scene target exceeds signed time")?;
+                signature = config.scene_signature.clone();
+                let reset = session.reset(epoch, target).and_then(|()| {
+                    session.configure(
+                        epoch,
+                        u64::from(signature.configuration_generation()),
+                        signature.object_element_ids(),
+                        signature.lfe_element_id(),
+                    )
+                });
+                if let Err(error) = reset {
+                    shared
+                        .source
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .reset_failed = true;
+                    return Err(error);
+                }
+                loudness = [KWeighting::new(config.sample_rate); MAX_VIEW_OBJECTS];
+                emitted_through = i64::MIN;
+                next_sample = target;
+                first = true;
+                ended = false;
+                last_view_time = target;
+                iterations = 0;
+            }
+        }
+        let wanted_playing = !holding && shared.playing.load(Ordering::Relaxed);
         if wanted_playing != playing {
             control.play(wanted_playing)?;
             playing = wanted_playing;
@@ -689,6 +855,12 @@ fn run(
                 .hptf_status
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = hptf;
+        }
+        // Settings preparation is independent of the source. It must keep
+        // completing even if the replacement file fails to open.
+        if holding {
+            thread::sleep(Duration::from_millis(2));
+            continue;
         }
         let status = control.status()?;
         if status.phase == native::Phase::Failed {
@@ -777,10 +949,14 @@ fn run(
             last_view_time = view_time;
         }
         {
-            let mut snapshot = shared
-                .snapshot
+            let mut source = shared
+                .source
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if source.serial != serial {
+                continue;
+            }
+            let snapshot = &mut source.snapshot;
             snapshot.phase = if ended && next_sample <= target {
                 OutputPhase::Ended
             } else {
@@ -843,7 +1019,7 @@ fn run(
                         return Err("Scene sample rate changed during playback".into());
                     }
                     session.configure(
-                        NATIVE_EPOCH,
+                        epoch,
                         u64::from(actual.configuration_generation()),
                         actual.object_element_ids(),
                         actual.lfe_element_id(),
@@ -869,7 +1045,7 @@ fn run(
                 if block.start_frame() > next_sample {
                     let duration = u32::try_from((block.start_frame() - next_sample).min(4096))
                         .unwrap_or(4096);
-                    if submit_gap(&mut session, &signature, next_sample, duration)? {
+                    if submit_gap(&mut session, epoch, &signature, next_sample, duration)? {
                         next_sample += i64::from(duration);
                         first = false;
                     }
@@ -878,7 +1054,7 @@ fn run(
                         .unwrap_or(u32::MAX);
                     if offset >= block.duration_frames() {
                         pending = None;
-                    } else if submit_block(&mut session, block, offset)? {
+                    } else if submit_block(&mut session, epoch, block, offset)? {
                         let metadata = MetadataFrame::new(block, offset, &mut loudness, bin_frames);
                         history_bytes += metadata.bytes();
                         history.push_back(metadata);
@@ -891,7 +1067,7 @@ fn run(
                     }
                 }
             } else if reader.is_end_of_stream() {
-                session.end(NATIVE_EPOCH, next_sample)?;
+                session.end(epoch, next_sample)?;
                 ended = true;
             }
         }
@@ -985,6 +1161,140 @@ mod tests {
             None,
             Vec::new(),
         )
+    }
+
+    fn await_end(runtime: &Runtime, end: u64) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let status = runtime.snapshot();
+            assert_ne!(status.phase, OutputPhase::Failed, "{:?}", status.error);
+            if status.phase == OutputPhase::Ended {
+                assert_eq!(status.playhead_frames, end);
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "source did not drain: {status:?}"
+            );
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    fn ended_source(
+        request: u64,
+        epoch: u64,
+        start: i64,
+        id: u64,
+    ) -> (OutputStreamConfig, SceneQueueReader, PlaybackKey) {
+        let key = crate::decoder::PlaybackKey::new(request, epoch);
+        let (queue, reader) = scene_queue_pair(key);
+        let mut frame = block(start, 2048);
+        // A new track can carry different object identities and topology.
+        if id != 7 {
+            frame = DecodedSceneBlock::new(
+                48_000,
+                start,
+                2048,
+                1,
+                0,
+                None,
+                true,
+                vec![
+                    SceneObjectPcm::new(id, None, vec![0.0; 2048]),
+                    SceneObjectPcm::new(id + 1, None, vec![0.0; 2048]),
+                ],
+                id.is_multiple_of(2)
+                    .then(|| crate::decoder::SceneLfePcm::new(id + 2, None, vec![0.0; 2048])),
+                Vec::new(),
+            );
+        }
+        let config = OutputStreamConfig::new(
+            request,
+            epoch,
+            u64::try_from(start).unwrap(),
+            48_000,
+            SceneSignature::from_block(&frame),
+            OutputDeviceSelection::SystemDefault,
+        )
+        .unwrap();
+        queue.try_push(key, frame).unwrap();
+        queue.mark_end_of_stream(key);
+        (config, reader, key)
+    }
+
+    #[test]
+    fn seeks_replays_and_new_tracks_reuse_the_same_native_session() {
+        let settings = OutputSettings {
+            null_output: true,
+            mode: SpatialBackendKind::SafBinaural,
+            head_source: crate::head_tracking::HeadSource::Manual,
+            ..Default::default()
+        };
+        let mirror = Arc::new(SceneViewMirror::new());
+        let (config, reader, _) = ended_source(1, 1, 0, 7);
+        let runtime =
+            Runtime::spawn(config, settings.clone(), reader, mirror.clone(), true, 0.0).unwrap();
+        await_end(&runtime, 2048);
+        let original = runtime.control_slot().lock().unwrap().clone().unwrap();
+        let mut epoch = original.status().unwrap().epoch;
+        for i in 0_u64..32 {
+            let start = if i % 2 == 0 { 48_000 } else { 0 };
+            let request = if i < 16 { 1 } else { i + 1 };
+            let id = if i < 16 { 7 } else { 100 + i };
+            let (config, reader, key) = ended_source(request, i + 2, start, id);
+            if i >= 16 {
+                runtime.hold_source();
+            }
+            assert!(runtime.replace_source(&config, &settings, reader));
+            let accepted = runtime.snapshot();
+            assert_eq!(accepted.phase, OutputPhase::Initializing);
+            assert_eq!(accepted.playhead_frames, u64::try_from(start).unwrap());
+            runtime.play(true);
+            await_end(&runtime, u64::try_from(start).unwrap() + 2048);
+            let next = original.status().unwrap().epoch;
+            assert!(
+                next > epoch,
+                "the retained control must observe the new epoch"
+            );
+            epoch = next;
+            assert_eq!(runtime.snapshot().submitted_frames, 2048);
+            assert_eq!(mirror.read(key).unwrap().objects()[0].element_id, id);
+        }
+        runtime.hold_source();
+        runtime.switch(settings.renderer());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(result) = runtime.take_switch_result() {
+                result.unwrap();
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "held source blocked settings completion"
+            );
+            thread::sleep(Duration::from_millis(2));
+        }
+        // Pause intent survives a source replacement, even after EOS.
+        runtime.play(false);
+        let (config, reader, _) = ended_source(90, 1, 0, 7);
+        assert!(runtime.replace_source(&config, &settings, reader));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while original.status().unwrap().epoch == epoch {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(original.status().unwrap().presented, 0);
+        runtime.play(true);
+        await_end(&runtime, 2048);
+        // Superseded requests cannot publish an old end/position into the last one.
+        for request in 100..120 {
+            let (config, reader, _) = ended_source(request, 1, 96_000, 7);
+            assert!(runtime.replace_source(&config, &settings, reader));
+        }
+        await_end(&runtime, 98_048);
+        let (mut incompatible, reader, _) = ended_source(121, 1, 0, 7);
+        incompatible.sample_rate = 44_100;
+        assert!(!runtime.replace_source(&incompatible, &settings, reader));
     }
 
     #[test]

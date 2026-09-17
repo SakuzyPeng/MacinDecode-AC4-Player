@@ -298,6 +298,16 @@ rebuild. When the signature changes mid-stream the consumer reports a recoverabl
 between `backend/state.rs` and `app.rs`; changing one requires changing both.
 `automatic_reconfigure_guard` keeps a failing rebuild from spinning.
 
+MacinRender reuses its native Session across seeks, repeat and track changes when the input rate,
+output kind/device and renderer mode/layout match. Object/LFE identities and counts may change:
+`configure` installs the new Scene after the producer resets a monotonically increasing native
+epoch. The native epoch is distinct from the decoder's `PlaybackKey`. Source requests retain their
+keyed reader; a latest-only mailbox and snapshot serial prevent stale EOS/positions from winning.
+Opening a new track holds the old source without destroying the renderer, while HRTF/HpTF control
+work continues. Native reset failure permits one fresh-session fallback; an incompatible format or
+explicit close releases the session.
+
+
 ### Seek
 
 MP4/M4A requires *both* a container sync sample and Core `RandomAccess::Full`; raw `.ac4` requires

@@ -306,9 +306,11 @@ impl PlayerApp {
     fn activate_entry(&mut self, list: PlaylistId, entry: Entry, playing: bool, automatic: bool) {
         self.save_checkpoint();
         self.output.pause();
-        self.output.reset();
         if let Some(previous) = self.pending_output_change.take() {
+            self.output.reset();
             self.output.install_settings(previous);
+        } else {
+            self.output.suspend_for_source_change();
         }
         self.decoder.close();
         self.media_source = None;

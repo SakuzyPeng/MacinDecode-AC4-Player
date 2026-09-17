@@ -411,6 +411,15 @@ impl SpatialOutputController {
             if self.config.as_ref() == Some(config) {
                 return;
             }
+            if self.prepared_session.is_none()
+                && let Some(runtime) = &self.runtime
+                && runtime.replace_source(config, &self.settings, reader.clone())
+            {
+                self.config = Some(config.clone());
+                self.snapshot = runtime.snapshot();
+                self.revision += 1;
+                return;
+            }
             #[cfg(target_os = "macos")]
             self.atmos.reset();
             self.legacy.reset();
@@ -449,6 +458,25 @@ impl SpatialOutputController {
         self.legacy.ensure_configured(config, reader);
         self.configure_head();
     }
+    /// Pause an outgoing track without discarding an expensive prepared HRTF.
+    /// Ready metadata will decide whether the next source can reuse the device.
+    pub fn suspend_for_source_change(&mut self) {
+        self.pause();
+        #[cfg(macinrender_output)]
+        if self.uses_macinrender() {
+            self.preparation = None;
+            self.prepared_session = None;
+            if let Some(runtime) = &self.runtime {
+                runtime.hold_source();
+            }
+            self.config = None;
+            self.snapshot = OutputSnapshot::idle();
+            self.revision += 1;
+            return;
+        }
+        self.reset();
+    }
+
     pub fn reset(&mut self) {
         #[cfg(all(target_os = "macos", macinrender_output))]
         self.atmos.reset();
@@ -468,10 +496,28 @@ impl SpatialOutputController {
         self.snapshot = OutputSnapshot::idle();
         self.revision += 1;
     }
+    #[cfg(macinrender_output)]
+    fn recover_source_reset(&mut self) {
+        // A native reset failure gets one fresh session. Failure while
+        // creating that session follows the ordinary error path, so this
+        // cannot turn an unsupported source into a rebuild loop.
+        if let Some((config, reader)) = self
+            .runtime
+            .as_ref()
+            .and_then(super::macinrender::Runtime::take_reset_failure)
+            && self.config.as_ref() == Some(&config)
+        {
+            self.runtime = None;
+            self.config = None;
+            self.ensure_configured(&config, reader);
+        }
+    }
+
     pub fn poll(&mut self) {
         self.legacy.poll();
         #[cfg(macinrender_output)]
         {
+            self.recover_source_reset();
             if let Some(result) = self.catalog.poll() {
                 self.pcm_ready = true;
                 match result {
@@ -1020,6 +1066,174 @@ mod tests {
         assert_eq!(output.active_sofa(), Some(path.as_str()));
         output.reset();
         assert!(output.active_sofa().is_none());
+    }
+
+    fn advance_real_media(
+        decoder: &mut crate::decoder::DecoderController,
+        output: &mut SpatialOutputController,
+    ) -> Duration {
+        use crate::decoder::DecodePhase;
+
+        let start = Instant::now();
+        loop {
+            decoder.poll();
+            assert_ne!(
+                decoder.snapshot().phase(),
+                DecodePhase::Failed,
+                "{:?}",
+                decoder.snapshot()
+            );
+            if matches!(
+                decoder.snapshot().phase(),
+                DecodePhase::Ready | DecodePhase::EndOfStream
+            ) {
+                let metrics = decoder.snapshot().metrics().unwrap();
+                let config = OutputStreamConfig::new(
+                    decoder.request_id(),
+                    decoder.playback_epoch(),
+                    metrics.target_frame(),
+                    metrics.sample_rate(),
+                    metrics.scene_signature().unwrap().clone(),
+                    OutputDeviceSelection::SystemDefault,
+                )
+                .unwrap();
+                output.ensure_configured(&config, decoder.scene_reader());
+                output.play();
+                output.poll();
+                assert_ne!(
+                    output.snapshot().phase(),
+                    OutputPhase::Failed,
+                    "{:?}",
+                    output.snapshot().error()
+                );
+                if output.snapshot().playhead_frames() > metrics.target_frame() {
+                    return start.elapsed();
+                }
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(90),
+                "real media startup timed out"
+            );
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    #[test]
+    #[ignore = "requires MACINDECODE_AC4_TEST_MEDIA and MACINDECODE_AC4_TEST_SOFA; silent real-media latency check"]
+    fn real_media_seek_replay_and_track_change_keep_the_prepared_hrtf() {
+        use crate::decoder::DecoderController;
+        let media = std::env::var("MACINDECODE_AC4_TEST_MEDIA").unwrap();
+        let sofa = std::env::var("MACINDECODE_AC4_TEST_SOFA").unwrap();
+        for profile in [String::new(), sofa] {
+            let mut decoder = DecoderController::new();
+            let mut output = SpatialOutputController::new();
+            output.install_settings(OutputSettings {
+                null_output: true,
+                mode: SpatialBackendKind::SafBinaural,
+                sofa: profile.clone(),
+                head_source: crate::head_tracking::HeadSource::Manual,
+                ..Default::default()
+            });
+            decoder.ensure_open(std::path::Path::new(&media));
+            let first = advance_real_media(&mut decoder, &mut output);
+            let control = output
+                .runtime
+                .as_ref()
+                .unwrap()
+                .control_slot()
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(90);
+            while decoder.snapshot().metrics().unwrap().is_indexing() {
+                decoder.poll();
+                assert!(Instant::now() < deadline);
+                thread::sleep(Duration::from_millis(2));
+            }
+            let duration = decoder
+                .snapshot()
+                .metrics()
+                .unwrap()
+                .duration_frames()
+                .unwrap();
+            let mut times = Vec::new();
+            for target in [duration / 4, 0, duration / 2, 0] {
+                let epoch = control.status().unwrap().epoch;
+                output.pause();
+                decoder.seek(target).unwrap();
+                times.push(advance_real_media(&mut decoder, &mut output));
+                assert!(
+                    control.status().unwrap().epoch > epoch,
+                    "seek replaced native output"
+                );
+            }
+            let epoch = control.status().unwrap().epoch;
+            output.suspend_for_source_change();
+            decoder.close();
+            decoder.ensure_open(std::path::Path::new(&media));
+            let track = advance_real_media(&mut decoder, &mut output);
+            assert!(
+                control.status().unwrap().epoch > epoch,
+                "track change replaced native output"
+            );
+            eprintln!(
+                "{}: first {first:?}; seeks/replays {times:?}; track change {track:?}",
+                if profile.is_empty() { "KEMAR" } else { "SOFA" }
+            );
+        }
+    }
+
+    #[test]
+    fn a_new_track_keeps_the_output_while_its_decoder_opens() {
+        let mut output = SpatialOutputController::new();
+        output.install_settings(OutputSettings {
+            null_output: true,
+            mode: SpatialBackendKind::SafBinaural,
+            ..Default::default()
+        });
+        let key = PlaybackKey::new(41, 1);
+        let (queue, reader) = scene_queue_pair(key);
+        let frame = tone(0);
+        let mut config = output_config(SceneSignature::from_block(&frame));
+        queue.try_push(key, frame).unwrap();
+        queue.mark_end_of_stream(key);
+        output.ensure_configured(&config, reader);
+        output.play();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while output.snapshot().phase() != OutputPhase::Ended {
+            output.poll();
+            assert_ne!(output.snapshot().phase(), OutputPhase::Failed);
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(2));
+        }
+        let slot = output.runtime.as_ref().unwrap().control_slot();
+        let control = slot.lock().unwrap().clone().unwrap();
+        let old_epoch = control.status().unwrap().epoch;
+        // Both activate_entry and the Opening ticks suspend the same output.
+        for _ in 0..3 {
+            output.suspend_for_source_change();
+        }
+        assert!(!output.is_configured_for_playback(41, 1));
+        assert!(Arc::ptr_eq(
+            &slot,
+            &output.runtime.as_ref().unwrap().control_slot()
+        ));
+        let next = PlaybackKey::new(42, 1);
+        let (queue, reader) = scene_queue_pair(next);
+        queue.try_push(next, tone(0)).unwrap();
+        queue.mark_end_of_stream(next);
+        config.request_id = 42;
+        output.ensure_configured(&config, reader);
+        output.play();
+        while output.snapshot().phase() != OutputPhase::Ended {
+            output.poll();
+            assert_ne!(output.snapshot().phase(), OutputPhase::Failed);
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert!(control.status().unwrap().epoch > old_epoch);
+        assert!(output.is_configured_for_playback(42, 1));
     }
 
     #[test]

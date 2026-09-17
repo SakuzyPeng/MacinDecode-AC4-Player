@@ -606,6 +606,7 @@ enum OutputSyncAction {
     Configure,
     Preserve,
     Reset,
+    Suspend,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -632,6 +633,7 @@ const fn output_sync_action(
     configured_for_playback: bool,
 ) -> OutputSyncAction {
     match (decode_phase, configured_for_playback) {
+        (DecodePhase::Opening, _) => OutputSyncAction::Suspend,
         (DecodePhase::Ready | DecodePhase::EndOfStream, false) => OutputSyncAction::Configure,
         (
             DecodePhase::Seeking
@@ -1249,6 +1251,7 @@ impl PlayerApp {
                 }
             }
             OutputSyncAction::Preserve => {}
+            OutputSyncAction::Suspend => self.output.suspend_for_source_change(),
             OutputSyncAction::Reset => self.output.reset(),
         }
 
@@ -5564,10 +5567,10 @@ Filter 10: ON WAT Fc 500 Hz Gain 1 dB Q 1
     }
 
     #[test]
-    fn output_sync_resets_during_a_new_open_request() {
+    fn output_sync_suspends_during_a_new_open_request() {
         assert_eq!(
             output_sync_action(DecodePhase::Opening, true),
-            OutputSyncAction::Reset
+            OutputSyncAction::Suspend
         );
     }
 
