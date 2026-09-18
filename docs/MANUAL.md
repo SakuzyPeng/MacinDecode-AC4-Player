@@ -235,7 +235,8 @@ Windows 对象直通对设备有硬性要求，见 README 的
 
 #### 载入一份 profile
 
-在 `Headphones` 页载入一份 [AutoEq](https://github.com/jaakkopasanen/AutoEq) 的 `ParametricEQ.txt`。
+先到 [AutoEq 网站](https://autoeq.app/) 搜索自己的耳机型号，下载参数均衡器（Parametric EQ）文本配置，
+再在 `Headphones` 页载入。播放器支持 AutoEq 的 `ParametricEQ.txt` 格式。
 选中的文件会复制到数据目录的 `hptf/` 中统一管理，和 SOFA 一样按 **available** / **in use** 列出。
 
 设置里会画出响应曲线，含 preamp 和实际生效的额外衰减，顶线为满刻度——可以直接看出它把哪些频段抬了多少、
@@ -269,7 +270,7 @@ profile 之上还有两个旋钮：
 曲线补偿到哪条目标由文件本身决定，**文件里并不记录这一点**，播放器只显示文件名和实际生效的段数与 preamp。
 
 请自行让它与所用 SOFA 的参考场配套——例如扩散场均衡过的 HRTF 配扩散场目标的曲线。
-AutoEq 仓库发布的预设用的是 Harman 目标并额外加了 6 dB 低音抬升。
+[AutoEq 仓库](https://github.com/jaakkopasanen/AutoEq)发布的预设用的是 Harman 目标并额外加了 6 dB 低音抬升。
 
 ### 头部追踪与听者朝向
 

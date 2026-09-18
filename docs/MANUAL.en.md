@@ -288,8 +288,9 @@ ceiling, and switching profiles crossfades without interrupting playback.
 
 #### Loading a profile
 
-Load an [AutoEq](https://github.com/jaakkopasanen/AutoEq) `ParametricEQ.txt` on the `Headphones`
-page. The file you pick is copied into the `hptf/` folder in the data directory and listed with the
+Find your headphone model on the [AutoEq website](https://autoeq.app/) and download a parametric EQ
+text profile, then load it on the `Headphones` page. The player accepts AutoEq's `ParametricEQ.txt`
+format. The file you pick is copied into the `hptf/` folder in the data directory and listed with the
 same **available** / **in use** states as a SOFA.
 
 The settings window plots the profile's response with the preamp and any applied automatic trim
@@ -330,8 +331,8 @@ Which target a profile equalises towards is decided by the file and **is not rec
 player shows only the file name and the bands and preamp actually running.
 
 Pair it with the reference field your SOFA was equalised to — a diffuse-field-equalised HRTF wants a
-diffuse-field profile. The presets published in the AutoEq repository target Harman with an extra
-6 dB of bass boost.
+diffuse-field profile. The presets published in the [AutoEq repository](https://github.com/jaakkopasanen/AutoEq)
+target Harman with an extra 6 dB of bass boost.
 
 ### Head tracking and listener orientation
 
