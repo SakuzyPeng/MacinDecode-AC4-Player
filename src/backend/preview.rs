@@ -449,6 +449,79 @@ mod tests {
         frame.objects().first().expect("one object").position[0]
     }
 
+    /// The demo, walked by the consumer Linux actually uses.
+    ///
+    /// On a build with no renderer nothing else pops the FIFO, so this is the
+    /// whole visible path: synthesised blocks in, the scene view out. It is
+    /// also the first test here whose Scene came from the real producer rather
+    /// than from a fixture assembled to suit the assertion.
+    #[test]
+    fn the_demo_walks_into_the_scene_view() {
+        let key = PlaybackKey::new(1, 0);
+        let programme = crate::decoder::demo::DemoProgram::new(RATE);
+        // Inside the phase where the three violins circle, so there is motion
+        // to see rather than a still scene that would pass by standing still.
+        let start = crate::decoder::demo::stage::frame_of(
+            u64::from(crate::decoder::demo::score::TICKS_PER_STATEMENT) * 3,
+            RATE,
+        );
+        let mut frame = start;
+        let mut blocks = Vec::new();
+        for _ in 0..40 {
+            let block = programme.block_at(frame);
+            frame += i64::from(block.duration_frames());
+            blocks.push(block);
+        }
+        let objects = blocks[0].objects().len();
+        let (_queue, mirror, mut preview) = preview_over_at(
+            key,
+            blocks,
+            u64::try_from(start).expect("a positive start frame"),
+        );
+
+        let mut track = Vec::new();
+        let mut loudest = 0.0f64;
+        for _ in 0..30 {
+            preview.advance(0.05);
+            let published = mirror.read(key).expect("the preview published a frame");
+            assert_eq!(
+                published.objects().len().min(objects),
+                objects,
+                "every demo object reaches the view"
+            );
+            let violin = published
+                .objects()
+                .iter()
+                .find(|object| object.element_id == 1)
+                .expect("violin one is in the scene");
+            track.push(violin.position);
+            for object in published.objects() {
+                loudest = loudest.max(object.energy.weighted_sum_squares);
+            }
+        }
+
+        let first = track.first().expect("a published position");
+        let moved = track
+            .iter()
+            .map(|position| {
+                position
+                    .iter()
+                    .zip(first)
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0.0f32, f32::max)
+            })
+            .fold(0.0f32, f32::max);
+        assert!(
+            moved > 0.05,
+            "the circling voice never moved in the view: {moved}"
+        );
+        assert!(
+            loudest > 0.0,
+            "the view measured no energy, so nothing was audible"
+        );
+        assert!(preview.error().is_none(), "{:?}", preview.error());
+    }
+
     #[test]
     fn the_clock_advances_by_wall_time_times_the_sample_rate() {
         let key = PlaybackKey::new(1, 0);

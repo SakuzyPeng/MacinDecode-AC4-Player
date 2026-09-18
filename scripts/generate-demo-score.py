@@ -86,6 +86,20 @@ PHASES = (
     ("close", 27, 28, 0, False),
 )
 
+# Constants only the tests read: the goldens exist so a change has to be
+# deliberate, and the arrangement reads the note tables directly.
+TEST_ONLY = (
+    "#[cfg_attr(",
+    "    not(test),",
+    "    allow(",
+    "        dead_code,",
+    '        reason = "these express the contract the score is generated against -- the \\',
+    "                  phase budget, the note geometry, the golden digest -- and the \\",
+    '                  tests are what check it; the arrangement reads the tables directly"',
+    "    )",
+    ")]",
+)
+
 REPOSITORY = Path(__file__).resolve().parent.parent
 OUTPUT = REPOSITORY / "src" / "decoder" / "demo" / "score.rs"
 
@@ -523,11 +537,13 @@ def emit(score: dict, report: list[dict], digests: dict[str, str]) -> str:
         "/// but not a wrong note inside the set the score already uses. This",
         "/// catches any of them, which is the point of transcribing a piece",
         "/// everyone knows: the error has to be impossible to smuggle in.",
+        *TEST_ONLY,
         f"pub(crate) const SCORE_DIGEST: u64 = {score_digest(score):_};",
         "",
         "/// Every pitch class the score uses, as a golden value. D major plus the",
         "/// C natural the line borrows on its way to G; a transcription that lost",
         "/// or invented an accidental would change this list.",
+        *TEST_ONLY,
         f"pub(crate) const PITCH_CLASSES: &[u8] = &[{', '.join(str(c) for c in classes)}];",
         f"pub(crate) const PITCH_RANGE: (u8, u8) = ({pitches[0]}, {pitches[-1]});",
         "",

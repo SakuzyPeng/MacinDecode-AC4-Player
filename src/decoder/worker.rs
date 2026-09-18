@@ -19,11 +19,12 @@ use macindecode_ac4_scene::{
     DecodeStatus, PresentationSelection, SceneObjectState, SemanticScope,
 };
 
+use super::demo::DemoProgram;
 use super::{
     DecodeContainer, DecodeMetrics, DecodePhase, DecodedSceneBlock, DecoderSnapshot,
-    PREBUFFER_MILLISECONDS, PlaybackKey, QueuePushError, SceneLfePcm, SceneMetadataUpdate,
-    SceneObjectPcm, SharedSceneQueue, SpatialObjectState, SpatialPosition, WorkerCommand,
-    WorkerEvent, WorkerEventKind, WorkerHandle,
+    PREBUFFER_MILLISECONDS, PlaybackKey, PlaybackSource, QueuePushError, SceneLfePcm,
+    SceneMetadataUpdate, SceneObjectPcm, SceneSignature, SharedSceneQueue, SpatialObjectState,
+    SpatialPosition, WorkerCommand, WorkerEvent, WorkerEventKind, WorkerHandle,
 };
 
 /// Stack for the decode thread.
@@ -90,7 +91,7 @@ impl SeekPreroll {
     fn publish(
         &mut self,
         key: PlaybackKey,
-        path: &Path,
+        path: Option<&Path>,
         metrics: &mut DecodeMetrics,
         commands: &Receiver<WorkerCommand>,
         events: &Sender<WorkerEvent>,
@@ -113,7 +114,7 @@ fn decoder_worker(
     queue: &SharedSceneQueue,
 ) {
     let mut pending = None;
-    let mut loaded: Option<LoadedMedia> = None;
+    let mut loaded: Option<LoadedSource> = None;
     loop {
         let command = match pending.take() {
             Some(command) => command,
@@ -135,39 +136,51 @@ fn decoder_worker(
                 source,
                 reuse_cached,
             } => {
-                let failure_path = source.path().to_path_buf();
-                loaded = loaded.filter(|media| reuse_cached && media.path == source.path());
-                if let Some(media) = loaded.as_mut() {
-                    media.session = new_session();
-                } else {
-                    loaded = match LoadedMedia::open(key, &source, event_sender) {
-                        Ok(media) => Some(media),
-                        Err(error) => {
-                            send_failure(key, &failure_path, error, event_sender);
-                            None
+                match source {
+                    PlaybackSource::Demo => {
+                        if !matches!(loaded, Some(LoadedSource::Demo(_))) {
+                            loaded = Some(LoadedSource::Demo(DemoStream::new()));
                         }
-                    };
+                    }
+                    PlaybackSource::Media(media) => {
+                        let failure_path = media.path().to_path_buf();
+                        loaded = loaded.filter(|held| match held {
+                            LoadedSource::Media(open) => reuse_cached && open.path == media.path(),
+                            LoadedSource::Demo(_) => false,
+                        });
+                        if let Some(LoadedSource::Media(open)) = loaded.as_mut() {
+                            open.session = new_session();
+                        } else {
+                            loaded = match LoadedMedia::open(key, &media, event_sender) {
+                                Ok(open) => Some(LoadedSource::Media(Box::new(open))),
+                                Err(error) => {
+                                    send_failure(key, Some(&failure_path), error, event_sender);
+                                    None
+                                }
+                            };
+                        }
+                    }
                 }
-                let Some(media) = loaded.as_mut() else {
+                let Some(held) = loaded.as_mut() else {
                     continue;
                 };
-                match media.decode_from(key, 0, false, command_receiver, event_sender, queue) {
+                match held.decode_from(key, 0, false, command_receiver, event_sender, queue) {
                     RunControl::Complete => {}
                     RunControl::Command(command) => pending = Some(command),
                     RunControl::Shutdown => break,
                 }
             }
             WorkerCommand::Seek { key, target_frame } => {
-                let Some(media) = loaded.as_mut() else {
+                let Some(held) = loaded.as_mut() else {
                     send_failure(
                         key,
-                        Path::new(""),
+                        None,
                         "Seek requested without a loaded source".to_owned(),
                         event_sender,
                     );
                     continue;
                 };
-                match media.decode_from(
+                match held.decode_from(
                     key,
                     target_frame,
                     true,
@@ -314,6 +327,8 @@ impl SharedMediaIndex {
                 let result = match container {
                     DecodeContainer::IsoBmff => build_mp4_index(&source, &worker_cancel),
                     DecodeContainer::RawAc4 => build_raw_index(&source, &worker_cancel),
+                    // The demo carries its own timeline and needs no index.
+                    DecodeContainer::Generated => Err("The demo has no seek index".to_owned()),
                 };
                 if worker_cancel.load(Ordering::Acquire) {
                     return;
@@ -540,6 +555,133 @@ fn build_raw_index(
     Ok(Some(points.finish(duration)))
 }
 
+/// What the worker is currently playing.
+///
+/// Both arms feed the one Scene FIFO under the one [`PlaybackKey`], so
+/// everything downstream -- the two render paths, the preview, the scene view,
+/// the meters -- sees the demo exactly as it sees a decode, and none of them
+/// needed a line changed for it.
+enum LoadedSource {
+    Media(Box<LoadedMedia>),
+    Demo(DemoStream),
+}
+
+impl LoadedSource {
+    fn decode_from(
+        &mut self,
+        key: PlaybackKey,
+        target_frame: u64,
+        discontinuity: bool,
+        command_receiver: &Receiver<WorkerCommand>,
+        event_sender: &Sender<WorkerEvent>,
+        queue: &SharedSceneQueue,
+    ) -> RunControl {
+        match self {
+            Self::Media(media) => media.decode_from(
+                key,
+                target_frame,
+                discontinuity,
+                command_receiver,
+                event_sender,
+                queue,
+            ),
+            Self::Demo(demo) => {
+                demo.decode_from(key, target_frame, command_receiver, event_sender, queue)
+            }
+        }
+    }
+}
+
+/// The sample rate the demo is synthesised at.
+///
+/// Not negotiable the way a file's rate is: the programme is generated, so it
+/// is generated at whatever the renderer would rather have, and 48 kHz is what
+/// every output path here takes without resampling.
+const DEMO_SAMPLE_RATE: u32 = 48_000;
+
+/// The built-in demo, as a source the worker can play.
+///
+/// It needs no file, no index and no priming, so a seek is nothing but a
+/// different start frame: the programme is a pure function of the timeline and
+/// answers any point on it directly.
+struct DemoStream {
+    program: DemoProgram,
+}
+
+impl DemoStream {
+    fn new() -> Self {
+        Self {
+            program: DemoProgram::new(DEMO_SAMPLE_RATE),
+        }
+    }
+
+    fn decode_from(
+        &mut self,
+        key: PlaybackKey,
+        target_frame: u64,
+        command_receiver: &Receiver<WorkerCommand>,
+        event_sender: &Sender<WorkerEvent>,
+        queue: &SharedSceneQueue,
+    ) -> RunControl {
+        let mut metrics = initial_metrics(
+            DecodeContainer::Generated,
+            self.program.sample_rate(),
+            Some(self.program.duration_frames()),
+            // Seekable everywhere, from the first frame: there is no random
+            // access point to find because every frame is one.
+            Some(0),
+            false,
+            target_frame,
+        );
+        let mut frame = i64::try_from(target_frame).unwrap_or(i64::MAX);
+        loop {
+            if self.program.block_frames_at(frame) == 0 {
+                return match finish(key, None, &metrics, event_sender, queue) {
+                    Ok(control) => control,
+                    Err(error) => {
+                        send_failure(key, None, error, event_sender);
+                        RunControl::Complete
+                    }
+                };
+            }
+            let block = self.program.block_at(frame);
+            frame = frame.saturating_add(i64::from(block.duration_frames()));
+            metrics.decoded_access_units = metrics.decoded_access_units.saturating_add(1);
+            metrics.decoded_scene_frames = metrics
+                .decoded_scene_frames
+                .saturating_add(u64::from(block.duration_frames()));
+            metrics.decoded_frames = u64::try_from(frame).unwrap_or(0);
+            metrics.object_count = block.objects().len();
+            metrics.has_lfe = block.lfe().is_some();
+            metrics.state_complete = block.state_complete();
+            metrics.metadata_updates = metrics
+                .metadata_updates
+                .saturating_add(u64::try_from(block.metadata_updates().len()).unwrap_or(0));
+            if metrics.scene_signature.is_none() {
+                metrics.presentation_index = block.presentation_index();
+                metrics.presentation_id = block.presentation_id();
+                metrics.scene_signature = Some(SceneSignature::from_block(&block));
+            }
+            match enqueue_block(
+                key,
+                None,
+                block,
+                &mut metrics,
+                command_receiver,
+                event_sender,
+                queue,
+            ) {
+                Ok(RunControl::Complete) => {}
+                Ok(control) => return control,
+                Err(error) => {
+                    send_failure(key, None, error, event_sender);
+                    return RunControl::Complete;
+                }
+            }
+        }
+    }
+}
+
 struct LoadedMedia {
     path: std::path::PathBuf,
     source: Arc<OpenedMedia>,
@@ -622,7 +764,7 @@ impl LoadedMedia {
         ) {
             Ok(control) => control,
             Err(error) => {
-                send_failure(key, &self.path, error, event_sender);
+                send_failure(key, Some(&self.path), error, event_sender);
                 RunControl::Complete
             }
         }
@@ -660,7 +802,7 @@ impl LoadedMedia {
             queue.mark_end_of_stream(key);
             send_progress(
                 key,
-                &self.path,
+                Some(&self.path),
                 DecodePhase::EndOfStream,
                 &metrics,
                 event_sender,
@@ -707,7 +849,7 @@ impl LoadedMedia {
                 }
                 let control = preroll.publish(
                     key,
-                    &self.path,
+                    Some(&self.path),
                     &mut metrics,
                     command_receiver,
                     event_sender,
@@ -716,7 +858,7 @@ impl LoadedMedia {
                 if !matches!(control, RunControl::Complete) {
                     return Ok(control);
                 }
-                finish(key, &self.path, &metrics, event_sender, queue)
+                finish(key, Some(&self.path), &metrics, event_sender, queue)
             })();
             match attempt {
                 Ok(control) => return Ok(control),
@@ -763,7 +905,7 @@ impl LoadedMedia {
         if !matches!(control, RunControl::Complete) {
             return Ok(control);
         }
-        finish(key, &self.path, &metrics, events, queue)
+        finish(key, Some(&self.path), &metrics, events, queue)
     }
 
     #[allow(
@@ -786,6 +928,11 @@ impl LoadedMedia {
         let mut reader = self.source.reader();
         let mut buffer = Vec::new();
         match self.container {
+            // A synthesised Scene is never a LoadedMedia: it has no packets to
+            // walk, so it takes the DemoStream arm of LoadedSource instead.
+            DecodeContainer::Generated => {
+                return Err("The demo carries no packet stream".to_owned());
+            }
             DecodeContainer::IsoBmff => {
                 let metadata = self.metadata.as_ref().ok_or("Missing MP4 metadata")?;
                 let (mp4, timeline, timing) = parse_mp4_timing(&metadata.bytes)?;
@@ -808,7 +955,7 @@ impl LoadedMedia {
                         .with_random_access_hint(info.is_sync);
                     let control = decode_access_unit(
                         key,
-                        &self.path,
+                        Some(&self.path),
                         &mut self.session,
                         &mut continuity,
                         &buffer,
@@ -853,7 +1000,7 @@ impl LoadedMedia {
                         .with_presentation_sample_start(frame_start);
                     let control = decode_access_unit(
                         key,
-                        &self.path,
+                        Some(&self.path),
                         &mut self.session,
                         &mut continuity,
                         frame.raw_frame,
@@ -895,7 +1042,7 @@ fn new_session() -> Ac4DecoderSession {
 #[allow(clippy::too_many_arguments)]
 fn decode_access_unit(
     key: PlaybackKey,
-    path: &Path,
+    path: Option<&Path>,
     session: &mut Ac4DecoderSession,
     continuity: &mut super::metadata::SceneContinuity,
     raw_frame: &[u8],
@@ -991,7 +1138,7 @@ fn decode_access_unit(
 #[allow(clippy::too_many_arguments)]
 fn enqueue_block(
     key: PlaybackKey,
-    path: &Path,
+    path: Option<&Path>,
     mut block: DecodedSceneBlock,
     metrics: &mut DecodeMetrics,
     command_receiver: &Receiver<WorkerCommand>,
@@ -1032,7 +1179,7 @@ fn enqueue_block(
 
 fn finish(
     key: PlaybackKey,
-    path: &Path,
+    path: Option<&Path>,
     metrics: &DecodeMetrics,
     event_sender: &Sender<WorkerEvent>,
     queue: &SharedSceneQueue,
@@ -1212,7 +1359,7 @@ fn pending_command(receiver: &Receiver<WorkerCommand>) -> Option<RunControl> {
 
 fn send_progress(
     key: PlaybackKey,
-    path: &Path,
+    path: Option<&Path>,
     phase: DecodePhase,
     metrics: &DecodeMetrics,
     sender: &Sender<WorkerEvent>,
@@ -1222,18 +1369,23 @@ fn send_progress(
             key,
             snapshot: Box::new(DecoderSnapshot::progress(
                 phase,
-                path.to_path_buf(),
+                path.map(Path::to_path_buf),
                 metrics.clone(),
             )),
         },
     });
 }
 
-fn send_failure(key: PlaybackKey, path: &Path, error: String, sender: &Sender<WorkerEvent>) {
+fn send_failure(
+    key: PlaybackKey,
+    path: Option<&Path>,
+    error: String,
+    sender: &Sender<WorkerEvent>,
+) {
     let _ = sender.send(WorkerEvent {
         kind: WorkerEventKind::Snapshot {
             key,
-            snapshot: Box::new(DecoderSnapshot::failed(path.to_path_buf(), error)),
+            snapshot: Box::new(DecoderSnapshot::failed(path.map(Path::to_path_buf), error)),
         },
     });
 }
@@ -1299,6 +1451,70 @@ mod tests {
         std::env::var_os("MACINDECODE_AC4_TEST_MEDIA")
             .map(PathBuf::from)
             .expect("set MACINDECODE_AC4_TEST_MEDIA")
+    }
+
+    /// The demo end to end: controller, worker, FIFO, seek and replay.
+    ///
+    /// Not ignored, and that is the point. Every other test that drives this
+    /// worker needs `MACINDECODE_AC4_TEST_MEDIA`, because the repository ships
+    /// no AC-4 to decode. The demo needs no media, no device and no index, so
+    /// the command path, the queue's backpressure, the keying and end of stream
+    /// are covered by a plain `cargo test` for the first time.
+    #[test]
+    fn plays_the_built_in_demo_without_media_or_an_index() {
+        let mut controller = DecoderController::new();
+        controller.ensure_open_source(&super::PlaybackSource::Demo);
+        wait_for_decoder(
+            &mut controller,
+            |controller| controller.snapshot().phase() == DecodePhase::Ready,
+            "the demo prebuffers",
+        );
+
+        let metrics = controller
+            .snapshot()
+            .metrics()
+            .expect("demo metrics")
+            .clone();
+        assert_eq!(metrics.container(), super::DecodeContainer::Generated);
+        assert_eq!(metrics.container().label(), "built-in demo");
+        assert!(!metrics.is_indexing(), "the demo needs no seek index");
+        assert_eq!(metrics.index_error(), None);
+        let duration = metrics.duration_frames().expect("a known duration");
+        assert!(duration > 0);
+        // Every frame is a random access point, so the transport is live at once.
+        assert!(metrics.can_seek_to(0));
+        assert!(metrics.can_seek_to(duration / 2));
+        assert!(metrics.can_seek_to(duration));
+        assert!(metrics.object_count() > 0 && metrics.has_lfe());
+
+        let signature = metrics.scene_signature().expect("a demo signature").clone();
+        let mut drained = 0u64;
+        while let Some(block) = controller.try_pop_scene_block() {
+            assert_eq!(super::SceneSignature::from_block(&block), signature);
+            drained = drained.saturating_add(u64::from(block.duration_frames()));
+        }
+        assert!(drained > 0, "the FIFO held no demo audio");
+
+        // A seek is a different start frame and nothing else: no index to
+        // consult, no random access point to fall back to.
+        let target = duration / 2;
+        controller.seek(target).expect("the demo seeks anywhere");
+        wait_for_decoder(
+            &mut controller,
+            |controller| controller.snapshot().phase() == DecodePhase::Ready,
+            "the demo prebuffers after seeking",
+        );
+        let block = controller
+            .try_pop_scene_block()
+            .expect("audio after the seek");
+        assert_eq!(
+            u64::try_from(block.start_frame()).expect("a positive start"),
+            target,
+            "the demo resumes exactly where it was asked to"
+        );
+
+        controller.close();
+        assert_eq!(controller.snapshot().phase(), DecodePhase::Idle);
     }
 
     fn wait_for_decoder(
@@ -1582,7 +1798,7 @@ mod tests {
         std::fs::remove_file(&copy.0).unwrap();
         let old_key = controller.playback_key();
         controller.snapshot = super::super::DecoderSnapshot::failed(
-            copy.0.clone(),
+            Some(copy.0.clone()),
             "simulated Core failure after loading",
         );
         controller.retry().unwrap();

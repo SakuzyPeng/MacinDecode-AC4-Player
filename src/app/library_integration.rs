@@ -1,10 +1,10 @@
 //! Connect persisted library identities to the existing decoder/output lifecycle.
 use super::{
     AppPreferences, Arc, Context, DecodePhase, DialogWake, Duration, EntryId, Future, Instant,
-    MediaSource, Mutation, Path, PathBuf, Pin, PlaybackCursor, PlaybackMode, PlayerApp, PlaylistId,
-    PlaylistStep, Poll, SelectedSource, SessionState, StatusLine, Waker, decoder_status_line, egui,
-    scene3d, should_handle_completed_item, should_replay_current_on_completion,
-    shuffled_source_index,
+    MediaSource, Mutation, Path, PathBuf, Pin, PlaybackCursor, PlaybackMode, PlaybackSource,
+    PlayerApp, PlaylistId, PlaylistStep, Poll, SelectedSource, SessionState, StatusLine, Waker,
+    decoder_status_line, egui, scene3d, should_handle_completed_item,
+    should_replay_current_on_completion, shuffled_source_index,
 };
 use crate::library::Notice;
 use crate::playlist::{Entry, reordered};
@@ -62,6 +62,52 @@ impl PlayerApp {
     pub(super) fn selected_path(&self) -> Option<&Path> {
         self.selected_source().map(SelectedSource::path)
     }
+    /// What playback should be drawing on right now.
+    ///
+    /// The demo takes precedence when it is on, because switching to it parks
+    /// the cursor rather than replacing it: turning the demo off leaves the
+    /// library exactly as it was.
+    pub(super) fn playback_source(&mut self) -> Option<PlaybackSource> {
+        if self.demo {
+            return Some(PlaybackSource::Demo);
+        }
+        self.playback_media().map(PlaybackSource::Media)
+    }
+
+    /// Start or stop the built-in demo, with the same source-change hygiene an
+    /// ordinary track change gets.
+    pub(super) fn activate_demo(&mut self, on: bool) {
+        // Before parking the cursor, so the position being left is the one
+        // that gets stored rather than the demo's absence of one.
+        self.save_checkpoint();
+        self.output.pause();
+        if let Some(previous) = self.pending_output_change.take() {
+            self.output.reset();
+            self.output.install_settings(previous);
+        } else {
+            self.output.suspend_for_source_change();
+        }
+        self.decoder.close();
+        self.media_source = None;
+        self.resume = None;
+        self.audio_settings_error = None;
+        self.timeline_preview = 0.0;
+        self.timeline_dragging = false;
+        self.playback_intent = on;
+        self.playback_restore_pending = true;
+        self.automatic_reconfigure_guard = None;
+        self.waiting_for_device = None;
+        self.marked_failure_key = None;
+        self.automatic_candidate = false;
+        self.cursor = None;
+        self.demo = on;
+        self.status = StatusLine::idle(if on {
+            "Opening the built-in demo"
+        } else {
+            "Stopped the built-in demo"
+        });
+    }
+
     pub(super) fn playback_media(&mut self) -> Option<MediaSource> {
         let path = self.cursor.as_ref().map(|c| c.entry.source.path());
         if self.media_source.as_ref().map(MediaSource::path) != path {
@@ -564,7 +610,10 @@ impl PlayerApp {
         prefs
     }
     fn save_checkpoint(&mut self) {
-        if !self.library.ready {
+        // The demo is not a library item and has no position worth resuming.
+        // Recording it would overwrite the checkpoint with an absent cursor and
+        // lose wherever the listener actually was.
+        if !self.library.ready || self.demo {
             return;
         }
         self.checkpoint.browse = self.library.desired_browse;

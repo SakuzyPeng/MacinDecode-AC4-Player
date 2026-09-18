@@ -676,11 +676,29 @@ pub(crate) const GROUND_CODA: &[Note] = &[note(0, 48, 50)];
 /// but not a wrong note inside the set the score already uses. This
 /// catches any of them, which is the point of transcribing a piece
 /// everyone knows: the error has to be impossible to smuggle in.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "these express the contract the score is generated against -- the \
+                  phase budget, the note geometry, the golden digest -- and the \
+                  tests are what check it; the arrangement reads the tables directly"
+    )
+)]
 pub(crate) const SCORE_DIGEST: u64 = 3_802_980_187_777_669_304;
 
 /// Every pitch class the score uses, as a golden value. D major plus the
 /// C natural the line borrows on its way to G; a transcription that lost
 /// or invented an accidental would change this list.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "these express the contract the score is generated against -- the \
+                  phase budget, the note geometry, the golden digest -- and the \
+                  tests are what check it; the arrangement reads the tables directly"
+    )
+)]
 pub(crate) const PITCH_CLASSES: &[u8] = &[0, 1, 2, 4, 6, 7, 9, 11];
 pub(crate) const PITCH_RANGE: (u8, u8) = (38, 86);
 

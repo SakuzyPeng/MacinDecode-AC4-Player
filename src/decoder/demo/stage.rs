@@ -26,10 +26,14 @@ use crate::decoder::{
 };
 
 /// Slots that exist for the whole programme.
-pub(crate) const SLOTS: usize = 16;
+///
+/// Taken from the score rather than restated here: the generator proved the
+/// phase map fits this many objects, and two copies of the number are two
+/// chances for the proof to stop describing the code.
+pub(crate) const SLOTS: usize = score::MAX_DYNAMIC_OBJECTS as usize;
 /// Slots the music itself holds: violins one to three, ground, continuo pair.
-pub(crate) const SPINE: usize = 6;
-const VIOLINS: usize = 3;
+pub(crate) const SPINE: usize = score::SPINE_SLOTS as usize;
+const VIOLINS: usize = score::CANON_VOICE_SLOTS as usize;
 /// Element IDs are `1..=SLOTS` for objects and this for the bed, all constant.
 const LFE_ELEMENT_ID: u64 = 0x100;
 
@@ -246,6 +250,14 @@ pub(crate) struct Arrangement {
     /// counted rather than refused because the cap has to hold by construction:
     /// if a tempo or a decay changes, the demo truncates one tail and the test
     /// goes red, instead of overrunning the sixteen objects it promised.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "the counter exists so the cap holds by construction; the test \
+                      asserting it stays zero is the only thing that needs to read it"
+        )
+    )]
     pub(crate) stolen: usize,
 }
 
@@ -265,7 +277,6 @@ pub(crate) fn arrange(sample_rate: u32, timbres: &[Timbre]) -> Arrangement {
                 sample_rate,
             )
     };
-    let statement_ticks = u64::from(score::TICKS_PER_STATEMENT);
     let keyboard_phase = score::PHASES
         .iter()
         .find(|phase| phase.per_note())
@@ -297,34 +308,7 @@ pub(crate) fn arrange(sample_rate: u32, timbres: &[Timbre]) -> Arrangement {
         }
     }
 
-    // The ground and a plain triadic realisation of its figured bass.
-    for statement in 0..u64::from(score::GROUND_REPEATS) {
-        for note in score::GROUND {
-            let tick = statement * statement_ticks + u64::from(note.onset());
-            let onset = frame_of(tick, sample_rate);
-            let mut ground = Placement::new(
-                3,
-                onset,
-                note.pitch(),
-                timbre::GROUND,
-                hold_of(timbre::GROUND, onset),
-            );
-            ground.motion = Motion::Fixed([0.0, ORBIT_RADIUS, -0.35]);
-            placements.push(ground);
-            for (index, degrees) in [2usize, 4].into_iter().enumerate() {
-                let mut chord = Placement::new(
-                    SPINE - 2 + index,
-                    onset,
-                    diatonic_above(note.pitch(), degrees) + 12,
-                    timbre::CONTINUO,
-                    hold_of(timbre::CONTINUO, onset),
-                );
-                chord.level = OBJECT_PEAK * 0.55;
-                chord.motion = Motion::Fixed([if index == 0 { -0.55 } else { 0.55 }, 0.5, -0.15]);
-                placements.push(chord);
-            }
-        }
-    }
+    ground_and_continuo(&mut placements, sample_rate, &hold_of);
 
     let mut stolen = 0;
     for phase in score::PHASES {
@@ -351,15 +335,77 @@ pub(crate) fn arrange(sample_rate: u32, timbres: &[Timbre]) -> Arrangement {
     }
 
     placements.sort_by_key(|placement| (placement.onset, placement.slot));
-    let duration_frames = u64::try_from(frame_of(
+    // The programme runs until the last note has finished ringing, not until
+    // the last bar line. Ending on the bar line cuts the final cadence off
+    // mid-decay, which is audible as a click and is not how the piece ends.
+    let notated = frame_of(
         u64::from(score::BARS) * u64::from(score::TICKS_PER_BEAT * score::BEATS_PER_BAR),
         sample_rate,
-    ))
-    .unwrap_or(0);
+    );
+    let ringing = placements
+        .iter()
+        .map(|placement| placement.release)
+        .max()
+        .unwrap_or(notated);
+    let duration_frames = u64::try_from(notated.max(ringing)).unwrap_or(0);
     Arrangement {
         placements,
         duration_frames,
         stolen,
+    }
+}
+
+/// The ground bass, its figured-bass realisation, and the closing bar.
+///
+/// The realisation is the plain one: the diatonic third and fifth above each
+/// ground note, an octave up. Pachelbel wrote a figured bass for a player to
+/// fill in, so something has to fill it in; taking the textbook stack keeps
+/// that from becoming a place where the demo quietly composes.
+fn ground_and_continuo(
+    placements: &mut Vec<Placement>,
+    sample_rate: u32,
+    hold_of: &impl Fn(usize, i64) -> i64,
+) {
+    let statement_ticks = u64::from(score::TICKS_PER_STATEMENT);
+    // The ground and a plain triadic realisation of its figured bass, then the
+    // closing bar. The coda is one note and easy to forget, and forgetting it
+    // leaves the piece ending on violin tails over no bass at all.
+    let closing = u64::from(score::GROUND_REPEATS) * statement_ticks;
+    let ground_notes = (0..u64::from(score::GROUND_REPEATS))
+        .flat_map(|statement| {
+            score::GROUND
+                .iter()
+                .map(move |note| statement * statement_ticks + u64::from(note.onset()))
+                .zip(score::GROUND)
+        })
+        .chain(
+            score::GROUND_CODA
+                .iter()
+                .map(|note| (closing + u64::from(note.onset()), note)),
+        );
+    for (tick, note) in ground_notes {
+        let onset = frame_of(tick, sample_rate);
+        let mut ground = Placement::new(
+            3,
+            onset,
+            note.pitch(),
+            timbre::GROUND,
+            hold_of(timbre::GROUND, onset),
+        );
+        ground.motion = Motion::Fixed([0.0, ORBIT_RADIUS, -0.35]);
+        placements.push(ground);
+        for (index, degrees) in [2usize, 4].into_iter().enumerate() {
+            let mut chord = Placement::new(
+                SPINE - 2 + index,
+                onset,
+                diatonic_above(note.pitch(), degrees) + 12,
+                timbre::CONTINUO,
+                hold_of(timbre::CONTINUO, onset),
+            );
+            chord.level = OBJECT_PEAK * 0.55;
+            chord.motion = Motion::Fixed([if index == 0 { -0.55 } else { 0.55 }, 0.5, -0.15]);
+            placements.push(chord);
+        }
     }
 }
 
@@ -539,10 +585,6 @@ pub(crate) fn lfe_onsets(sample_rate: u32) -> Vec<(i64, u8)> {
 /// The element ID a slot carries for the whole programme.
 pub(crate) const fn element_id(slot: usize) -> u64 {
     slot as u64 + 1
-}
-
-pub(crate) const fn lfe_element_id() -> u64 {
-    LFE_ELEMENT_ID
 }
 
 /// Resolve a slot's declared state at one instant.

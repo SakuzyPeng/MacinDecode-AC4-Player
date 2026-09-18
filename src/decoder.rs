@@ -13,12 +13,7 @@ use std::time::Duration;
 
 use crate::media::MediaSource;
 
-#[allow(
-    dead_code,
-    reason = "the demo score's only consumer is the synthesiser that builds Scene \
-              blocks from it, which lands on top of this; until then the tables are \
-              read by this module's own tests"
-)]
+#[cfg_attr(not(feature = "decode"), allow(dead_code))]
 pub(crate) mod demo;
 #[cfg_attr(not(feature = "decode"), allow(dead_code))]
 pub(crate) mod metadata;
@@ -41,6 +36,13 @@ pub const MAX_BUFFER_SECONDS: u64 = 2;
 pub enum DecodeContainer {
     RawAc4,
     IsoBmff,
+    /// The built-in demo: a Scene synthesised here rather than decoded.
+    ///
+    /// It enters the pipeline downstream of Core, so it exercises everything
+    /// from the FIFO outwards and nothing before it. The label is what the
+    /// status line shows, and it says so: a demo that read as a decode result
+    /// would be claiming something about the decoder that it cannot support.
+    Generated,
 }
 
 impl DecodeContainer {
@@ -48,6 +50,36 @@ impl DecodeContainer {
         match self {
             Self::RawAc4 => "raw AC-4",
             Self::IsoBmff => "ISO BMFF",
+            Self::Generated => "built-in demo",
+        }
+    }
+}
+
+/// What playback is drawing on: a file, or the synthesised demo.
+///
+/// `MediaSource` stays about files. The demo has no path, no handle and
+/// nothing to reopen, so giving it one would mean a sentinel path travelling
+/// through the library, the file catalog and the relocate dialog, every one of
+/// which would treat it as a file that had gone missing.
+#[derive(Debug, Clone)]
+pub enum PlaybackSource {
+    Media(MediaSource),
+    Demo,
+}
+
+impl PlaybackSource {
+    pub fn path(&self) -> Option<&Path> {
+        match self {
+            Self::Media(source) => Some(source.path()),
+            Self::Demo => None,
+        }
+    }
+
+    fn same_as(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Demo, Self::Demo) => true,
+            (Self::Media(left), Self::Media(right)) => left.path() == right.path(),
+            _ => false,
         }
     }
 }
@@ -287,44 +319,48 @@ impl DecoderSnapshot {
         }
     }
 
-    fn opening(path: PathBuf) -> Self {
+    fn opening(path: Option<PathBuf>) -> Self {
         Self {
             phase: DecodePhase::Opening,
-            path: Some(path),
+            path,
             metrics: None,
             detail: None,
         }
     }
 
-    fn seeking(path: PathBuf, mut metrics: DecodeMetrics, target_frame: u64) -> Self {
+    fn seeking(path: Option<PathBuf>, mut metrics: DecodeMetrics, target_frame: u64) -> Self {
         metrics.target_frame = target_frame;
         metrics.buffered_frames = 0;
         Self {
             phase: DecodePhase::Seeking,
-            path: Some(path),
+            path,
             metrics: Some(metrics),
             detail: None,
         }
     }
 
     #[cfg(feature = "decode")]
-    pub(super) fn progress(phase: DecodePhase, path: PathBuf, metrics: DecodeMetrics) -> Self {
+    pub(super) fn progress(
+        phase: DecodePhase,
+        path: Option<PathBuf>,
+        metrics: DecodeMetrics,
+    ) -> Self {
         debug_assert!(matches!(
             phase,
             DecodePhase::Buffering | DecodePhase::Ready | DecodePhase::EndOfStream
         ));
         Self {
             phase,
-            path: Some(path),
+            path,
             metrics: Some(metrics),
             detail: None,
         }
     }
 
-    fn failed(path: PathBuf, error: impl Into<String>) -> Self {
+    fn failed(path: Option<PathBuf>, error: impl Into<String>) -> Self {
         Self {
             phase: DecodePhase::Failed,
-            path: Some(path),
+            path,
             metrics: None,
             detail: Some(error.into()),
         }
@@ -889,7 +925,7 @@ fn lock_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 pub(super) enum WorkerCommand {
     Open {
         key: PlaybackKey,
-        source: MediaSource,
+        source: PlaybackSource,
         reuse_cached: bool,
     },
     Seek {
@@ -943,7 +979,7 @@ pub struct DecoderController {
     join_handle: Option<JoinHandle<()>>,
     queue: SharedSceneQueue,
     snapshot: DecoderSnapshot,
-    active_path: Option<PathBuf>,
+    active_source: Option<PlaybackSource>,
     request_id: u64,
     playback_epoch: u64,
     index_state: ControllerIndexState,
@@ -966,7 +1002,7 @@ impl DecoderController {
                 join_handle: Some(worker.join_handle),
                 queue,
                 snapshot: DecoderSnapshot::idle(),
-                active_path: None,
+                active_source: None,
                 request_id: 0,
                 playback_epoch: 0,
                 index_state: ControllerIndexState::Inactive,
@@ -978,7 +1014,7 @@ impl DecoderController {
                 join_handle: None,
                 queue,
                 snapshot: DecoderSnapshot::unavailable(error),
-                active_path: None,
+                active_source: None,
                 request_id: 0,
                 playback_epoch: 0,
                 index_state: ControllerIndexState::Inactive,
@@ -988,26 +1024,35 @@ impl DecoderController {
     }
 
     pub fn ensure_open(&mut self, path: &Path) {
-        if self.active_path.as_deref() != Some(path) {
-            self.ensure_open_source(&MediaSource::new(path));
-        }
+        self.ensure_open_source(&PlaybackSource::Media(MediaSource::new(path)));
     }
 
-    pub fn ensure_open_source(&mut self, source: &MediaSource) {
-        let path = source.path();
-        if self.active_path.as_deref() == Some(path) {
+    pub fn ensure_open_source(&mut self, source: &PlaybackSource) {
+        if self
+            .active_source
+            .as_ref()
+            .is_some_and(|active| active.same_as(source))
+        {
             return;
         }
-        self.active_path = Some(path.to_path_buf());
+        let path = source.path().map(Path::to_path_buf);
+        self.active_source = Some(source.clone());
         if self.command_sender.is_none() {
             return;
         }
         self.advance_request();
         self.playback_epoch = 0;
-        self.index_state = ControllerIndexState::Building;
+        // The demo's timeline is known from the first block and seekable
+        // everywhere, so there is no index to wait for and the transport comes
+        // up enabled instead of showing "indexing".
+        self.index_state = if matches!(source, PlaybackSource::Demo) {
+            ControllerIndexState::Inactive
+        } else {
+            ControllerIndexState::Building
+        };
         let key = self.playback_key();
         self.queue.reset(key);
-        self.snapshot = DecoderSnapshot::opening(path.to_path_buf());
+        self.snapshot = DecoderSnapshot::opening(path.clone());
         self.revision = self.revision.saturating_add(1);
         let command = WorkerCommand::Open {
             key,
@@ -1019,16 +1064,14 @@ impl DecoderController {
             .as_ref()
             .is_none_or(|sender| sender.send(command).is_err())
         {
-            self.snapshot = DecoderSnapshot::failed(
-                path.to_path_buf(),
-                "MacinDecode Core worker stopped unexpectedly",
-            );
+            self.snapshot =
+                DecoderSnapshot::failed(path, "MacinDecode Core worker stopped unexpectedly");
             self.revision = self.revision.saturating_add(1);
         }
     }
 
     pub fn close(&mut self) {
-        if self.active_path.take().is_none() {
+        if self.active_source.take().is_none() {
             return;
         }
         self.advance_request();
@@ -1102,7 +1145,7 @@ impl DecoderController {
     }
 
     pub fn active_path(&self) -> Option<&Path> {
-        self.active_path.as_deref()
+        self.active_source.as_ref().and_then(PlaybackSource::path)
     }
 
     pub fn is_working(&self) -> bool {
@@ -1147,9 +1190,11 @@ impl DecoderController {
     pub fn seek(&mut self, target_frame: u64) -> Result<(), String> {
         self.validate_seek(target_frame)?;
         let path = self
-            .active_path
-            .clone()
-            .ok_or("No active media is loaded")?;
+            .active_source
+            .as_ref()
+            .ok_or("No active media is loaded")?
+            .path()
+            .map(Path::to_path_buf);
         let metrics = self
             .snapshot
             .metrics()
@@ -1174,7 +1219,7 @@ impl DecoderController {
     /// # Errors
     /// Returns the same source/index/range errors as `seek`.
     pub fn validate_seek(&self, target_frame: u64) -> Result<(), String> {
-        if self.active_path.is_none() {
+        if self.active_source.is_none() {
             return Err("No active media is loaded".into());
         }
         let metrics = self
@@ -1216,10 +1261,11 @@ impl DecoderController {
         if self.snapshot.phase() != DecodePhase::Failed {
             return Err("The current decode has not failed".into());
         }
-        let path = self
-            .active_path
+        let source = self
+            .active_source
             .clone()
             .ok_or("No active media is loaded")?;
+        let path = source.path().map(Path::to_path_buf);
         let sender = self
             .command_sender
             .as_ref()
@@ -1232,7 +1278,7 @@ impl DecoderController {
         if sender
             .send(WorkerCommand::Open {
                 key,
-                source: MediaSource::new(&path),
+                source,
                 reuse_cached: true,
             })
             .is_err()
@@ -1400,8 +1446,8 @@ mod tests {
             event_receiver: Some(event_rx),
             join_handle: None,
             queue: SharedSceneQueue::new(),
-            snapshot: DecoderSnapshot::failed(path.clone(), "simulated Core failure"),
-            active_path: Some(path.clone()),
+            snapshot: DecoderSnapshot::failed(Some(path.clone()), "simulated Core failure"),
+            active_source: Some(PlaybackSource::Media(MediaSource::new(&path))),
             request_id: 7,
             playback_epoch: 2,
             index_state: ControllerIndexState::Ready {
@@ -1429,13 +1475,13 @@ mod tests {
         assert!(
             matches!(pending_commands.try_recv().unwrap(), WorkerCommand::Open {
             key, source, reuse_cached: true
-        } if key == new_key && source.path() == path)
+        } if key == new_key && source.path() == Some(path.as_path()))
         );
         events
             .send(WorkerEvent {
                 kind: WorkerEventKind::Snapshot {
                     key: old_key,
-                    snapshot: Box::new(DecoderSnapshot::failed(path, "late failure")),
+                    snapshot: Box::new(DecoderSnapshot::failed(Some(path), "late failure")),
                 },
             })
             .unwrap();
@@ -1453,9 +1499,9 @@ mod tests {
     fn seek_preflight_preserves_the_current_epoch_and_queued_audio() {
         let mut controller = DecoderController::new();
         let path = PathBuf::from("fixture.ac4");
-        controller.active_path = Some(path.clone());
+        controller.active_source = Some(PlaybackSource::Media(MediaSource::new(&path)));
         controller.snapshot =
-            DecoderSnapshot::progress(DecodePhase::Ready, path, indexed_metrics());
+            DecoderSnapshot::progress(DecodePhase::Ready, Some(path), indexed_metrics());
         let key = controller.playback_key();
         let revision = controller.revision();
         controller.queue.try_push(key, block(48_000, 4800)).unwrap();
@@ -1479,7 +1525,7 @@ mod tests {
         controller.queue.mark_end_of_stream(key);
         controller.snapshot = DecoderSnapshot::progress(
             DecodePhase::EndOfStream,
-            PathBuf::from("fixture.ac4"),
+            Some(PathBuf::from("fixture.ac4")),
             indexed_metrics(),
         );
         controller.poll();

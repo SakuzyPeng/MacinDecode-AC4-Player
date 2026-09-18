@@ -68,6 +68,15 @@ impl Note {
         self.onset
     }
 
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "these express the contract the score is generated against -- the \
+                      phase budget, the note geometry, the golden digest -- and the \
+                      tests are what check it; the arrangement reads the tables directly"
+        )
+    )]
     pub(crate) const fn duration(self) -> u32 {
         self.duration
     }
@@ -77,6 +86,15 @@ impl Note {
         self.pitch
     }
 
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "these express the contract the score is generated against -- the \
+                      phase budget, the note geometry, the golden digest -- and the \
+                      tests are what check it; the arrangement reads the tables directly"
+        )
+    )]
     pub(crate) const fn end(self) -> u32 {
         self.onset.saturating_add(self.duration)
     }
@@ -123,6 +141,15 @@ impl Phase {
     }
 
     /// Inclusive ground-statement range, counting from one.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "these express the contract the score is generated against -- the \
+                      phase budget, the note geometry, the golden digest -- and the \
+                      tests are what check it; the arrangement reads the tables directly"
+        )
+    )]
     pub(crate) const fn statements(self) -> (u32, u32) {
         (self.first_statement, self.last_statement)
     }
@@ -149,12 +176,30 @@ impl Phase {
     }
 
     /// Notes the generator measured as ringing together at this phase's peak.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "these express the contract the score is generated against -- the \
+                      phase budget, the note geometry, the golden digest -- and the \
+                      tests are what check it; the arrangement reads the tables directly"
+        )
+    )]
     pub(crate) const fn peak_ringing(self) -> u32 {
         self.peak_ringing
     }
 
     /// Slots held at once: the spine, less the canon voices a per-note phase
     /// has already emptied into the pool, plus the pool itself.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "these express the contract the score is generated against -- the \
+                      phase budget, the note geometry, the golden digest -- and the \
+                      tests are what check it; the arrangement reads the tables directly"
+        )
+    )]
     pub(crate) const fn objects_held(self) -> u32 {
         let spine = if self.per_note {
             score::SPINE_SLOTS - score::CANON_VOICE_SLOTS

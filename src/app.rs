@@ -15,6 +15,7 @@ use crate::backend::{
 use crate::bitstream_ui::{self, BitstreamAction};
 use crate::decoder::{
     DecodeMetrics, DecodePhase, DecoderController, DecoderSnapshot, PREBUFFER_MILLISECONDS,
+    PlaybackSource,
 };
 use crate::inspection::InspectionController;
 use crate::library::{LibraryController, Mutation};
@@ -70,6 +71,12 @@ pub struct PlayerApp {
     timeline_dragging: bool,
     playback_restore_pending: bool,
     playback_intent: bool,
+    /// Whether the built-in demo is what is playing.
+    ///
+    /// It is deliberately not a library entry and not a playback cursor: it has
+    /// no path, so a cursor for it would be a file that had gone missing to
+    /// every part of the library that looks at one.
+    demo: bool,
     playback_mode: PlaybackMode,
     shuffle_history: Vec<EntryId>,
     shuffle_state: u64,
@@ -876,6 +883,7 @@ impl PlayerApp {
             timeline_dragging: false,
             playback_restore_pending: false,
             playback_intent: false,
+            demo: false,
             playback_mode: PlaybackMode::default(),
             shuffle_history: Vec::new(),
             shuffle_state: shuffle_seed(),
@@ -950,7 +958,7 @@ impl PlayerApp {
     }
 
     fn sync_decoder(&mut self, context: &egui::Context) {
-        if let Some(source) = self.playback_media() {
+        if let Some(source) = self.playback_source() {
             self.decoder.ensure_open_source(&source);
         } else {
             self.decoder.close();
@@ -1411,6 +1419,9 @@ impl PlayerApp {
                     });
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui.button("About").clicked() { self.about.open = !self.about.open; }
+                        if ui.button(if self.demo { "Stop demo" } else { "Demo" }).clicked() {
+                            self.activate_demo(!self.demo);
+                        }
                         if ui.button("Visual settings").clicked() { self.visual_settings_open = !self.visual_settings_open; }
                         if ui.button("Audio settings").clicked() { show_settings = !show_settings; }
                         ui.add_enabled_ui(!system_output, |ui| {
