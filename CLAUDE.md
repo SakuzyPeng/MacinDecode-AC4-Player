@@ -27,8 +27,16 @@ Design docs (Chinese) carry the authoritative contracts; keep them in sync when 
 they describe: `docs/ARCHITECTURE.md`, `docs/MACINRENDER.md` (output, Atmos label assist, head
 control, native build), `docs/WINDOWS_DECODE.md`, `docs/WINDOWS_SPATIAL_AUDIO.md`,
 `docs/PLAYLISTS.md` (persistence), `docs/STORAGE.md` (data directory, managed folders), `docs/PACKAGING.md`
-(installers, CI). `README.md` (Chinese) and `README.en.md` (English) are a pair — a user-visible
-change lands in both.
+(installers, CI).
+
+Two user-facing pairs, each of which a user-visible change lands in both halves of: `README.md` /
+`README.en.md` (install, quickstart, platform support, FAQ, building) and `docs/MANUAL.md` /
+`docs/MANUAL.en.md` (the interface reference — the 3D scene, every Visual settings switch and what it
+reads, the playback modes in depth). Reference material about the UI belongs in the manual, not in
+the README; the README links into it. The manual's four diagrams come from
+`scripts/generate-readme-diagrams.py`, which transcribes the constants it annotates (the silence
+floor, the footprint scales, the nameplate dim, the silence hold) into one block — change one of
+those in `src/scene3d/params.rs` or `src/app.rs` and that block has to follow.
 
 ## Commands
 

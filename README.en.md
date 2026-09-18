@@ -12,6 +12,10 @@ in a 3D scene in the middle of the window.
 > This is not a general-purpose music player: it handles `.m4a`, `.mp4` and `.ac4` files that
 > **contain an AC-4 track**, and does not play MP3, AAC or FLAC.
 
+This page covers installing, getting started and building. **For what everything in the window is
+telling you and what each setting does, see the [user manual](docs/MANUAL.en.md)**
+([简体中文](docs/MANUAL.md)).
+
 ## Contents
 
 - [What you can do with it](#what-you-can-do-with-it)
@@ -23,7 +27,7 @@ in a 3D scene in the middle of the window.
 - [FAQ](#faq)
 - [Known limits](#known-limits)
 - [Building from source](#building-from-source)
-- [Developer documentation](#developer-documentation)
+- [Documentation](#documentation)
 - [License](#license)
 
 ## What you can do with it
@@ -80,50 +84,15 @@ the checksum and build information attachments do not need to be installed. You 
 
 **The 3D scene** (center of the window): drag to orbit, `Shift` + drag to pan, scroll to zoom. The
 `ISO` / `TOP` / `BACK` / `SIDE` / `RESET` buttons jump to fixed viewpoints, with a separate
-perspective/orthographic projection toggle. **Visual settings**, next to **Audio settings**, groups
-element numbers (IDs), object loudness (LVL), and fading persistently silent objects. All three
-switches are independent, enabled by default, and remembered across restarts. The scene draws at most 20 objects at once
-and says at the bottom left how many it left out. With element numbers enabled, black numbers identify scene-relative
-objects and white numbers identify head-locked objects. Live counts for both reference frames appear above the scene in fixed square badges with centered numbers.
+perspective/orthographic projection toggle. The scene draws at most 20 objects at once and says at
+the bottom left how many it left out.
 
-With `LVL` enabled the floor footprint carries two readings instead of one: the hairline ring is the
-gain the metadata asks for, and the filled core is the level actually measured, both read on the same
-decibel scale. A wide ring around a small core is an object that was positioned and gained but has
-almost no signal in it — something gain alone cannot show. A small nameplate also floats above each
-object, reporting dBFS and nothing else: its width is fixed and the sign and digits each own a cell,
-so nothing shifts sideways as the level crosses -10 dB, and a plate that has dropped to `-∞` steps
-back to a dim that stays readable without crowding the view. **Element numbers stay printed on the
-cube's six faces and never move with `LVL`** — identity uses the depth buffer, the readout uses the
-screen, and each has one home. Trail breadcrumbs are sized by the loudness recorded when each was
-taken. With **Fade persistently silent objects** enabled, an object with no signal for about two
-seconds fades out of the scene — its nameplate goes from that dim to nothing, its cube recedes to a
-ghost — but **its gain ring stays on the floor**, because "full gain, empty track" is itself
-persistently silent and hiding the ring would hide the very fault worth seeing. Sound returning
-restores it at once. A grey `Silent` count above the scene says how many have faded out. Disabling
-fading keeps every object on screen and hides the `Silent` count, leaving a silent plate resting at
-its dim; switching `LVL` does not affect fading. Loudness is measured before rendering, K-weighted
-per ITU-R BS.1770, and cross-checked against the reference implementation in the tests.
-
-**Listener skins** are selected in **Visual settings → Listener skin**. Use **Import skin PNG…**
-to import a standard 64×64 Minecraft skin. Transparent arm margins identify Steve (4 px arms)
-or Alex (3 px arms) automatically; the body selector also allows an override for images whose
-editor filled those margins. Skins include separate left/right limbs, transparent clothing layers
-and the existing head pose. Legacy 64×32 Steve skins are supported too. Imports are copied to
-`skins/` in the data directory, so moving the original is safe. The list, selected skin and body
-override survive restarts. Choose **Default figure** to restore the original listener.
-
-**The meter bank** is the fourth switch in **Visual settings**, and the only one that is off by
-default because it is the only one that takes width from the scene. It opens a strip to the right of
-the 3D view with one row per object: the level as a bar, the gain the metadata asked for as a tick on
-the same scale, a peak marker that holds and then slides, and a red segment at full scale when a
-sample clipped. A fill far short of the tick is that "positioned, gained, and nothing in the track"
-case again, read exactly rather than by eye. The button in its header switches the unit between
-`dBFS` — the same fast reading the scene draws — and `LUFS-M`, the ITU-R BS.1770 momentary loudness
-over the full 400 ms window, which is the standard's own quantity and carries no meter ballistics.
-Clipping is the one reading that is not weighted at all, because a converter does not clip according
-to a model of hearing. In shorter windows, scroll vertically through the rows; the bank header and
-playback controls stay in place. The bank answers which objects are sounding and by how much; the scene answers
-where they are. Neither is a smaller copy of the other.
+**Visual settings**, next to **Audio settings**, decides how the scene is drawn: element numbers
+(IDs), object loudness (LVL), fading persistently silent objects, and the meter bank strip to the
+right of the scene. The first three are on by default and the bank is off; all four are independent
+and remembered across restarts. What each one reads — the two rings on the floor, the nameplate above
+a cube, the four marks on a meter row — is in the
+[manual](docs/MANUAL.en.md#visual-settings).
 
 **For more detail:** **Details…** on the file card opens the bitstream details window, and the
 **`...`** button next to the scene heading opens diagnostics.
@@ -133,11 +102,7 @@ where they are. Neither is a smaller copy of the other.
 Switch under **Audio settings**. Picking the wrong one costs nothing — mode changes are applied
 live and do not interrupt decoding of the current track.
 
-The mode sits at the top of the window and a row of pages sits under it, **and the mode decides
-which pages there are**: `Speakers` / `Head` for system spatial audio, `HRTF` / `Headphones` /
-`Head` for SAF binaural, and `Head` alone for Windows object passthrough. Paging is not only about
-being shorter — the row stays above the content, so no amount of page can push the way out of that
-page off the screen.
+![Three playback paths. Windows object passthrough hands dynamic objects to Windows Spatial Audio; system spatial audio renders a speaker bed first and hands that over; SAF binaural does HRTF, headphone compensation and limiting inside the player before producing two channels.](assets/readme/playback-paths.svg)
 
 | Mode | Available on | What it does |
 | --- | --- | --- |
@@ -146,58 +111,15 @@ page off the screen.
 | **System spatial audio** | macOS / Windows | Renders a 7.1.4 / 9.1.6 / 22.2 speaker bed (Apple geometry) and hands it to the system spatializer. 7.1.4 by default |
 | **SAF binaural** | macOS / Windows | Software binaural rendering over any ordinary stereo headphones; built-in KEMAR, or your own SOFA file |
 
-- **22.2** copies the single LFE to both LFE channels at equal power by default; direct routing is
-  also available.
-- **The macOS Control Center Dolby Atmos label only works with 7.1.4 system spatial audio output**;
-  it does not work with 9.1.6 or 22.2. The Control Center Atmos label assist is enabled by default
-  and can be turned off while retaining system spatial audio and head tracking. The helper uses a
-  continuous timeline of about 24 hours to avoid the frequent player-item transitions that could
-  interrupt AirPods playback with the former 30-second loop. AC-4 rendering is unchanged.
-  See [playback integration](docs/MACINRENDER.md) (in Chinese).
-- **Per-object head tracking:** software binaural and Windows object passthrough follow content-declared scene-relative
-  and head-relative behavior, including live changes. System spatial output keeps your selected mode and shows its
-  limitation for head-relative objects. Uninterpretable policies use a scene-relative fallback with diagnostics.
-- **Listener orientation** is adjustable in SAF binaural and Windows object passthrough: macOS can
-  use AirPods head tracking (which requires a proper `.app` carrying the motion usage description),
-  and everything else uses manual orientation — drag the pad in the settings window or type the
-  angles. In system spatial audio mode, head tracking is the operating system's job.
-- **Custom HRTFs:** a SOFA file you pick is copied into the `sofa/` folder in the app's data
-  directory, so later you can select it straight from the list. **available** means it can be
-  selected; **in use** means the current binaural renderer has successfully loaded it.
-  Loading failures show a specific error. The list itself shows four rows and scrolls in place past
-  that, and it opens scrolled to whatever is selected — a folder has no upper bound, and the
-  settings window does not grow with it.
-  Large SOFA datasets use accelerated triangulation and sparse interpolation tables, with a separate
-  geometry cache. Seeking, repeating and changing tracks reuse the prepared HRTF when the output
-  format is compatible, preserving all measurement directions and the interpolation resolution.
-- **Headphone compensation (HpTF):** load an [AutoEq](https://github.com/jaakkopasanen/AutoEq)
-  `ParametricEQ.txt` to take the headphone's own response out of binaural monitoring. Available in
-  **SAF binaural** only: system spatial audio and Windows object passthrough hand a multichannel bed
-  to the operating system, so the final two channels are never formed on the player's side. The
-  compensation sits upstream of the output limiter, so a boosted band is still caught by the peak
-  ceiling, and switching profiles crossfades without interrupting playback. The settings window
-  reports the bands and preamp actually running, and can trim further when a curve still peaks above
-  0 dBFS. A profile you pick is copied into the `hptf/` folder in the app's data directory and
-  listed with the same **available** / **in use** states as a SOFA.
-  The settings window plots the profile's response with the preamp and any applied automatic trim
-  folded in, so full scale is the top rule and you can see what it lifts and how much headroom is
-  left. Point at another row in the list and that profile is drawn faintly behind the current one,
-  as its own file reads — drawn only, never sent, so comparing two profiles cannot interrupt the
-  one you are listening to. Every profile is checked band for band against the renderer's own
-  reading of the same text the moment it is read — type, frequency, gain, Q and preamp — and the
-  panel says so if the two differ; nothing has to be playing, and the one under the pointer is
-  checked too. Two knobs sit on top of a profile: **Bass** (a low shelf at 105 Hz, Q 0.70 — the one
-  behind AutoEq's own `--bass-boost`) and **Tilt** (a straight slope through 1 kHz, up to ±2 dB/oct,
-  measured to stay within 0.25 dB of straight). What they add is appended to the profile rather than
-  merged into it: the panel counts it separately, draws the profile alone as a dashed line beside it,
-  and turning both back to zero returns the file exactly as written. **Save as profile…** writes the
-  two together into `hptf/` as an ordinary profile, selects it and returns the knobs to rest, so a
-  setting worth keeping becomes a file you can copy rather than two numbers in the settings.
-  Which target a profile equalises towards is decided by the file and is not recorded in it, so the
-  player shows only the file name and the bands and preamp actually running. Pair it with the
-  reference field your SOFA was equalised to — a diffuse-field-equalised HRTF wants a
-  diffuse-field profile; the presets published in the AutoEq repository target Harman with an
-  extra 6 dB of bass boost.
+**Not sure which to pick?** To check that a file plays at all, switch to **SAF binaural**: it only
+needs ordinary headphones, and depends on neither a system setting nor how many object slots a device
+can offer. Windows object passthrough does have hard device requirements — see
+[the next section](#what-windows-spatial-audio-needs).
+
+Bed layouts and 22.2's LFE handling, the macOS Control Center Dolby Atmos label, custom HRTFs (SOFA),
+headphone compensation (HpTF) with its Bass and Tilt knobs and band-for-band check, per-object head
+tracking and listener orientation are all in the
+[manual](docs/MANUAL.en.md#playback-modes).
 
 ## Platform support
 
@@ -379,9 +301,12 @@ its checksum and a build manifest to `dist/`. Pull requests, pushes to `main` an
 through the same pipeline on both platforms — see [packaging and CI](docs/PACKAGING.md)
 (in Chinese).
 
-## Developer documentation
+## Documentation
 
-The design docs are written in Chinese:
+The complete interface reference for users is the
+[user manual](docs/MANUAL.en.md) ([简体中文](docs/MANUAL.md)).
+
+The design docs, which describe how the code is organised, are written in Chinese:
 [architecture](docs/ARCHITECTURE.md) ·
 [playback integration (MacinRender)](docs/MACINRENDER.md) ·
 [Windows decode](docs/WINDOWS_DECODE.md) ·
