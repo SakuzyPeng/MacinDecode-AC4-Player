@@ -170,6 +170,8 @@ pub(crate) fn render(
         return;
     }
 
+    // Window this note before mixing it with any tails already in `out`.
+    let mut note = vec![0.0f32; last - first];
     let scale = level / timbre.peak;
     for partial in &timbre.partials {
         // Seed the recurrence from the exact time this block reaches, so the
@@ -181,7 +183,7 @@ pub(crate) fn render(
         let (step_sin, step_cos) = step.sin_cos();
         let decay = (-1.0 / (f64::from(partial.tau) * rate)).exp();
         let mut envelope = f64::from(partial.amplitude) * (-elapsed / f64::from(partial.tau)).exp();
-        for sample in &mut out[first..last] {
+        for sample in &mut note {
             *sample += (envelope * sine) as f32 * scale;
             let rotated = (
                 sine * step_cos + cosine * step_sin,
@@ -199,7 +201,7 @@ pub(crate) fn render(
         let attack_end = onset_offset
             .saturating_add(attack)
             .clamp(first as i64, last as i64) as usize;
-        for (index, sample) in out[first..attack_end].iter_mut().enumerate() {
+        for (index, sample) in note[..attack_end - first].iter_mut().enumerate() {
             let progress = (first as i64 + index as i64 - onset_offset) as f64 / attack as f64;
             *sample *= raised_cosine(progress);
         }
@@ -210,10 +212,13 @@ pub(crate) fn render(
     let damp = (f64::from(DAMP_SECONDS) * rate) as i64;
     if damp > 0 && stop_offset < onset_offset.saturating_add(tail as i64) {
         let damp_start = (stop_offset - damp).clamp(first as i64, last as i64) as usize;
-        for (index, sample) in out[damp_start..last].iter_mut().enumerate() {
+        for (index, sample) in note[damp_start - first..].iter_mut().enumerate() {
             let remaining = (stop_offset - damp_start as i64 - index as i64) as f64 / damp as f64;
             *sample *= raised_cosine(remaining.clamp(0.0, 1.0));
         }
+    }
+    for (sample, contribution) in out[first..last].iter_mut().zip(note) {
+        *sample += contribution;
     }
 }
 
@@ -235,6 +240,52 @@ mod tests {
     use super::*;
 
     const RATE: u32 = 48_000;
+
+    #[test]
+    fn demo_overlapping_notes_keep_independent_envelopes() {
+        let timbre = Timbre::plucked(0.003, 1.8, 10);
+        let mut old = vec![0.0; 2048];
+        let mut new = vec![0.0; 2048];
+        render(
+            &mut old,
+            &timbre,
+            frequency_of(50),
+            0.125,
+            -38912,
+            4928,
+            RATE,
+        );
+        render(
+            &mut new,
+            &timbre,
+            frequency_of(45),
+            0.125,
+            1088,
+            i64::MAX,
+            RATE,
+        );
+        let mut mixed = old.clone();
+        render(
+            &mut mixed,
+            &timbre,
+            frequency_of(45),
+            0.125,
+            1088,
+            i64::MAX,
+            RATE,
+        );
+        let difference = mixed
+            .iter()
+            .zip(old.iter().zip(&new))
+            .map(|(actual, (old, new))| (actual - old - new).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            difference < 1e-6,
+            "the new note changed the old tail by {difference}; at its onset {} became {}",
+            old[1088],
+            mixed[1088]
+        );
+    }
 
     fn marimba() -> Timbre {
         Timbre::modal(

@@ -77,6 +77,8 @@ pub struct PlayerApp {
     /// no path, so a cursor for it would be a file that had gone missing to
     /// every part of the library that looks at one.
     demo: bool,
+    /// Demo transport has no playlist whose playback mode it could own.
+    demo_playback_mode: PlaybackMode,
     playback_mode: PlaybackMode,
     shuffle_history: Vec<EntryId>,
     shuffle_state: u64,
@@ -884,6 +886,7 @@ impl PlayerApp {
             playback_restore_pending: false,
             playback_intent: false,
             demo: false,
+            demo_playback_mode: PlaybackMode::RepeatOne,
             playback_mode: PlaybackMode::default(),
             shuffle_history: Vec::new(),
             shuffle_state: shuffle_seed(),
@@ -1419,7 +1422,7 @@ impl PlayerApp {
                     });
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui.button("About").clicked() { self.about.open = !self.about.open; }
-                        if ui.button(if self.demo { "Stop demo" } else { "Demo" }).clicked() {
+                        if ui.add_enabled(self.library.ready && cfg!(feature = "decode"), egui::Button::new(if self.demo { "Stop demo" } else { "Demo" })).clicked() {
                             self.activate_demo(!self.demo);
                         }
                         if ui.button("Visual settings").clicked() { self.visual_settings_open = !self.visual_settings_open; }
@@ -2964,12 +2967,13 @@ impl PlayerApp {
     )]
     fn draw_transport(&mut self, root: &mut egui::Ui) {
         let output_phase = self.output.snapshot().phase();
+        let has_source = self.demo || self.cursor.is_some();
         let retry_failed_decode =
-            self.decoder.snapshot().phase() == DecodePhase::Failed && self.cursor.is_some();
-        let can_toggle = (self.cursor.is_none() && self.selected_source().is_some())
+            self.decoder.snapshot().phase() == DecodePhase::Failed && has_source;
+        let can_toggle = (!has_source && self.selected_source().is_some())
             || self.resume.is_some()
             || self.output.snapshot().can_play()
-            || (output_phase == OutputPhase::Ended && self.cursor.is_some())
+            || (output_phase == OutputPhase::Ended && has_source)
             || retry_failed_decode;
         let playing = self.output.snapshot().is_playing();
         let can_previous = self.can_select_neighbor(PlaylistStep::Previous);
@@ -3061,7 +3065,7 @@ impl PlayerApp {
                         .as_ref()
                         .is_none_or(|cursor| cursor.playlist.is_some()),
                     |ui| {
-                        playback_mode_control(ui, mode_rect, &mut selected_mode);
+                        playback_mode_control(ui, mode_rect, &mut selected_mode, self.demo);
                     },
                 );
                 (action, timeline)
@@ -3069,7 +3073,9 @@ impl PlayerApp {
             .inner;
 
         if self.effective_playback_mode() != selected_mode {
-            if let Some(id) = self
+            if self.demo {
+                self.demo_playback_mode = selected_mode;
+            } else if let Some(id) = self
                 .cursor
                 .as_ref()
                 .and_then(|c| c.playlist)
@@ -3077,9 +3083,13 @@ impl PlayerApp {
             {
                 self.library.mutate(Mutation::Mode(id, selected_mode));
             }
-            self.shuffle_history.clear();
-            self.status =
-                StatusLine::idle(format!("Playback mode: {}", selected_mode.description()));
+            if !self.demo {
+                self.shuffle_history.clear();
+            }
+            self.status = StatusLine::idle(format!(
+                "Playback mode: {}",
+                playback_mode_label(selected_mode, self.demo)
+            ));
         }
 
         self.timeline_dragging = timeline.dragging;
@@ -3108,7 +3118,7 @@ impl PlayerApp {
             Some(TransportAction::Previous) => {
                 self.select_neighbor(PlaylistStep::Previous);
             }
-            Some(TransportAction::Toggle) if self.cursor.is_none() => {
+            Some(TransportAction::Toggle) if !has_source => {
                 if let Some(id) = self.browse.saved.focus {
                     self.play_browsed_entry(id);
                 }
@@ -3207,7 +3217,15 @@ fn transport_buttons(
     action
 }
 
-fn playback_mode_control(ui: &mut egui::Ui, rect: egui::Rect, mode: &mut PlaybackMode) {
+fn playback_mode_label(mode: PlaybackMode, demo: bool) -> &'static str {
+    if demo && mode == PlaybackMode::Sequential {
+        "Play once"
+    } else {
+        mode.label()
+    }
+}
+
+fn playback_mode_control(ui: &mut egui::Ui, rect: egui::Rect, mode: &mut PlaybackMode, demo: bool) {
     ui.scope_builder(
         egui::UiBuilder::new()
             .max_rect(rect)
@@ -3215,12 +3233,21 @@ fn playback_mode_control(ui: &mut egui::Ui, rect: egui::Rect, mode: &mut Playbac
         |ui| {
             ui.spacing_mut().interact_size.y = rect.height();
             egui::ComboBox::from_id_salt("playback-mode")
-                .selected_text(mode.label())
+                .selected_text(playback_mode_label(*mode, demo))
                 .width(rect.width())
                 .show_ui(ui, |ui| {
                     for option in PlaybackMode::ALL {
-                        ui.selectable_value(mode, option, option.label())
-                            .on_hover_text(option.description());
+                        if demo
+                            && !matches!(option, PlaybackMode::Sequential | PlaybackMode::RepeatOne)
+                        {
+                            continue;
+                        }
+                        ui.selectable_value(mode, option, playback_mode_label(option, demo))
+                            .on_hover_text(if demo && option == PlaybackMode::Sequential {
+                                "Play the demo once, then stop"
+                            } else {
+                                option.description()
+                            });
                     }
                 });
         },

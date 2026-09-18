@@ -43,9 +43,10 @@ telling you and what each setting does, see the [user manual](docs/MANUAL.en.md)
 - **Diagnose problems.** A diagnostics window shows buffering, decode and output state, so you can
   tell a file problem from a device problem.
 - **Play the built-in demo.** Press **Demo**, top right, and something is playing without a file of
-  any kind — immersive AC-4 material is hard to come by. It is synthesised in real time and never
-  passes through the decoder, so it exercises the output path but says nothing about decoding; see
-  [the manual](docs/MANUAL.en.md#the-built-in-demo).
+  any kind — immersive AC-4 material is hard to come by. It loops by default, supports pause and
+  playing once, and restores your file's saved position paused when stopped. It is synthesised in
+  real time and never passes through the decoder, so it exercises the output path but says nothing
+  about decoding; see [the manual](docs/MANUAL.en.md#the-built-in-demo).
 
 Supported files: `.m4a`, `.mp4` and `.ac4`, each of which must carry an AC-4 track. The current focus
 is **Full A-JOC** immersive content; other AC-4 flavors may fail to play — but you can still inspect

@@ -35,6 +35,10 @@ impl PlayerApp {
         self.persist_state(context, false);
     }
     pub(super) fn retry_playback(&mut self) {
+        if self.demo {
+            self.activate_demo(true);
+            return;
+        }
         self.inspection_media = None;
         if let Some(cursor) = self.cursor.clone() {
             if let Some(list) = cursor.playlist {
@@ -99,7 +103,12 @@ impl PlayerApp {
         self.waiting_for_device = None;
         self.marked_failure_key = None;
         self.automatic_candidate = false;
-        self.cursor = None;
+        if on {
+            self.cursor = None;
+        } else {
+            self.cursor.clone_from(&self.checkpoint.cursor);
+            self.resume = self.cursor.as_ref().map(|_| self.checkpoint.clone());
+        }
         self.demo = on;
         self.status = StatusLine::idle(if on {
             "Opening the built-in demo"
@@ -164,7 +173,12 @@ impl PlayerApp {
                     self.playback_restore_pending = false;
                 }
                 Notice::PlayingChanged { old, new } => {
-                    if let Some(cursor) = &mut self.cursor {
+                    let cursor = if self.demo {
+                        &mut self.checkpoint.cursor
+                    } else {
+                        &mut self.cursor
+                    };
+                    if let Some(cursor) = cursor {
                         cursor.reconcile(old.as_deref(), new.as_deref());
                         if cursor.playlist.is_none() {
                             self.automatic_candidate = false;
@@ -212,8 +226,13 @@ impl PlayerApp {
     }
     pub(super) fn switch_playlist(&mut self, id: PlaylistId) {
         self.save_browse_now();
+        let cursor = if self.demo {
+            &self.checkpoint.cursor
+        } else {
+            &self.cursor
+        };
         self.library
-            .watch(Some(id), self.cursor.as_ref().and_then(|c| c.playlist));
+            .watch(Some(id), cursor.as_ref().and_then(|c| c.playlist));
     }
     pub(super) fn choose_sources(&mut self) {
         let Some(id) = self.library.desired_browse else {
@@ -351,6 +370,7 @@ impl PlayerApp {
     }
     fn activate_entry(&mut self, list: PlaylistId, entry: Entry, playing: bool, automatic: bool) {
         self.save_checkpoint();
+        self.demo = false;
         self.output.pause();
         if let Some(previous) = self.pending_output_change.take() {
             self.output.reset();
@@ -394,6 +414,9 @@ impl PlayerApp {
         self.save_checkpoint();
     }
     pub(super) fn effective_playback_mode(&self) -> PlaybackMode {
+        if self.demo {
+            return self.demo_playback_mode;
+        }
         let id = self.cursor.as_ref().and_then(|c| c.playlist).or_else(|| {
             self.cursor
                 .is_none()
@@ -477,13 +500,18 @@ impl PlayerApp {
         ) {
             return false;
         }
-        if let Some(list) = &self.library.playing
-            && self.cursor.as_ref().is_some_and(|c| c.attached)
-            && should_replay_current_on_completion(
-                self.effective_playback_mode(),
-                list.entries.len(),
-            )
-        {
+        let repeat = if self.demo {
+            should_replay_current_on_completion(self.demo_playback_mode, 1)
+        } else {
+            self.library.playing.as_ref().is_some_and(|list| {
+                self.cursor.as_ref().is_some_and(|c| c.attached)
+                    && should_replay_current_on_completion(
+                        self.effective_playback_mode(),
+                        list.entries.len(),
+                    )
+            })
+        };
+        if repeat {
             self.replay_current_source();
             context.request_repaint();
             return true;
@@ -610,14 +638,15 @@ impl PlayerApp {
         prefs
     }
     fn save_checkpoint(&mut self) {
-        // The demo is not a library item and has no position worth resuming.
-        // Recording it would overwrite the checkpoint with an absent cursor and
-        // lose wherever the listener actually was.
-        if !self.library.ready || self.demo {
+        if !self.library.ready {
             return;
         }
         self.checkpoint.browse = self.library.desired_browse;
-        self.checkpoint.cursor = self.cursor.clone();
+        // While the demo plays, this is the parked file session. Browse and
+        // library edits still persist, but demo timing must never replace it.
+        if !self.demo {
+            self.checkpoint.cursor.clone_from(&self.cursor);
+        }
         if let Some(cursor) = &mut self.checkpoint.cursor
             && cursor.attached
             && let Some(entry) = self
@@ -628,7 +657,8 @@ impl PlayerApp {
         {
             cursor.entry.source = entry.source.clone();
         }
-        if self.resume.is_none()
+        if !self.demo
+            && self.resume.is_none()
             && self.output.is_configured_for_playback(
                 self.decoder.request_id(),
                 self.decoder.playback_epoch(),

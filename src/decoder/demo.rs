@@ -226,7 +226,7 @@ pub(crate) struct DemoProgram {
     duration_frames: u64,
 }
 
-/// Position updates a moving object publishes inside one block.
+/// Position updates a moving object publishes inside one full block.
 ///
 /// Windows takes one position per object per render quantum, so an in-block
 /// update quantises to the next boundary there while the `MacinRender` producer
@@ -284,7 +284,6 @@ impl DemoProgram {
 
         for slot in 0..stage::SLOTS {
             let mut samples = vec![0.0f32; length];
-            let mut sounding: Option<&stage::Placement> = None;
             for placement in &self.by_slot[slot] {
                 if placement.release <= start_frame || placement.onset >= end {
                     continue;
@@ -298,38 +297,8 @@ impl DemoProgram {
                     placement.release - start_frame,
                     self.sample_rate,
                 );
-                if placement.onset <= start_frame {
-                    sounding = Some(placement);
-                } else {
-                    let offset = u32::try_from(placement.onset - start_frame).unwrap_or(0);
-                    updates.push(stage::update(
-                        stage::element_id(slot),
-                        offset,
-                        placement.ramp_frames,
-                        stage::state_of(placement, self.seconds(placement.onset)),
-                    ));
-                }
             }
-            let initial = sounding.map_or_else(stage::idle_state, |placement| {
-                stage::state_of(placement, self.seconds(start_frame))
-            });
-            // A moving object republishes inside the block so the picture keeps
-            // up with the ear; a still one has nothing to say until its next
-            // note, and saying it anyway would only cost bandwidth.
-            if let Some(placement) = sounding
-                && matches!(placement.motion, stage::Motion::Orbit { .. })
-            {
-                let step = frames / UPDATES_PER_BLOCK;
-                for index in 1..UPDATES_PER_BLOCK {
-                    let offset = step * index;
-                    updates.push(stage::update(
-                        stage::element_id(slot),
-                        offset,
-                        step,
-                        stage::state_of(placement, self.seconds(start_frame + i64::from(offset))),
-                    ));
-                }
-            }
+            let initial = self.slot_metadata(slot, start_frame, end, &mut updates);
             objects.push(stage::object(slot, initial, samples));
         }
 
@@ -360,13 +329,74 @@ impl DemoProgram {
         )
     }
 
-    #[allow(
-        clippy::cast_precision_loss,
-        reason = "a frame index inside a three-minute programme, well under the \
-                  point where f32 stops counting frames exactly"
-    )]
-    fn seconds(&self, frame: i64) -> f32 {
-        frame as f32 / self.sample_rate as f32
+    /// Each block carries its actual starting gain and the remaining ramp.
+    /// Computing both from the arrangement makes arbitrary seeks agree with
+    /// continuous playback, without any mutable metadata history.
+    fn slot_metadata(
+        &self,
+        slot: usize,
+        start: i64,
+        end: i64,
+        updates: &mut Vec<crate::decoder::SceneMetadataUpdate>,
+    ) -> crate::decoder::SpatialObjectState {
+        use crate::decoder::{FIELD_GAIN, FIELD_POSITION, SceneMetadataUpdate};
+
+        let mut initial = stage::idle_state();
+        let placements = &self.by_slot[slot];
+        let element = stage::element_id(slot);
+        for (index, placement) in placements.iter().enumerate() {
+            let next_onset = placements
+                .get(index + 1)
+                .map_or(i64::MAX, |next| next.onset);
+            // The newest note owns the metadata even while its predecessor's
+            // damped PCM tail is still mixed into the same instrument.
+            let until = placement.release.min(next_onset).min(end);
+            let from = placement.onset.max(start);
+            if from >= until {
+                continue;
+            }
+            let offset = u32::try_from(from - start).unwrap_or(0);
+            let state = placement.state_at(from, self.sample_rate);
+            if from == start {
+                initial = state;
+            } else {
+                updates.push(stage::update(element, offset, 0, state));
+            }
+            let gain_end = placement.onset + i64::from(placement.ramp_frames);
+            if gain_end > from {
+                updates.push(SceneMetadataUpdate::new(
+                    element,
+                    offset,
+                    u32::try_from(gain_end - from).unwrap_or(0),
+                    FIELD_GAIN,
+                    placement.state_at(gain_end, self.sample_rate),
+                ));
+            }
+            if matches!(placement.motion, stage::Motion::Orbit { .. }) {
+                let step = i64::from(stage::BLOCK_FRAMES / UPDATES_PER_BLOCK);
+                let mut frame = from;
+                while frame < until {
+                    let target = ((frame / step + 1) * step).min(until);
+                    updates.push(SceneMetadataUpdate::new(
+                        element,
+                        u32::try_from(frame - start).unwrap_or(0),
+                        u32::try_from(target - frame).unwrap_or(0),
+                        FIELD_POSITION,
+                        placement.state_at(target, self.sample_rate),
+                    ));
+                    frame = target;
+                }
+            }
+            if placement.release == until && until < next_onset && until < end {
+                updates.push(stage::update(
+                    element,
+                    u32::try_from(until - start).unwrap_or(0),
+                    0,
+                    stage::idle_state(),
+                ));
+            }
+        }
+        initial
     }
 }
 
@@ -379,8 +409,79 @@ mod tests {
 
     const RATE: u32 = 48_000;
 
+    #[test]
+    fn demo_gain_ramps_continue_across_blocks() {
+        let programme = programme();
+        let placement = programme.by_slot[8]
+            .iter()
+            .find(|p| {
+                p.ramp_frames > 0 && p.gain < 1.0 && p.onset % i64::from(stage::BLOCK_FRAMES) != 0
+            })
+            .expect("a falling gain ramp");
+        let start = placement.onset - placement.onset % i64::from(stage::BLOCK_FRAMES);
+        let first = programme.block_at(start);
+        let second = programme.block_at(start + i64::from(stage::BLOCK_FRAMES));
+        let left = &first.objects()[8];
+        let right = &second.objects()[8];
+        let before = crate::decoder::metadata::element_state_at(
+            &first,
+            left.element_id(),
+            left.initial_state(),
+            stage::BLOCK_FRAMES,
+        )
+        .unwrap()
+        .linear_gain()
+        .unwrap();
+        let after = crate::decoder::metadata::element_state_at(
+            &second,
+            right.element_id(),
+            right.initial_state(),
+            0,
+        )
+        .unwrap()
+        .linear_gain()
+        .unwrap();
+        assert!(
+            (before - after).abs() < 1e-4,
+            "gain jumped from {before} to {after} at frame {} during a {}-frame ramp",
+            second.start_frame(),
+            placement.ramp_frames
+        );
+    }
+
     fn programme() -> DemoProgram {
         DemoProgram::new(RATE)
+    }
+
+    #[test]
+    fn seeking_into_a_gain_ramp_matches_continuous_playback() {
+        let programme = programme();
+        for slot in [8, 9] {
+            for placement in programme.by_slot[slot].iter().filter(|p| p.ramp_frames > 0) {
+                // Includes unfinished ramps interrupted by the next note.
+                for elapsed in [0, 1, 1024, 6000, 11_999] {
+                    let frame = placement.onset + elapsed;
+                    let base = frame - frame % i64::from(stage::BLOCK_FRAMES);
+                    let continuous = programme.block_at(base);
+                    let seeked = programme.block_at(frame);
+                    let object = &continuous.objects()[slot];
+                    let expected = crate::decoder::metadata::element_state_at(
+                        &continuous,
+                        object.element_id(),
+                        object.initial_state(),
+                        u32::try_from(frame - base).unwrap(),
+                    )
+                    .unwrap();
+                    let actual = seeked.objects()[slot].initial_state().unwrap();
+                    assert_eq!(actual.metadata_active(), expected.metadata_active());
+                    assert!(
+                        (actual.linear_gain().unwrap() - expected.linear_gain().unwrap()).abs()
+                            < 1e-5,
+                        "seek changed slot {slot}'s gain at frame {frame}"
+                    );
+                }
+            }
+        }
     }
 
     /// Blocks worth looking at: the first and last of every phase, plus a walk

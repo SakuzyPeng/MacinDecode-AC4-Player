@@ -99,6 +99,8 @@ pub(crate) struct Placement {
     pub(crate) level: f32,
     /// Linear gain the metadata declares, which is not the same thing.
     pub(crate) gain: f32,
+    /// The preceding note's resolved gain at this onset, or zero after a gap.
+    gain_from: f32,
     pub(crate) ramp_frames: u32,
     pub(crate) metadata_active: bool,
     pub(crate) motion: Motion,
@@ -115,11 +117,41 @@ impl Placement {
             timbre,
             level: OBJECT_PEAK,
             gain: 1.0,
+            gain_from: 0.0,
             ramp_frames: 0,
             metadata_active: true,
             motion: Motion::Fixed([0.0, ORBIT_RADIUS, 0.0]),
             tracking: ContentHeadTracking::SceneRelative,
         }
+    }
+
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "elapsed is bounded by one short gain ramp"
+    )]
+    fn gain_at(&self, frame: i64) -> f32 {
+        if self.ramp_frames == 0 {
+            return self.gain;
+        }
+        let elapsed = (frame - self.onset).clamp(0, i64::from(self.ramp_frames));
+        let amount = elapsed as f32 / self.ramp_frames as f32;
+        self.gain_from + (self.gain - self.gain_from) * amount
+    }
+
+    /// Absolute-time state, including a gain ramp interrupted by another note.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "the demo's frame indices fit exactly in f32"
+    )]
+    pub(crate) fn state_at(&self, frame: i64, sample_rate: u32) -> SpatialObjectState {
+        let [x, y, z] = self.motion.at(frame as f32 / sample_rate as f32);
+        SpatialObjectState::new(
+            self.metadata_active,
+            Some(SpatialPosition::new(x, y, z)),
+            Some(self.gain_at(frame)),
+            true,
+        )
+        .with_tracking(self.tracking)
     }
 }
 
@@ -333,6 +365,13 @@ pub(crate) fn arrange(sample_rate: u32, timbres: &[Timbre]) -> Arrangement {
         if placements[index].slot == placements[index - 1].slot {
             let limit = placements[index].onset + damp;
             placements[index - 1].release = placements[index - 1].release.min(limit);
+        }
+    }
+    for index in 1..placements.len() {
+        let previous = &placements[index - 1];
+        let current = &placements[index];
+        if previous.slot == current.slot && previous.release > current.onset {
+            placements[index].gain_from = previous.gain_at(current.onset);
         }
     }
 
@@ -587,18 +626,6 @@ pub(crate) fn lfe_onsets(sample_rate: u32) -> Vec<(i64, u8)> {
 /// The element ID a slot carries for the whole programme.
 pub(crate) const fn element_id(slot: usize) -> u64 {
     slot as u64 + 1
-}
-
-/// Resolve a slot's declared state at one instant.
-pub(crate) fn state_of(placement: &Placement, seconds: f32) -> SpatialObjectState {
-    let [x, y, z] = placement.motion.at(seconds);
-    SpatialObjectState::new(
-        placement.metadata_active,
-        Some(SpatialPosition::new(x, y, z)),
-        Some(placement.gain),
-        true,
-    )
-    .with_tracking(placement.tracking)
 }
 
 /// An idle slot: present, silent, and saying so.

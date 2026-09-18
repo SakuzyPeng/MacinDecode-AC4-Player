@@ -56,7 +56,9 @@ Opening the **meter bank** takes a strip from the right of the scene; see
 The **Demo** button in the top right plays a piece the application carries with it. It needs no
 file, so the 3D scene, the meter bank, HRTF switching and head tracking are all demonstrable the
 moment you install — AC-4 spatial material is hard to come by otherwise. Press it again (it reads
-**Stop demo**) to stop.
+**Stop demo**) to stop. The demo defaults to **Repeat one**; choose **Play once** in the bottom
+playback-mode control to stop after one run. Pause, resume, seeking and replay after the end use
+the ordinary transport controls. The demo's mode does not change any playlist's mode.
 
 **It is not AC-4.** The sound is synthesised by the application in real time and never passes
 through the decoder, which is why the container field in the status line reads `built-in demo`
@@ -65,8 +67,9 @@ view and the meters are working; it can say nothing about the decoder. That cuts
 and usefully: when something misbehaves, pressing Demo separates a decoding problem from an output
 problem in one step.
 
-The demo is not a playlist item and does not disturb where you had got to — stop it and the library
-is exactly as you left it.
+The demo is not a playlist item and preserves your file's playback position. Stopping it restores
+that file at its saved position, paused. Double-clicking a playlist file exits the demo and plays
+the chosen file instead.
 
 ### The piece
 

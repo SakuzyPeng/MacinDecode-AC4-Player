@@ -1,6 +1,8 @@
 use super::*;
 use crate::preferences::DataDirectory;
 
+mod demo;
+
 fn open(path: &Path) -> (PlayerApp, egui::Context) {
     let context = egui::Context::default();
     let app = PlayerApp::from_storage(

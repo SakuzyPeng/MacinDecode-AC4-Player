@@ -634,6 +634,21 @@ impl DemoStream {
             target_frame,
         );
         let mut frame = i64::try_from(target_frame).unwrap_or(i64::MAX);
+        if target_frame == self.program.duration_frames() {
+            // An empty seek at the inclusive endpoint is a valid ended source.
+            // Keep its topology so output can configure/reuse the stream there.
+            let block = self.program.block_at(frame);
+            metrics.decoded_frames = target_frame;
+            metrics.object_count = block.objects().len();
+            metrics.has_lfe = block.lfe().is_some();
+            metrics.state_complete = block.state_complete();
+            metrics.presentation_index = block.presentation_index();
+            metrics.presentation_id = block.presentation_id();
+            metrics.scene_signature = Some(SceneSignature::from_block(&block));
+            queue.mark_end_of_stream(key);
+            send_progress(key, None, DecodePhase::EndOfStream, &metrics, event_sender);
+            return RunControl::Complete;
+        }
         loop {
             if self.program.block_frames_at(frame) == 0 {
                 return match finish(key, None, &metrics, event_sender, queue) {
@@ -1515,6 +1530,46 @@ mod tests {
 
         controller.close();
         assert_eq!(controller.snapshot().phase(), DecodePhase::Idle);
+    }
+
+    #[test]
+    fn demo_seek_to_duration_is_end_of_stream() {
+        let mut controller = DecoderController::new();
+        controller.ensure_open_source(&super::PlaybackSource::Demo);
+        wait_for_decoder(
+            &mut controller,
+            |c| c.snapshot().phase() == DecodePhase::Ready,
+            "opening demo",
+        );
+        let duration = controller
+            .snapshot()
+            .metrics()
+            .unwrap()
+            .duration_frames()
+            .unwrap();
+        controller
+            .seek(duration)
+            .expect("seeking to duration is accepted");
+        wait_for_decoder(
+            &mut controller,
+            |c| c.snapshot().phase() == DecodePhase::EndOfStream,
+            "seeking to the exact end",
+        );
+        assert!(
+            controller
+                .snapshot()
+                .metrics()
+                .unwrap()
+                .scene_signature()
+                .is_some()
+        );
+        controller.seek(0).expect("replaying an ended demo");
+        wait_for_decoder(
+            &mut controller,
+            |c| c.snapshot().phase() == DecodePhase::Ready,
+            "replaying after the end",
+        );
+        assert_eq!(controller.try_pop_scene_block().unwrap().start_frame(), 0);
     }
 
     fn wait_for_decoder(
