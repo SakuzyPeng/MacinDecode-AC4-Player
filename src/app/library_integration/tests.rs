@@ -898,7 +898,7 @@ fn lfe_only_scene_has_a_dbfs_row_and_a_cabinet_nameplate() {
         let _ = meter_bank_frame(&mut app, &context, &frame, egui::vec2(1180.0, 760.0), 0.0);
         let output = meter_bank_frame(&mut app, &context, &frame, egui::vec2(1180.0, 760.0), 0.0);
         let text = painted_text(&output);
-        for expected in ["0", "12.0", "dBFS"] {
+        for expected in ["0", "12.0", "0: dBFS"] {
             assert!(
                 text.iter().any(|(text, ..)| text == expected),
                 "missing LFE row text {expected}"

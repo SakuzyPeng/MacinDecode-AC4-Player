@@ -2103,6 +2103,7 @@ impl PlayerApp {
             return;
         }
         let readout = self.meter_readout;
+        let lfe = mirror_frame.and_then(crate::scene_view::SceneViewFrame::lfe);
         egui::Panel::right("meter-bank")
             .exact_size(240.0)
             .resizable(false)
@@ -2123,6 +2124,10 @@ impl PlayerApp {
                             .strong()
                             .color(theme::MUTED),
                     );
+                    if lfe.is_some() {
+                        ui.label(RichText::new("0: dBFS").size(10.0).color(theme::MUTED))
+                            .on_hover_text("LFE uses unweighted dBFS in both meter modes");
+                    }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         // The unit is the whole button: there are two of them,
                         // and the one not shown is the one a click gives you.
@@ -2177,7 +2182,6 @@ impl PlayerApp {
 
                 let objects =
                     mirror_frame.map_or(&[][..], crate::scene_view::SceneViewFrame::objects);
-                let lfe = mirror_frame.and_then(crate::scene_view::SceneViewFrame::lfe);
                 if objects.is_empty() && lfe.is_none() {
                     ui.label(
                         RichText::new("Nothing playing")
@@ -2208,10 +2212,6 @@ impl PlayerApp {
     }
 
     /// One row per object: number, track, readout.
-    #[allow(
-        clippy::too_many_lines,
-        reason = "one shared row layout keeps LFE and object meters aligned"
-    )]
     fn draw_meter_rows(
         &self,
         ui: &mut egui::Ui,
@@ -2236,7 +2236,6 @@ impl PlayerApp {
         // the nameplate is, so the two columns of digits line up.
         let cell = measure("0".to_owned());
         let readout_width = measure("0".repeat(scene3d::params::NAMEPLATE_CELLS));
-        let lfe_unit_width = measure(" dBFS".to_owned());
 
         let lfe_row = lfe.map(|lfe| {
             (
@@ -2265,9 +2264,7 @@ impl PlayerApp {
                 egui::Sense::hover(),
             );
             let silent = level < scene3d::params::OBJECT_SILENT_GAIN;
-            // The LFE row names its unit even when the object bank reads LUFS-M.
-            let unit_width = if is_lfe { lfe_unit_width } else { 0.0 };
-            let value_right = rect.right() - unit_width;
+            let value_right = rect.right();
             let decibels = readout_decibels(level, readout);
             let (sign, magnitude) = decibel_cells((!silent).then_some(decibels));
 
@@ -2328,13 +2325,6 @@ impl PlayerApp {
             }
 
             if is_lfe {
-                painter.text(
-                    egui::pos2(rect.right(), rect.center().y),
-                    Align2::RIGHT_CENTER,
-                    "dBFS",
-                    font.clone(),
-                    theme::MUTED,
-                );
                 response.on_hover_text("0 · LFE\nUnweighted RMS before master volume; gain, sample peak and clipping are included.\nLFE is excluded from programme LUFS loudness.");
             } else {
                 response.on_hover_text(meter_row_tooltip(slot, &object, peak, clipped, readout));

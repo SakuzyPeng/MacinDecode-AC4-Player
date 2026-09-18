@@ -215,8 +215,9 @@ the scene. It opens a strip to the right of the 3D view with one row per object.
 
 When LFE is present, **row 0** appears first, with level, metadata gain, peak hold and clipping.
 The LFE cabinet also has a level nameplate. Both use unweighted RMS **dBFS**, including metadata
-gain and independent of master volume. Row 0 explicitly keeps its dBFS unit when the object bank
-switches to LUFS-M: LFE is excluded from BS.1770 programme loudness. It does not consume any of the
+gain and independent of master volume. The header's **0: dBFS** keeps its unit clear when the object
+bank switches to LUFS-M, while all bars and readout columns stay aligned. LFE is excluded from
+BS.1770 programme loudness and does not consume any of the
 20 dynamic-object slots.
 
 ![One meter bank row's four marks: the bar is the measured level, a tick is the gain the metadata asked for on the same scale, a line is the peak marker, and a red segment at full scale means a sample clipped.](../assets/readme/meter-row.svg)
