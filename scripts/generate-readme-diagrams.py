@@ -398,7 +398,7 @@ def build_playback_paths():
              PLAYER_FILL, PLAYER_EDGE),
             (460, 244, "Windows Spatial Audio", "one position and gain per quantum",
              SYSTEM_FILL, SYSTEM_EDGE),
-        ], "Spatial-audio endpoint",
+        ], "Spatial endpoint",
          "Needs enough dynamic-object slots: 16 for AC-4 L3, 20 for L4."),
         (232, "SYSTEM SPATIAL AUDIO", [
             (200, 244, "SAF VBAP bed", "7.1.4 · 9.1.6 · 22.2, Apple geometry",
@@ -582,15 +582,16 @@ def build_silent_objects():
                      f"then a {fmt(SILENCE_FADE_SECONDS)} s fade",
                      size=10, fill=MUTED, anchor="middle"))
 
-    body.append(rect(24, 322, 832, 52, fill=SURFACE, stroke=BORDER, radius=4))
-    body.append(rect(24, 322, 3, 52, fill=MUTED))
-    body.append(text(44, 344, "Fade persistently silent objects — off",
+    body.append(rect(24, 318, 832, 62, fill=SURFACE, stroke=BORDER, radius=4))
+    body.append(rect(24, 318, 3, 62, fill=MUTED))
+    body.append(text(44, 340, "Fade persistently silent objects — off",
                      size=11.5, weight=600, fill=TEXT))
-    body.append(text(44, 362,
-                     "The cube stays fully drawn and the plate rests at its dim; "
-                     "the Silent count disappears. The silence clock keeps running, "
-                     "so switching back on finds each object where it is.",
-                     size=10.5, fill=MUTED))
+    body.append(caption(44, 358, [
+        "The cube stays fully drawn and the plate rests at its dim; the Silent "
+        "count disappears.",
+        "The silence clock keeps running, so switching back on finds each object "
+        "where it is.",
+    ], size=10.5, leading=14))
     body.append(text(22, height - 18,
                      "The plate dims the instant the readout turns to −∞",
                      size=11, fill=TEXT))
@@ -893,7 +894,7 @@ def build_reference_frames():
          "The listener faces the dashed ray; each arc is a bearing from it."),
         (450, "Head turned 45° to the right", yaw, radians(100), radians(-75) + yaw,
          radians(-75),
-         "Dashed: where object 2 was. It swung 45° with the head; object 1 did not move."),
+         "Dashed: where object 2 was. Object 1 has not left its cell."),
     ]
     for x, title, head, world_scene, world_head, ghost, note in panels:
         objects = [dict(scene_rel, world=world_scene),

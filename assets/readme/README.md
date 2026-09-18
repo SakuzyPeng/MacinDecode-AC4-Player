@@ -124,6 +124,22 @@ python3 scripts/generate-readme-scene.py
 python3 scripts/generate-readme-diagrams.py
 ```
 
+```sh
+python3 scripts/check-readme-text.py
+```
+
+Run that after the diagrams. SVG does not wrap, so every line break in them is
+placed by hand, and a line that outgrows its panel is invisible until someone
+looks at the right picture on the right machine. Worse, fitting on the machine
+that drew it proves nothing: the pictures ask for `-apple-system`, then
+`Segoe UI`, then whatever sans-serif the reader has, and those differ in width
+by more than a tenth. Three separate overflows reached a reader before this
+check existed, each of them measuring as comfortably inside its panel here. So
+the check measures every run with the real renderer and requires it to clear its
+panel by a sixth of its own width, on whichever side a wider font would grow it
+— the side away from its anchor. Readouts are skipped: their cells are fixed
+by design.
+
 `generate-readme-diagrams.py --only meter-row` rebuilds one diagram. Both
 generators invoke SVGO **4.0.0** through `npm exec`, using
 [`scripts/readme-svgo.config.mjs`](../../scripts/readme-svgo.config.mjs). The
