@@ -13,19 +13,22 @@ panel in San Francisco. So a run has to clear its panel by HEADROOM of its own
 width, on whichever side a wider font would grow it — the side away from its
 anchor.
 
-Needs Chromium; run it after scripts/generate-readme-diagrams.py.
+Needs Chrome, Chromium or Edge; run it after scripts/generate-readme-diagrams.py.
+Use --browser to select an executable outside the usual installation locations.
 """
 
 from pathlib import Path
 import argparse
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-CHROME_CANDIDATES = ("/opt/pw-browsers/chromium-1194/chrome-linux/chrome",
-                     "chromium", "chromium-browser", "google-chrome")
+CHROME_COMMANDS = ("chromium", "chromium-browser", "google-chrome",
+                   "google-chrome-stable", "chrome", "msedge")
 MARGIN, HEADROOM = 4.0, 0.16
 
 PROBE = """
@@ -37,9 +40,13 @@ const panels = [...svg.querySelectorAll('rect')]
   .filter(p => p.w > 120 && p.h > 40);
 for (const t of svg.querySelectorAll('text')) {
   const b = t.getBBox();
+  // The generators give each line an explicit x/y anchor. Unlike the bounds,
+  // that point stays in its panel when centred or right-aligned text widens.
+  const x = t.x.baseVal.getItem(0).value;
+  const y = t.y.baseVal.getItem(0).value;
   const inside = panels
-    .filter(p => b.x >= p.x - 1 && b.x <= p.x + p.w + 1
-              && b.y >= p.y - 1 && b.y <= p.y + p.h + 1)
+    .filter(p => x >= p.x - 1 && x <= p.x + p.w + 1
+              && y >= p.y - 1 && y <= p.y + p.h + 1)
     .sort((a, c) => a.w - c.w)[0];
   // A readout is laid out in fixed cells on purpose — the sign owns one and the
   // digits are right-aligned against the last — so it is not free-running prose
@@ -54,21 +61,43 @@ document.getElementById('o').textContent = JSON.stringify(out);
 """
 
 
-def chrome():
-    for path in CHROME_CANDIDATES:
-        if Path(path).exists() or subprocess.run(["which", path], capture_output=True).returncode == 0:
+def chrome_candidates():
+    yield from CHROME_COMMANDS
+    if sys.platform == "darwin":
+        for root in (Path("/Applications"), Path.home() / "Applications"):
+            for name in ("Google Chrome", "Chromium", "Microsoft Edge"):
+                yield str(root / f"{name}.app/Contents/MacOS/{name}")
+    elif sys.platform == "win32":
+        for key in ("LOCALAPPDATA", "PROGRAMFILES", "PROGRAMFILES(X86)"):
+            root = os.environ.get(key)
+            if root:
+                for relative in ("Google/Chrome/Application/chrome.exe",
+                                 "Chromium/Application/chrome.exe",
+                                 "Microsoft/Edge/Application/msedge.exe"):
+                    yield str(Path(root) / relative)
+    else:
+        yield "/opt/pw-browsers/chromium-1194/chrome-linux/chrome"
+
+
+def chrome(override=None):
+    candidates = (os.path.expanduser(override),) if override else chrome_candidates()
+    for candidate in candidates:
+        path = shutil.which(candidate)
+        if path:
             return path
-    sys.exit("Chromium not found; this check needs a browser to measure text.")
+    if override:
+        sys.exit(f"Browser executable not found or not executable: {override}")
+    sys.exit("Chrome, Chromium or Edge not found; install one or pass --browser PATH.")
 
 
-def measure(svg_path, scratch):
+def measure(svg_path, scratch, browser):
     page = scratch / f"{svg_path.stem}-text.html"
     page.write_text('<!doctype html><meta charset="utf-8">'
                     + svg_path.read_text(encoding="utf-8")
                     + f'<pre id="o"></pre><script>{PROBE}</script>', encoding="utf-8")
-    dom = subprocess.run([chrome(), "--headless", "--disable-gpu", "--no-sandbox",
-                          "--virtual-time-budget=8000", "--dump-dom", f"file://{page}"],
-                         capture_output=True, text=True, timeout=180).stdout
+    dom = subprocess.run([browser, "--headless", "--disable-gpu", "--no-sandbox",
+                          "--virtual-time-budget=8000", "--dump-dom", page.resolve().as_uri()],
+                         capture_output=True, text=True, encoding="utf-8", timeout=180).stdout
     raw = re.search(r'<pre id="o">(.*?)</pre>', dom, re.S).group(1)
     for a, b in (("&quot;", '"'), ("&amp;", "&"), ("&lt;", "<"), ("&gt;", ">")):
         raw = raw.replace(a, b)
@@ -78,12 +107,14 @@ def measure(svg_path, scratch):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dir", type=Path, default=ROOT / "assets/readme")
+    parser.add_argument("--browser", help="Chrome, Chromium or Edge executable path or command")
     args = parser.parse_args()
+    browser = chrome(args.browser)
     scratch = ROOT / "target/readme-text-check"
     scratch.mkdir(parents=True, exist_ok=True)
     failures = 0
     for svg in sorted(args.dir.glob("*.svg")):
-        for text, left, width, box_left, box_right, anchor, kind in measure(svg, scratch):
+        for text, left, width, box_left, box_right, anchor, kind in measure(svg, scratch, browser):
             # A wider font grows a run away from its anchor, so that is the side
             # that has to have room. A centred run grows both ways by half.
             grow_right = width * HEADROOM * (0.5 if anchor == "middle" else
