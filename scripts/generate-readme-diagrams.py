@@ -980,12 +980,12 @@ def top_box(centre, edge, number, *, perspective):
         sides.append((axis, quad))
     parts = []
     for axis, quad in sides:
-        # A side face is a few pixels tall from straight above, so it earns its
-        # place by tone rather than by area; the two axes differ so the box
-        # reads as a box and not as an outline.
-        shade = 0.30 if axis == 0 else 0.48
+        # params::TONE_LEFT for the X faces and TONE_RIGHT for the Z ones, the
+        # same two the player shades with. They were exaggerated while the faces
+        # were a couple of pixels tall; at this size they no longer need to be.
+        tone = scene.FACES[1][3] if axis == 0 else scene.FACES[2][3]
         points = " ".join(f"{fmt(x)},{fmt(y)}" for x, y in quad)
-        parts.append(f'<polygon points="{points}" fill="{blend(ACCENT, INK, shade)}"/>')
+        parts.append(f'<polygon points="{points}" fill="{blend(ACCENT, INK, 1 - tone)}"/>')
     points = " ".join(f"{fmt(x)},{fmt(y)}" for x, y in top)
     parts.append(f'<polygon points="{points}" fill="{ACCENT}"/>')
     # The element number, as the seven segments the player prints on every face.
@@ -1103,7 +1103,7 @@ def build_head_tracking():
     previous, scene.SCALE = scene.SCALE, scale
     try:
         body = card(width, height, "Head tracking", "SCENE vs HEAD / LIVE")
-        origin = (width / 2, 198)
+        origin = (width / 2, 244)
         fixed, locked = radians(105), radians(-70)
         radius_fixed, radius_locked = 0.80, 0.86
         height_fixed, height_locked = 0.12, 0.60

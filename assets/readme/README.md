@@ -51,7 +51,7 @@ that support CSS but do not run animations.
 | `meter-row.svg` | One meter bank row's four marks, and the bank they sit in |
 | `reference-frames.svg` | What scene-relative and head-locked each keep constant when the listener turns |
 | `projection-modes.svg` | Why the projection toggle exists: which footprints a straight-down orthographic view hides |
-| | Its cubes are boxes, not squares: perspective gives each corner its own reach, so an off-axis cube leans and its inward faces come into view, while orthographic shows the top face alone and covers the footprint exactly. Element numbers are the player's seven segments, laid on the top face. Its objects sit low in the room, and that is what makes the boxes legible: side faces are as tall as a cube is thick, while the gap to the footprint is as wide as the cube is high above the floor, so the two grow together as the camera comes in. High in the room that ratio is about a tenth and the side faces land under two pixels; low it is nearer a third, which buys a much closer camera at the same separation. Nothing distorts from that — every point at one height shares one reach, so the floor grid stays square however near the camera comes, and orthographic is scaled at the floor so both panels draw one room at one size. |
+| | Its cubes are boxes, not squares: perspective gives each corner its own reach, so an off-axis cube leans and its inward faces come into view, while orthographic shows the top face alone and covers the footprint exactly. Element numbers are the player's seven segments, laid on the top face. Its objects sit low in the room, and that is what makes the boxes legible: side faces are as tall as a cube is thick, while the gap to the footprint is as wide as the cube is high above the floor, so the two grow together as the camera comes in. High in the room that ratio is about a tenth and the side faces land under two pixels; low it is nearer a third, which buys a much closer camera at the same separation, and with the faces that size they carry `params::TONE_LEFT` and `TONE_RIGHT` unexaggerated — one shading rule across all eight pictures. Nothing distorts from that — every point at one height shares one reach, so the floor grid stays square however near the camera comes, and orthographic is scaled at the floor so both panels draw one room at one size. |
 | `head-tracking.svg` | The same distinction in motion — one bearing arc rigid, the other breathing |
 
 They carry labels only: the prose that explains them lives in the manual beside
@@ -80,6 +80,11 @@ see in a single frame, so each is pinned by a check rather than by eye:
 - The yaw has to carry the facing direction to the same place a bearing points,
   or the head turns against the object that is locked to it. The test is that
   the nose and the head-locked object move the same way on screen.
+
+Its cubes are drawn at the scene image's own size rather than smaller. Three
+faithful tones separated by twelve per cent of the way to the ink read as one
+tone on a cube two thirds that size, and the answer to that is room, not darker
+paint.
 
 `TRACK_POSES` is 72 over six seconds: twelve updates a second, 3.9 degrees a
 step. Fewer reads as stepping; more is mostly file size. A group's own transform
