@@ -96,7 +96,11 @@ class PanelOwnershipTests(unittest.TestCase):
 
 class BrowserDiscoveryTests(unittest.TestCase):
     def discover(self, platform, installed, environment=None):
+        # Windows resolves Path.home() through environment variables that this
+        # fixture clears. Keep the home directory independent of the fake OS.
+        fixture_home = Path.home()
         with patch.object(checker.sys, "platform", platform), \
+                patch.object(Path, "home", return_value=fixture_home), \
                 patch.dict(os.environ, environment or {}, clear=True), \
                 patch.object(checker.shutil, "which", side_effect=lambda p: p if p == installed else None), \
                 patch.object(checker.subprocess, "run", side_effect=AssertionError("no external which")):
