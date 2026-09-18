@@ -1,8 +1,8 @@
 ## 简体中文
 
-这是 MacinDecode AC-4 Player 的首个预览版。你可以用它打开 AC-4 空间音频文件、听取空间效果，
-并在三维场景中查看声音的位置。欢迎试用，并通过 [Issues](https://github.com/SakuzyPeng/MacinDecode-AC4-Player/issues)
-反馈遇到的问题。
+MacinDecode AC-4 Player **v0.1.2 预览版**新增耳机补偿、逐对象电平表和自定义听者皮肤，
+改进头部追踪、播放切换与安装体验。以下是相对 v0.1.1 的主要变化。欢迎通过
+[Issues](https://github.com/SakuzyPeng/MacinDecode-AC4-Player/issues) 反馈使用中遇到的问题。
 
 ### 下载与安装
 
@@ -16,16 +16,27 @@
 双击安装包，按提示完成安装。应用只安装到当前用户，不需要管理员权限。Mac 上安装后的应用位于
 个人文件夹中的 **Applications（应用程序）**。
 
+已有版本可直接运行新安装包升级，播放列表、设置和已导入的 SOFA、耳机补偿配置及皮肤会保留。
+
 本预览版安装包尚未正式签名，系统可能提示无法验证开发者。请确认下载来源是本仓库的发布页面。
 普通使用只需下载 `.msi` 或 `.pkg`；其他附件用于核对下载文件和记录构建信息，无需安装。
 
-### 可以用它做什么
+### 本次更新
 
-- 播放含 AC-4 音轨的 `.m4a`、`.mp4` 和 `.ac4` 文件，并查看音频信息。
-- 使用系统空间音频，或选择 **SAF binaural**，用普通立体声耳机听取空间效果。
-- 在三维场景里观察声音的位置，拖动旋转视角。
-- 创建和管理多个播放列表；重新打开应用时保留曲目和播放位置，并保持暂停。
-- 在支持的播放模式下使用 AirPods 头部追踪或手动调整听者朝向。
+- **耳机补偿（HpTF）**：SAF binaural 模式支持导入和管理 AutoEq 参数均衡器配置，查看频响曲线、
+  悬停对比其他配置，调整 Bass / Tilt，并将调整保存成新配置。可从 [AutoEq 网站](https://autoeq.app/)
+  下载耳机对应的参数均衡器文本文件。
+- **逐对象响度与表带**：新增 dBFS 铭牌、增益环与实测电平内芯；可打开 Meter bank 查看各对象的电平、
+  峰值保持和削顶提示，并在 dBFS 与 LUFS-M 之间切换。轨迹尺寸也反映采样时的响度。
+- **静音对象与参照系**：持续静音的对象会淡出并计数，地面的增益环保留。黑号表示场景固定、白号表示
+  头部固定，虚化时也保持明暗区别；软件双耳和 Windows 对象直通支持内容指定的逐对象头追策略。
+- **自定义听者皮肤**：支持导入 Minecraft Steve / Alex PNG 皮肤，包含衣帽外层、独立左右肢体和头部朝向同步。
+- **更顺畅的播放准备**：加快大型 SOFA 的准备；输出格式兼容时，跳转、循环和切歌复用已经准备的 HRTF。
+  同时改善自定义 SOFA 的输出峰值保护、动态头追响应和 Windows 场景更新。
+- **音频设置更易浏览**：按播放模式提供独立页签并记住页签选择，SOFA / HpTF 列表在原地滚动，显示配置的实际启用状态。
+- **macOS 播放体验**：Atmos 标识辅助使用连续的长时间线，减少短循环切换对 AirPods 播放的干扰；修正控制中心图标兼容性。
+- **Windows 安装体验**：支持同版本安装包覆盖、修复和卸载，增加安装进度与完成界面，升级保留用户数据。
+- **中英文用户手册**：安装和上手说明与详细手册分开，新增播放链路、参照系、投影、响度和头追插图。
 
 ### 第一次播放
 
@@ -33,7 +44,9 @@
 2. 双击列表中的曲目开始播放。
 3. 点击 **Audio settings** 选择播放模式。不确定如何设置时，可先选择 **SAF binaural** 并使用耳机。
 
-更多操作见 [中文使用说明](https://github.com/SakuzyPeng/MacinDecode-AC4-Player/blob/v0.1.1/README.md)。
+更多操作见 [中文上手说明](https://github.com/SakuzyPeng/MacinDecode-AC4-Player/blob/v0.1.2/README.md)
+和 [用户手册](https://github.com/SakuzyPeng/MacinDecode-AC4-Player/blob/v0.1.2/docs/MANUAL.md)。
+[完整变更](https://github.com/SakuzyPeng/MacinDecode-AC4-Player/compare/v0.1.1...v0.1.2)
 
 ### 使用前了解
 
@@ -45,8 +58,9 @@
 
 ## English
 
-This is the first preview of MacinDecode AC-4 Player. Open AC-4 spatial audio files, listen to their
-spatial effects, and see where sounds are placed in a live 3D view. Please report problems through
+MacinDecode AC-4 Player **v0.1.2 preview** adds headphone compensation, per-object meters and custom
+listener skins, with improvements to head tracking, playback transitions and installation. These
+are the main changes since v0.1.1. Please report problems through
 [Issues](https://github.com/SakuzyPeng/MacinDecode-AC4-Player/issues).
 
 ### Download and install
@@ -61,17 +75,38 @@ Choose an installer from **Assets** at the bottom of this page:
 Double-click the installer and follow its steps. It installs for your user account and does not
 require administrator rights. On Mac, find the installed app in **Applications** inside your home folder.
 
+Run the new installer to upgrade an existing version. Playlists, settings and imported SOFA files,
+headphone profiles and skins are preserved.
+
 These preview installers are not formally signed, so your system may say it cannot verify the
 developer. Make sure you downloaded them from this repository's release page. You only need the
 `.msi` or `.pkg` file; the other attachments help verify the download and record how it was built.
 
-### What you can do
+### What's new
 
-- Play `.m4a`, `.mp4`, and `.ac4` files containing AC-4 audio, and inspect their audio information.
-- Listen through system spatial audio, or choose **SAF binaural** for ordinary stereo headphones.
-- Watch sound positions in the 3D view and drag to change your viewpoint.
-- Organize several playlists; the app remembers your track and playback position and reopens paused.
-- Use AirPods head tracking or adjust the listener's orientation manually in supported playback modes.
+- **Headphone compensation (HpTF):** SAF binaural can import and manage AutoEq parametric EQ profiles,
+  plot their response, preview another profile on hover, adjust Bass / Tilt and save the result as a
+  new profile. Download a parametric EQ text profile for your headphones from the [AutoEq website](https://autoeq.app/).
+- **Per-object loudness and meter bank:** new dBFS nameplates and split footprints show requested gain
+  alongside measured level. The optional Meter bank adds peak hold and clip indicators, with dBFS and
+  LUFS-M readings. Trail sizes also reflect loudness when each position was sampled.
+- **Silent objects and reference frames:** persistently silent objects fade and are counted, while
+  their gain rings remain. Black numbers identify scene-relative objects and white numbers identify
+  head-locked objects, retaining their contrast during fading. Software binaural and Windows object
+  passthrough follow content-declared per-object head-tracking policies.
+- **Custom listener skins:** import Minecraft Steve / Alex PNG skins, including clothing layers,
+  separate left and right limbs and the tracked head orientation.
+- **Faster playback preparation:** large SOFA files prepare faster, and compatible output formats
+  reuse the prepared HRTF across seeks, loops and track changes. Custom SOFA peak protection, moving
+  head-tracking response and Windows scene updates have also been improved.
+- **Easier audio settings:** mode-specific pages remember your selection; SOFA / HpTF lists scroll
+  in place and show whether a profile is actually in use.
+- **macOS playback:** the Atmos label helper uses a continuous long timeline to reduce interruptions
+  around short loops with AirPods, and Control Center icon compatibility has been corrected.
+- **Windows installation:** same-version replacement, repair and uninstall support, with installation
+  progress and completion pages. Upgrades preserve user data.
+- **Chinese and English user manuals:** installation and quickstart are separate from the detailed
+  manual, with new diagrams for playback paths, reference frames, projection, loudness and head tracking.
 
 ### Your first playback
 
@@ -79,8 +114,10 @@ developer. Make sure you downloaded them from this repository's release page. Yo
 2. Double-click a track in the list to play it.
 3. Open **Audio settings** to choose a playback mode. If you are unsure, start with **SAF binaural** and headphones.
 
-See the [English user guide](https://github.com/SakuzyPeng/MacinDecode-AC4-Player/blob/v0.1.1/README.en.md)
+See the [English quickstart](https://github.com/SakuzyPeng/MacinDecode-AC4-Player/blob/v0.1.2/README.en.md)
+and [user manual](https://github.com/SakuzyPeng/MacinDecode-AC4-Player/blob/v0.1.2/docs/MANUAL.en.md)
 for more controls and settings.
+[Full changelog](https://github.com/SakuzyPeng/MacinDecode-AC4-Player/compare/v0.1.1...v0.1.2)
 
 ### Before you start
 
