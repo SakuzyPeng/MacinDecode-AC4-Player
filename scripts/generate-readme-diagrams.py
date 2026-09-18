@@ -722,6 +722,32 @@ def floor_grid(half=1.0, cells=8):
     return "".join(parts)
 
 
+def floor_rotation(theta):
+    """Yawing the floor plane, as the 2D affine it becomes on screen.
+
+    A horizontal plane maps to the screen through an invertible linear map, so a
+    yaw inside that plane is an affine transform of the projection — which lets a
+    floor shape that only rotates ride one transform animation instead of being
+    redrawn for every pose.
+    """
+    scale = scene.SCALE
+    m = [[scale * scene.RIGHT[0], scale * scene.RIGHT[2]],
+         [-scale * scene.UP[0], -scale * scene.UP[2]]]
+    det = m[0][0] * m[1][1] - m[0][1] * m[1][0]
+    inverse = [[m[1][1] / det, -m[0][1] / det], [-m[1][0] / det, m[0][0] / det]]
+    c, sn = cos(theta), sin(theta)
+    times = lambda a, b: [[a[0][0] * b[0][0] + a[0][1] * b[1][0],
+                           a[0][0] * b[0][1] + a[0][1] * b[1][1]],
+                          [a[1][0] * b[0][0] + a[1][1] * b[1][0],
+                           a[1][0] * b[0][1] + a[1][1] * b[1][1]]]
+    n = times(times(m, [[c, -sn], [sn, c]]), inverse)
+    # The floor sits at a constant screen offset, so the rotation happens about
+    # that point rather than about the group's origin.
+    offset = -scale * scene.UP[1] * FLOOR_Y
+    return (n[0][0], n[1][0], n[0][1], n[1][1],
+            -n[0][1] * offset, offset - n[1][1] * offset)
+
+
 def floor_arc(start, end, radius, colour, width=1.4, dash=None):
     steps = max(8, int(abs(end - start) * 12))
     points = [project(bearing_point(start + (end - start) * i / steps, radius), True)
@@ -774,8 +800,8 @@ def frame_panel(x, y, width, height, title, yaw, objects, note, scale=112):
     art.append(floor_ray(yaw, 0.95, blend(MUTED, STAGE, 0.35), 1.1, dash="4 3"))
     for obj in objects:
         world = obj["world"]
-        art.append(floor_arc(yaw, world, BEARING_RADIUS, obj["ink"], 1.6))
-        art.append(floor_ray(world, BEARING_RADIUS + 0.06, blend(obj["ink"], STAGE, 0.5), 0.9))
+        art.append(floor_arc(yaw, world, obj["radius"], obj["ink"], 1.6))
+        art.append(floor_ray(world, obj["radius"], blend(obj["ink"], STAGE, 0.5), 0.9))
         if obj.get("ghost") is not None:
             art.append(floor_square_at(obj["ghost"], obj["radius"], dash="3 3"))
             art.append(floor_arc(obj["ghost"], world, obj["radius"],
@@ -802,7 +828,7 @@ def frame_panel(x, y, width, height, title, yaw, objects, note, scale=112):
                  + "".join(art) + '</g>')
     # The angle each arc subtends, written at the arc's own midpoint.
     for obj in objects:
-        middle = project(bearing_point((yaw + obj["world"]) / 2, BEARING_RADIUS + 0.20), True)
+        middle = project(bearing_point((yaw + obj["world"]) / 2, obj["radius"] + 0.18), True)
         degrees = round(abs(obj["world"] - yaw) * 180 / pi)
         parts.append(text(x + width / 2 + middle[0], y + height * 0.46 + middle[1] + 4,
                           f"{degrees}°", size=12, weight=600, fill=obj["ink"],
@@ -1053,7 +1079,13 @@ def build_head_tracking():
                  'animation-timing-function:steps(1,end);animation-delay:var(--d)}',
                  f'@keyframes pose{{0%{{opacity:1}}'
                  f'{fmt(100 * TRACK_OVERLAP / TRACK_POSES)}%{{opacity:0}}}}',
-                 f'.t{{animation:swing {fmt(TRACK_SECONDS)}s linear infinite}}']
+                 f'.t{{animation:swing {fmt(TRACK_SECONDS)}s linear infinite}}',
+                 f'.r{{animation:turn {fmt(TRACK_SECONDS)}s linear infinite}}']
+        frames = []
+        for k in range(TRACK_POSES + 1):
+            numbers = ",".join(fmt(v) for v in floor_rotation(yaws[k % TRACK_POSES]))
+            frames.append(f"{fmt(k / TRACK_POSES * 100)}%{{transform:matrix({numbers})}}")
+        style.append("@keyframes turn{" + "".join(frames) + "}")
         for name, point_of in (("swing", lambda y: bearing_point(locked + y,
                                                                  radius_locked)),):
             frames = []
@@ -1069,13 +1101,14 @@ def build_head_tracking():
             # from the transform animation the moving object rides.
             style.append(f'.k{k}{{--d:-'
                          f'{fmt((TRACK_POSES - k) * TRACK_SECONDS / TRACK_POSES)}s}}')
-        style.append("@media (prefers-reduced-motion:reduce){.k,.t{animation:none}}")
+        style.append("@media (prefers-reduced-motion:reduce){.k,.t,.r{animation:none}}")
         body.insert(0, "<style>" + "".join(style) + "</style>")
 
         art = [floor_grid()]
         # The scene-relative object never moves, so it is drawn once.
         static_body = listener_body()
         fixed_point = bearing_point(fixed, radius_fixed, height_fixed)
+        art.append(floor_ray(fixed, radius_fixed, blend(INK, STAGE, 0.5), 0.9))
         art.append(floor_square_at(fixed, radius_fixed))
         a = project((fixed_point[0], height_fixed - EDGE / 2, fixed_point[2]), True)
         b = project((fixed_point[0], FLOOR_Y, fixed_point[2]), True)
@@ -1084,9 +1117,10 @@ def build_head_tracking():
         art.append(static_body)
         # Everything that turns, one group per pose, one visible at a time.
         for k, yaw in enumerate(yaws):
+            # The scene-relative arc changes how far it sweeps, so it is the one
+            # thing here that genuinely needs redrawing; its far end never moves.
             pose = [floor_ray(yaw, 0.95, blend(MUTED, STAGE, 0.35), 1.1, dash="4 3"),
-                    floor_arc(yaw, fixed, BEARING_RADIUS, INK, 1.6),
-                    floor_arc(yaw, locked + yaw, BEARING_RADIUS + 0.14, ACCENT, 1.6),
+                    floor_arc(yaw, fixed, radius_fixed, INK, 1.6),
                     listener_head(yaw)]
             opacity = "" if k == 0 else ' opacity="0"'
             art.append(f'<g class="k k{k}"{opacity}>{"".join(pose)}</g>')
@@ -1104,6 +1138,12 @@ def build_head_tracking():
                     f'{scene.box((0, 0, 0), (EDGE,) * 3, ACCENT, 2, True)}</g>']
         art.append(f'<g class="t" transform="translate({fmt(start[0])} {fmt(start[1])})">'
                    + "".join(swinging) + '</g>')
+        # Drawn once at rest and turned by the matrix, so its end and the object
+        # it points at move together rather than one stepping behind the other.
+        art.append('<g class="r">'
+                   + floor_arc(0, locked, radius_locked, ACCENT, 1.6)
+                   + floor_ray(locked, radius_locked, blend(ACCENT, STAGE, 0.5), 0.9)
+                   + '</g>')
         body.append(f'<g transform="translate({fmt(origin[0])} {fmt(origin[1])})">'
                     + "".join(art) + '</g>')
 

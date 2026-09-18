@@ -87,6 +87,20 @@ already carries the floor position, so shapes inside it are drawn centred on the
 origin — adding the floor's screen offset again drops them a room's height
 below where they belong.
 
+Only what actually changes shape is redrawn per pose. A horizontal plane maps to
+the screen through an invertible linear map, so a yaw inside that plane is an
+affine transform of the projection: `floor_rotation` returns it, and the
+head-locked arc is drawn once at rest and turned by it. That matters for more
+than size. A stepped arc beside a smoothly moving object visibly lags it, and
+these arcs are meant to end **on** the objects they point at — each spans its own
+object's radius, so one end meets the facing ray and the other meets the drop
+line. The two ends stay within 1.3 px of each other across the loop; the
+remainder is CSS interpolating a matrix by decomposition while the translate
+beside it interpolates linearly. The scene-relative arc is the one thing that
+genuinely cannot be a transform, because its sweep changes rather than rotating
+— but its far end is on an object that never moves, so nothing lags there
+either.
+
 `generate-readme-diagrams.py` imports the palette, the camera and the voxel
 geometry from `generate-readme-scene.py` rather than restating them, and
 transcribes the constants it annotates — the silence floor, the footprint
