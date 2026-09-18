@@ -99,6 +99,10 @@ angle, and **the number never moves with `LVL`** — identity uses the depth buf
 another object should be hidden), the readout uses the screen (it should always face you), and each
 has one home.
 
+During a silent fade, each number loses contrast against its own cube face. Scene-relative black
+numbers stay darker than the face and head-locked white numbers stay lighter, preserving the
+reference-frame colour cue throughout the fade.
+
 ### Object loudness (LVL)
 
 With this on, the floor footprint carries two readings instead of one, and a nameplate floats above

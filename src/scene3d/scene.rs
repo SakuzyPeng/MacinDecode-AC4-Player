@@ -10,7 +10,7 @@ use crate::theme;
 
 use super::camera::Camera;
 use super::figure::{Figure, PartTone};
-use super::mesh::{ArrowSpec, Layer, MeshBuilder, Rgb, ViewContext};
+use super::mesh::{ArrowSpec, Layer, MeshBuilder, Rgb, ViewContext, shade_face};
 use super::params;
 
 /// Horizontal room extents. Logic uses a square footprint but a lower ceiling.
@@ -161,7 +161,7 @@ fn add_lfe_slot(mesh: &mut MeshBuilder, present: bool, show_number: bool, view: 
     if present {
         mesh.add_box(centre, size, object_colour, view);
         if show_number {
-            add_box_number(mesh, 0, centre, size, number_colour(false), view);
+            add_box_number(mesh, 0, centre, size, |_| number_colour(false), view);
         }
     } else {
         mesh.add_wire_box(
@@ -253,19 +253,20 @@ fn add_object(
 ) {
     let [x, y, z] = object_world_position(object.position);
     let edge = params::OBJECT_EDGE;
-    mesh.add_box(
-        [x, y, z],
-        [edge; 3],
-        receded(object_colour(object, view), object, view),
-        view,
-    );
+    let base = receded(object_colour(object, view), object, view);
+    mesh.add_box([x, y, z], [edge; 3], base, view);
     if show_label {
+        let ink = number_colour(object.head_locked);
+        let fade = silence_fade(object.presence);
         add_box_number(
             mesh,
             object.display_number,
             [x, y, z],
             [edge; 3],
-            receded(number_colour(object.head_locked), object, view),
+            // The side faces are shaded after the cube recedes. Fading a
+            // black number toward the stage instead would make it brighter
+            // than those faces, reversing the reference-frame colour cue.
+            |normal| ink.lerp(shade_face(base, normal, view), fade),
             view,
         );
     }
@@ -360,12 +361,13 @@ struct LabelFace {
 /// labels and nearer scene geometry hides farther ones without a parallel
 /// UI-side occlusion model. Per-face scaling also lets the non-cubic LFE cabinet
 /// carry zero without spilling off its shallow top and side faces.
+/// The colour callback keeps a fading number's contrast tied to its own face.
 fn add_box_number(
     mesh: &mut MeshBuilder,
     number: u64,
     centre: [f32; 3],
     size: [f32; 3],
-    colour: Rgb,
+    colour_for_face: impl Fn([f32; 3]) -> Rgb,
     view: &ViewContext,
 ) {
     let (digits, first) = decimal_digits(number);
@@ -375,6 +377,7 @@ fn add_box_number(
         f32::from(count).mul_add(DIGIT_WIDTH, f32::from(count.saturating_sub(1)) * DIGIT_GAP);
 
     for (normal, right, up) in OBJECT_FACES {
+        let colour = colour_for_face(normal);
         let face_width = aligned_extent(size, right) * params::OBJECT_LABEL_FACE_FILL;
         let face_height = aligned_extent(size, up) * params::OBJECT_LABEL_FACE_FILL;
         let scale = (face_width / total_width).min(face_height);
@@ -463,8 +466,11 @@ fn face_label_point(
 /// silent fade — one says the metadata asks for no level, the other says no
 /// level has arrived for a while, and they are different statements.
 fn receded(colour: Rgb, object: &SceneObject<'_>, view: &ViewContext) -> Rgb {
-    let missing = (1.0 - object.presence.clamp(0.0, 1.0)) * (1.0 - params::SILENT_PRESENCE_FLOOR);
-    colour.lerp(view.stage, missing)
+    colour.lerp(view.stage, silence_fade(object.presence))
+}
+
+fn silence_fade(presence: f32) -> f32 {
+    (1.0 - presence.clamp(0.0, 1.0)) * (1.0 - params::SILENT_PRESENCE_FLOOR)
 }
 
 /// An object's base colour: accent while it is audible, faded toward the stage
@@ -829,6 +835,126 @@ mod tests {
             "the fade moved geometry instead of tinting it"
         );
         assert!(colours_differ, "a fully faded object was drawn unchanged");
+    }
+
+    fn assert_number_contrasts_with_its_faces(object: SceneObject<'_>, view: &ViewContext) {
+        let mut labelled = MeshBuilder::default();
+        let mut plain = MeshBuilder::default();
+        add_object(&mut labelled, &object, true, false, view);
+        add_object(&mut plain, &object, false, false, view);
+        // Labels precede the drop line. Counting the plain object's vertices
+        // also handles axis-aligned views where that line has no screen extent.
+        let labels = &labelled.line[..labelled.line.len() - plain.line.len()];
+        assert!(!labels.is_empty());
+        let mut present = MeshBuilder::default();
+        if object.presence < f32::EPSILON {
+            add_object(
+                &mut present,
+                &SceneObject {
+                    presence: 1.0,
+                    ..object
+                },
+                true,
+                false,
+                view,
+            );
+            assert_eq!(labelled.line.len(), present.line.len());
+            for (faded, original) in labelled.line.iter().zip(&present.line) {
+                assert_eq!(
+                    faded.position.map(f32::to_bits),
+                    original.position.map(f32::to_bits),
+                    "fading must not move or resize a number"
+                );
+            }
+        }
+        let centre = object_world_position(object.position);
+        let surface_offset = params::OBJECT_EDGE / 2.0 + params::OBJECT_LABEL_SURFACE_OFFSET;
+        for (index, segment) in labels.as_chunks::<6>().0.iter().enumerate() {
+            let midpoint = std::array::from_fn::<_, 3, _>(|axis| {
+                f32::midpoint(segment[0].position[axis], segment[2].position[axis])
+            });
+            let face = OBJECT_FACES
+                .iter()
+                .position(|(normal, _, _)| {
+                    let distance: f32 = (0..3)
+                        .map(|axis| (midpoint[axis] - centre[axis]) * normal[axis])
+                        .sum();
+                    (distance - surface_offset).abs() < 1e-5
+                })
+                .expect("every segment sits on a cube face");
+            let ink = &segment[0].colour[..3];
+            let surface = &labelled.solid[face * 6].colour[..3];
+            let ordered = ink.iter().zip(surface).all(|(ink, surface)| {
+                if object.head_locked {
+                    ink >= surface
+                } else {
+                    ink <= surface
+                }
+            });
+            assert!(
+                ordered && ink != surface,
+                "head locked {}, presence {}, gain {}, face {face}: number {ink:?}, surface {surface:?}",
+                object.head_locked,
+                object.presence,
+                object.gain,
+            );
+            if object.presence < f32::EPSILON {
+                let difference = |a: &[u8], b: &[u8]| -> u16 {
+                    a.iter()
+                        .zip(b)
+                        .map(|(a, b)| u16::from(a.abs_diff(*b)))
+                        .sum()
+                };
+                let original_ink = &present.line[index * 6].colour[..3];
+                let original_surface = &present.solid[face * 6].colour[..3];
+                assert!(
+                    difference(ink, surface) < difference(original_ink, original_surface),
+                    "a silent number must still lose contrast, not stay at full strength"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn silent_face_numbers_keep_their_black_or_white_contrast() {
+        use super::super::camera::Preset;
+
+        for preset in [
+            None,
+            Some(Preset::Top),
+            Some(Preset::Back),
+            Some(Preset::Side),
+        ] {
+            let mut camera = Camera::default();
+            if let Some(preset) = preset {
+                camera.apply_preset(preset, 1.5);
+            }
+            let view = ViewContext {
+                direction: camera.direction(),
+                degeneracy: camera.degeneracy(),
+                world_units_per_point: camera.world_units_per_point(600.0),
+                ink: Rgb::from_color32(theme::INK),
+                stage: Rgb::from_color32(theme::STAGE),
+            };
+            for head_locked in [false, true] {
+                for presence in [1.0, 0.75, 0.5, 0.25, 0.05, 0.0] {
+                    for gain in [0.0, 1.0] {
+                        for position in [[0.3, 0.4, -0.2], [-0.9; 3], [0.9; 3]] {
+                            assert_number_contrasts_with_its_faces(
+                                SceneObject {
+                                    display_number: 8,
+                                    head_locked,
+                                    presence,
+                                    gain,
+                                    ..sounding(position)
+                                },
+                                &view,
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn built(objects: &[SceneObject]) -> MeshBuilder {

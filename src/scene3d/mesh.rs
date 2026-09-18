@@ -229,7 +229,7 @@ impl MeshBuilder {
         for (local_normal, local_corners) in faces {
             let normal = orient(local_normal, axes);
             let corners = local_corners.map(|corner| add(centre, orient(corner, axes)));
-            let toned = base.lerp(view.ink, 1.0 - face_tone(normal));
+            let toned = shade_face(base, normal, view);
             let colour = faded(toned, centre, view).to_bytes();
             self.quad(
                 Layer::Solid,
@@ -254,7 +254,7 @@ impl MeshBuilder {
         view: &ViewContext,
     ) {
         let base = Rgb::from_color32(Color32::from_rgb(rgba[0], rgba[1], rgba[2]));
-        let mut colour = base.lerp(view.ink, 1.0 - face_tone(normal)).to_bytes();
+        let mut colour = shade_face(base, normal, view).to_bytes();
         colour[3] = rgba[3];
         for indices in [[0, 1, 2, 0, 2, 3], [2, 1, 0, 3, 2, 0]]
             .into_iter()
@@ -454,6 +454,12 @@ impl MeshBuilder {
             self.add_line(Layer::Decal, *from, *to, colour, width_points, view);
         }
     }
+}
+
+/// A face's surface colour before aerial perspective. Labels use the same
+/// shading when fading toward the surface they are printed on.
+pub fn shade_face(base: Rgb, normal: [f32; 3], view: &ViewContext) -> Rgb {
+    base.lerp(view.ink, 1.0 - face_tone(normal))
 }
 
 /// Tone for a face, chosen by the dominant axis of its outward normal.
