@@ -53,13 +53,21 @@ SILENCE_HOLD_SECONDS, SILENCE_FADE_SECONDS = 2.0, 0.6
 PEAK_HOLD_SECONDS = 1.6
 
 # The straight-down view the projection diagram uses, zoomed into the middle of
-# the floor. The camera is nearer than the player's params::CAMERA_DISTANCE:
-# an object's cube is only about a tenth as thick as it is high above the floor,
-# so at the player's own distance its side faces come out under two pixels and
-# the box reads as a flat square. This height puts them near four, which is as
-# close as the camera can come before the cube and its footprint drift further
-# apart than the cube is wide and stop reading as one object.
-TOP_SCALE, TOP_CAMERA_HEIGHT = 285.0, 4.5
+# the floor.
+#
+# Two quantities fight here. A cube's side faces are as tall on screen as the
+# cube is thick, while the gap between a cube and its footprint is as wide as
+# the cube is high above the floor — so moving the camera in grows both at once.
+# With objects up near head height the cube is a tenth as thick as it is high,
+# and at the player's own params::CAMERA_DISTANCE the side faces land under two
+# pixels: the box reads as a flat square and the panel loses the thing it is
+# for. The objects here therefore sit low in the room, where that ratio is
+# nearer a third, which buys a much closer camera at the same separation.
+#
+# Nothing distorts from this: every point at one height shares one reach, so the
+# floor grid stays a square grid however near the camera comes. Only a
+# difference in height separates anything, which is exactly the panel's subject.
+TOP_SCALE, TOP_CAMERA_HEIGHT = 495.0, 1.0
 
 SANS = "-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif"
 MONO = "ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"
@@ -326,7 +334,12 @@ def top_view(point, *, perspective):
     which both separates the two and makes the nearer one larger.
     """
     x, y, z = point
-    reach = TOP_CAMERA_HEIGHT / (TOP_CAMERA_HEIGHT - y) if perspective else 1.0
+    # Orthographic has no distance of its own, so it needs a plane to be scaled
+    # at, the way camera.rs matches its perspective to the orthographic zoom at
+    # the camera target. Taking the floor means both panels draw one room at one
+    # size, and the only difference between them is what height does.
+    reach = (TOP_CAMERA_HEIGHT / (TOP_CAMERA_HEIGHT - y) if perspective
+             else TOP_CAMERA_HEIGHT / (TOP_CAMERA_HEIGHT - FLOOR_Y))
     return (TOP_SCALE * x * reach, TOP_SCALE * z * reach, reach)
 
 
@@ -898,9 +911,8 @@ def build_reference_frames():
     for y, ink, white, name, number, place, bearing, lead, tail in rows:
         body.append(rect(24, y, 832, 62, fill=SURFACE, stroke=BORDER, radius=4))
         body.append(rect(24, y, 3, 62, fill=ink))
-        body.append(rect(42, y + 20, 22, 22, fill=ACCENT, radius=3))
-        body.append(text(53, y + 36, number, size=12, weight=600, anchor="middle",
-                         fill=SURFACE if white else INK))
+        body.append(segment_chip(42, y + 20, 22, int(number),
+                                 ink=SURFACE if white else INK))
         body.append(text(76, y + 26, name, size=12, weight=600, fill=ink))
         body.append(text(76, y + 45, f"room: {place}  ·  bearing: {bearing}",
                          size=10.5, mono=True, fill=TEXT))
@@ -923,6 +935,22 @@ def build_reference_frames():
         "in the room swings around with the head: it sounds unchanged, and only "
         "the picture moves. The player marks the first with a black element "
         "number and the second with a white one.", body)
+
+
+def segment_chip(x, y, side, number, *, ink=INK):
+    """An element number in a legend, drawn the way the player draws it on a
+    cube: seven segments rather than a typeface, so the legend and the scene
+    show the same mark."""
+    parts = [rect(x, y, side, side, fill=ACCENT, radius=2)]
+    scale, shift = side * 0.62, (-.35 if number == 1 else 0)
+    cx, cy = x + side / 2, y + side / 2
+    for bit, (start, end) in enumerate(scene.SEGMENTS):
+        if scene.DIGITS[number] & (1 << bit):
+            parts.append(stroke_path(
+                f"M{fmt(cx + (start[0] + shift) * scale)} {fmt(cy - start[1] * scale)}"
+                f"L{fmt(cx + (end[0] + shift) * scale)} {fmt(cy - end[1] * scale)}",
+                ink, 1.15))
+    return "".join(parts)
 
 
 def top_box(centre, edge, number, *, perspective):
@@ -985,8 +1013,8 @@ def build_projection_modes():
 
     # Levels either side of the crossover: below -18.8 dB the footprint is
     # narrower than the cube, so a straight-down orthographic view covers it.
-    objects = [(1, -3.0, (-.40, .46, -.30)), (2, -14.0, (.44, .52, -.28)),
-               (3, -26.0, (-.38, .50, .32)), (4, -33.0, (.42, .44, .30))]
+    objects = [(1, -3.0, (-.40, -.44, -.30)), (2, -14.0, (.40, -.40, -.24)),
+               (3, -26.0, (-.38, -.42, .32)), (4, -33.0, (.42, -.44, .30))]
     square = lambda cx, cy, side, **kw: rect(cx - side / 2, cy - side / 2,
                                              side, side, **kw)
     for index, (label, perspective, note) in enumerate([
@@ -1028,11 +1056,9 @@ def build_projection_modes():
                ("3", "−26 dB", "0.77×", False), ("4", "−33 dB", "0.55×", False)]
     for index, (number, level, ratio, visible) in enumerate(columns):
         cx = 42 + index * 200
-        body.append(rect(cx, 440, 18, 18, fill=ACCENT, radius=2))
-        body.append(text(cx + 9, 453, number, size=10, weight=600, fill=SURFACE,
-                         anchor="middle"))
-        body.append(text(cx + 26, 446, f"{level} → {ratio}", size=10.5, fill=TEXT))
-        body.append(text(cx + 26, 460, "visible either way" if visible
+        body.append(segment_chip(cx, 438, 21, int(number)))
+        body.append(text(cx + 30, 446, f"{level} → {ratio}", size=10.5, fill=TEXT))
+        body.append(text(cx + 30, 460, "visible either way" if visible
                          else "hidden in ORTHO", size=10.5,
                          fill=MUTED if visible else WARNING))
     body.append(caption(42, 488, [
@@ -1044,7 +1070,7 @@ def build_projection_modes():
     body.append(text(22, height - 18, "Straight down on the same four objects",
                      size=11, fill=TEXT))
     body.append(text(width - 22, height - 18,
-                     "Parallel edges stay parallel in ORTHO and converge in PERSP",
+                     "Everything at one height scales together; only height separates them",
                      size=11, fill=MUTED, anchor="end"))
     return "projection-modes.svg", document(
         width, height, "MacinDecode AC-4 Player — orthographic and perspective",
