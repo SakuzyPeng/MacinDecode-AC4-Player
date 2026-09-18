@@ -92,6 +92,11 @@ already carries the floor position, so shapes inside it are drawn centred on the
 origin — adding the floor's screen offset again drops them a room's height
 below where they belong.
 
+The outward and return turns share 37 distinct pose drawings through local
+`<use>` references. Only byte-identical geometry is reused: all 72 timed
+instances, their overlapping visibility, animation keyframes and reduced-motion
+fallback remain intact. Coordinates and colours keep their original precision.
+
 Only what actually changes shape is redrawn per pose. A horizontal plane maps to
 the screen through an invertible linear map, so a yaw inside that plane is an
 affine transform of the projection: `floor_rotation` returns it, and the

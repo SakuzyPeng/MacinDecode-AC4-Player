@@ -1151,15 +1151,22 @@ def build_head_tracking():
         art.append(stroke_path(f"M{fmt(a[0])} {fmt(a[1])}L{fmt(b[0])} {fmt(b[1])}",
                                MUTED, 0.8, opacity=0.5))
         art.append(static_body)
-        # Everything that turns, one group per pose, one visible at a time.
+        # A sinusoidal turn visits the same drawn pose on the outward and
+        # return legs. Share only byte-identical geometry; every timed instance
+        # keeps its own animation class, delay, opacity and place in draw order.
+        poses = {}
         for k, yaw in enumerate(yaws):
             # The scene-relative arc changes how far it sweeps, so it is the one
             # thing here that genuinely needs redrawing; its far end never moves.
             pose = [floor_ray(yaw, 0.95, blend(MUTED, STAGE, 0.35), 1.1, dash="4 3"),
                     floor_arc(yaw, fixed, radius_fixed, INK, 1.6),
                     listener_head(yaw)]
+            geometry = "".join(pose)
+            pose_id = poses.setdefault(geometry, len(poses))
             opacity = "" if k == 0 else ' opacity="0"'
-            art.append(f'<g class="k k{k}"{opacity}>{"".join(pose)}</g>')
+            art.append(f'<use href="#h{pose_id}" class="k k{k}"{opacity}/>')
+        body.append('<defs>' + ''.join(f'<g id="h{index}">{geometry}</g>'
+                                       for geometry, index in poses.items()) + '</defs>')
         art.append(scene.box(fixed_point, (EDGE,) * 3, ACCENT, 1, True))
         # One animated group carries everything that swings: the footprint on the
         # floor, the drop line, and the cube lifted by the constant screen
