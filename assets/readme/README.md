@@ -51,6 +51,7 @@ that support CSS but do not run animations.
 | `meter-row.svg` | One meter bank row's four marks, and the bank they sit in |
 | `reference-frames.svg` | What scene-relative and head-locked each keep constant when the listener turns |
 | `projection-modes.svg` | Why the projection toggle exists: which footprints a straight-down orthographic view hides |
+| | Its cubes are boxes, not squares: perspective gives each corner its own reach, so an off-axis cube leans and its inward faces come into view, while orthographic shows the top face alone and covers the footprint exactly. Element numbers are the player's seven segments, laid on the top face. |
 | `head-tracking.svg` | The same distinction in motion — one bearing arc rigid, the other breathing |
 
 They carry labels only: the prose that explains them lives in the manual beside
@@ -67,9 +68,24 @@ its place, and the bearing is the part you hear. A diagram that only asked
 
 Its poses are stepped: everything but the head is a pure translation and rides a
 transform animation, while a turning cube changes shape and needs its own
-geometry per pose. A pose's negative delay is a whole loop minus its own slice —
-delaying by the slice alone plays the poses backwards, silently desynchronising
-them from the transform animation.
+geometry per pose. Three things there are easy to get wrong and impossible to
+see in a single frame, so each is pinned by a check rather than by eye:
+
+- A pose's negative delay is a whole loop **minus** its own slice. Delaying by
+  the slice alone plays the poses backwards, desynchronising them from the
+  transform animation with no other symptom.
+- A pose stays up for `TRACK_OVERLAP` slices rather than exactly one. At exactly
+  one the outgoing pose can reach zero a frame before the incoming one reaches
+  one, and the gap shows as the background flashing through.
+- The yaw has to carry the facing direction to the same place a bearing points,
+  or the head turns against the object that is locked to it. The test is that
+  the nose and the head-locked object move the same way on screen.
+
+`TRACK_POSES` is 72 over six seconds: twelve updates a second, 3.9 degrees a
+step. Fewer reads as stepping; more is mostly file size. A group's own transform
+already carries the floor position, so shapes inside it are drawn centred on the
+origin — adding the floor's screen offset again drops them a room's height
+below where they belong.
 
 `generate-readme-diagrams.py` imports the palette, the camera and the voxel
 geometry from `generate-readme-scene.py` rather than restating them, and

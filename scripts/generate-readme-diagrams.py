@@ -123,11 +123,15 @@ def stroke_path(d, color, width=1, *, dash=None, opacity=None):
     return f'<path {" ".join(attrs)}/>'
 
 
-def arrow(x, y, *, size=5, color=MUTED):
-    """A chevron pointing right, centred in the gap between two boxes."""
-    return (f'<path d="M{fmt(x - size / 2)} {fmt(y - size)}'
-            f'L{fmt(x + size / 2)} {fmt(y)}L{fmt(x - size / 2)} {fmt(y + size)}" '
-            f'fill="none" stroke="{color}" stroke-width="1.4" '
+def arrow(x, y, *, size=5, color=MUTED, down=False):
+    """A chevron in the gap between two boxes, pointing the way the flow goes."""
+    if down:
+        d = (f'M{fmt(x - size)} {fmt(y - size / 2)}L{fmt(x)} {fmt(y + size / 2)}'
+             f'L{fmt(x + size)} {fmt(y - size / 2)}')
+    else:
+        d = (f'M{fmt(x - size / 2)} {fmt(y - size)}L{fmt(x + size / 2)} {fmt(y)}'
+             f'L{fmt(x - size / 2)} {fmt(y + size)}')
+    return (f'<path d="{d}" fill="none" stroke="{color}" stroke-width="1.4" '
             'stroke-linecap="round" stroke-linejoin="round"/>')
 
 
@@ -275,8 +279,11 @@ def yawed_box(centre, size, yaw, colour, *, opacity=None):
     eye instead of assumed, and shaded by orientation rather than by index —
     at yaw zero that reproduces scene.FACES' own 1.00 / 0.88 / 0.76.
     """
+    # A bearing of b points at (sin b, 0, -cos b), so a yaw of b has to carry
+    # the facing direction (0, 0, -1) to exactly that. The mirrored form turns
+    # the head against the object that is supposed to be locked to it.
     c, sn = cos(yaw), sin(yaw)
-    turn = lambda v: (v[0] * c + v[2] * sn, v[1], -v[0] * sn + v[2] * c)
+    turn = lambda v: (v[0] * c - v[2] * sn, v[1], v[0] * sn + v[2] * c)
     axes = [turn((1, 0, 0)), (0, 1, 0), turn((0, 0, 1))]
     faces = []
     for axis, extent in zip(axes, size):
@@ -360,13 +367,13 @@ def build_playback_paths():
     # the player's own, so none of them may borrow the device fill.
     body.append(text(97, 118, ".m4a · .mp4 · .ac4", size=10.5, fill=MUTED,
                      anchor="middle"))
-    body.append(arrow(97, 134, size=4))
+    body.append(arrow(97, 134, size=4, down=True))
     for index, (title, sub) in enumerate([("AC-4 decoder", "no system codec"),
                                           ("Objects + LFE", "per-object metadata")]):
         top = 146 + index * 72
         body.append(stage_box(24, top, 146, 48, title, sub, PLAYER_FILL, PLAYER_EDGE))
         if index == 0:
-            body.append(arrow(97, top + 60, size=4))
+            body.append(arrow(97, top + 60, size=4, down=True))
 
     lanes = [
         (130, "WINDOWS OBJECT PASSTHROUGH", [
@@ -716,7 +723,7 @@ def floor_grid(half=1.0, cells=8):
 
 
 def floor_arc(start, end, radius, colour, width=1.4, dash=None):
-    steps = max(8, int(abs(end - start) * 24))
+    steps = max(8, int(abs(end - start) * 12))
     points = [project(bearing_point(start + (end - start) * i / steps, radius), True)
               for i in range(steps + 1)]
     d = "M" + "L".join(f"{fmt(x)} {fmt(y)}" for x, y in points)
@@ -744,7 +751,7 @@ def listener_head(yaw):
     """The only part a head pose turns."""
     skin = blend(MUTED, TEXT, 0.22)
     parts = [yawed_box((0, 0, 0), (.225,) * 3, yaw, blend(skin, INK, 0.16))]
-    turn = lambda x, z: (x * cos(yaw) + z * sin(yaw), -x * sin(yaw) + z * cos(yaw))
+    turn = lambda x, z: (x * cos(yaw) - z * sin(yaw), x * sin(yaw) + z * cos(yaw))
     for x, z, size, colour in ((-.0425, -.125, .0325, blend(INK, TEXT, 0.2)),
                                (.0425, -.125, .0325, blend(INK, TEXT, 0.2)),
                                (0, -.13125, .045, ACCENT)):
@@ -805,6 +812,19 @@ def frame_panel(x, y, width, height, title, yaw, objects, note, scale=112):
     return "".join(parts)
 
 
+def floor_square_local():
+    """The footprint's shape alone, centred on the origin, for a group whose own
+    transform already carries the floor position — adding the floor's screen
+    offset a second time drops it a room's height below where it belongs."""
+    half = EDGE * 1.30 / 2
+    base = project((0, FLOOR_Y, 0), True)
+    corners = [(-half, FLOOR_Y, -half), (half, FLOOR_Y, -half),
+               (half, FLOOR_Y, half), (-half, FLOOR_Y, half)]
+    points = " ".join(",".join(fmt(v - b) for v, b in zip(project(c, True), base))
+                      for c in corners)
+    return f'<polygon points="{points}" fill="{blend(MUTED, STAGE, 0.40)}"/>'
+
+
 def floor_square_at(bearing, radius, dash=None):
     point = bearing_point(bearing, radius)
     half = EDGE * 1.30 / 2
@@ -824,7 +844,7 @@ def build_reference_frames():
     yaw = radians(45)
     # Bearings measured from straight ahead, positive toward the listener's right.
     scene_rel = dict(number=1, radius=.80, height=.12, ink=INK, white=False)
-    head_lock = dict(number=2, radius=.86, height=.46, ink=ACCENT, white=True)
+    head_lock = dict(number=2, radius=.90, height=.66, ink=ACCENT, white=True)
     panels = [
         (24, "Head forward", 0.0, radians(100), radians(-75), None,
          "The listener faces the dashed ray; each arc is a bearing from it."),
@@ -875,6 +895,55 @@ def build_reference_frames():
         "number and the second with a white one.", body)
 
 
+def top_box(centre, edge, number, *, perspective):
+    """A cube through the straight-down camera, with the faces it really shows.
+
+    Orthographic keeps every corner's size, so only the top face is drawn and it
+    covers the footprint exactly. Perspective gives each corner its own reach, so
+    an off-axis cube leans and its inward sides come into view.
+    """
+    cx, cy, cz = centre
+    half = edge / 2
+    corner = lambda sx, sy, sz: top_view((cx + sx * half, cy + sy * half, cz + sz * half),
+                                         perspective=perspective)[:2]
+    top = [corner(-1, 1, -1), corner(1, 1, -1), corner(1, 1, 1), corner(-1, 1, 1)]
+    sides = []
+    for axis, normal in ((0, 1), (0, -1), (2, 1), (2, -1)):
+        # A face is seen when its outward normal points back toward the camera.
+        offset = (cx if axis == 0 else cz) + normal * half
+        if offset * normal >= 0:
+            continue
+        if axis == 0:
+            quad = [corner(normal, 1, -1), corner(normal, 1, 1),
+                    corner(normal, -1, 1), corner(normal, -1, -1)]
+        else:
+            quad = [corner(-1, 1, normal), corner(1, 1, normal),
+                    corner(1, -1, normal), corner(-1, -1, normal)]
+        sides.append(quad)
+    parts = []
+    for quad in sides:
+        points = " ".join(f"{fmt(x)},{fmt(y)}" for x, y in quad)
+        parts.append(f'<polygon points="{points}" fill="{blend(ACCENT, INK, 0.22)}"/>')
+    points = " ".join(f"{fmt(x)},{fmt(y)}" for x, y in top)
+    parts.append(f'<polygon points="{points}" fill="{ACCENT}"/>')
+    # The element number, as the seven segments the player prints on every face.
+    # The top face is a plane at one height, so its projection is affine and the
+    # corners can be interpolated directly.
+    def on_face(u, v):
+        a = (top[0][0] + (top[1][0] - top[0][0]) * u, top[0][1] + (top[1][1] - top[0][1]) * u)
+        b = (top[3][0] + (top[2][0] - top[3][0]) * u, top[3][1] + (top[2][1] - top[3][1]) * u)
+        return (a[0] + (b[0] - a[0]) * v, a[1] + (b[1] - a[1]) * v)
+    for bit, (start, end) in enumerate(scene.SEGMENTS):
+        if not scene.DIGITS[number] & (1 << bit):
+            continue
+        shift = -.35 if number == 1 else 0
+        p0 = on_face((start[0] + shift) * .72 + .5, .5 - start[1] * .72)
+        p1 = on_face((end[0] + shift) * .72 + .5, .5 - end[1] * .72)
+        parts.append(f'<path d="M{fmt(p0[0])} {fmt(p0[1])}L{fmt(p1[0])} {fmt(p1[1])}" '
+                     f'fill="none" stroke="{INK}" stroke-width="1.15"/>')
+    return "".join(parts)
+
+
 def build_projection_modes():
     """Why the projection toggle exists, rather than what it looks like."""
     width, height = 880, 560
@@ -903,10 +972,7 @@ def build_projection_modes():
             fx, fy, freach = top_view((px, FLOOR_Y, pz), perspective=perspective)
             art.append(square(fx, fy, EDGE * footprint_scale(decibels) * freach * TOP_SCALE,
                               fill="none", stroke=MUTED, width=1.3))
-            cx, cy, creach = top_view((px, py, pz), perspective=perspective)
-            art.append(square(cx, cy, EDGE * creach * TOP_SCALE, fill=ACCENT, radius=1.5))
-            art.append(text(cx, cy + 4, str(number), size=11, weight=600,
-                            fill=SURFACE, anchor="middle"))
+            art.append(top_box((px, py, pz), EDGE, number, perspective=perspective))
         # The panel is a viewport onto the floor, so the floor is cut by it
         # rather than shrunk to fit inside it.
         body.append(f'<clipPath id="p{index}">'
@@ -924,14 +990,14 @@ def build_projection_modes():
     body.append(text(42, 422, "The footprint carries gain by growing, so a quiet "
                      "object's is narrower than its own cube", size=11.5,
                      weight=600, fill=TEXT))
-    columns = [(42, "1", "−3 dB", "1.50x", True), (250, "2", "−14 dB", "1.15x", True),
-               (440, "3", "−26 dB", "0.77x", False), (640, "4", "−33 dB", "0.55x", False)]
-    for cx, number, level, ratio, visible in columns:
+    columns = [("1", "−3 dB", "1.50×", True), ("2", "−14 dB", "1.15×", True),
+               ("3", "−26 dB", "0.77×", False), ("4", "−33 dB", "0.55×", False)]
+    for index, (number, level, ratio, visible) in enumerate(columns):
+        cx = 42 + index * 200
         body.append(rect(cx, 440, 18, 18, fill=ACCENT, radius=2))
         body.append(text(cx + 9, 453, number, size=10, weight=600, fill=SURFACE,
                          anchor="middle"))
-        body.append(text(cx + 26, 446, f"{level} · footprint {ratio} the cube",
-                         size=10.5, fill=TEXT))
+        body.append(text(cx + 26, 446, f"{level} → {ratio}", size=10.5, fill=TEXT))
         body.append(text(cx + 26, 460, "visible either way" if visible
                          else "hidden in ORTHO", size=10.5,
                          fill=MUTED if visible else WARNING))
@@ -961,7 +1027,12 @@ def build_projection_modes():
 # here that animates. Poses are stepped: everything but the head is a pure
 # translation and rides a transform animation, while a turning cube changes
 # shape and needs its own geometry per pose.
-TRACK_POSES, TRACK_SECONDS, TRACK_SWEEP = 48, 6.0, radians(45)
+TRACK_POSES, TRACK_SECONDS, TRACK_SWEEP = 72, 6.0, radians(45)
+# Each pose stays up for longer than its own slice. At exactly one slice the
+# outgoing pose can reach zero a frame before the incoming one reaches one, and
+# the gap shows as the background flashing through; overlapping costs a frame of
+# two nearly identical heads drawn on top of each other, which is invisible.
+TRACK_OVERLAP = 1.25
 
 
 def build_head_tracking():
@@ -980,10 +1051,11 @@ def build_head_tracking():
         style = [f'.k{{animation-duration:{fmt(TRACK_SECONDS)}s;'
                  'animation-iteration-count:infinite;animation-name:pose;'
                  'animation-timing-function:steps(1,end);animation-delay:var(--d)}',
-                 f'@keyframes pose{{0%{{opacity:1}}{fmt(100 / TRACK_POSES)}%{{opacity:0}}}}',
+                 f'@keyframes pose{{0%{{opacity:1}}'
+                 f'{fmt(100 * TRACK_OVERLAP / TRACK_POSES)}%{{opacity:0}}}}',
                  f'.t{{animation:swing {fmt(TRACK_SECONDS)}s linear infinite}}']
-        for name, point_of in (("swing", lambda y: bearing_point(locked + y, radius_locked,
-                                                                 height_locked)),):
+        for name, point_of in (("swing", lambda y: bearing_point(locked + y,
+                                                                 radius_locked)),):
             frames = []
             for k in range(TRACK_POSES + 1):
                 x, y = project(point_of(yaws[k % TRACK_POSES]), True)
@@ -1015,20 +1087,23 @@ def build_head_tracking():
             pose = [floor_ray(yaw, 0.95, blend(MUTED, STAGE, 0.35), 1.1, dash="4 3"),
                     floor_arc(yaw, fixed, BEARING_RADIUS, INK, 1.6),
                     floor_arc(yaw, locked + yaw, BEARING_RADIUS + 0.14, ACCENT, 1.6),
-                    floor_square_at(locked + yaw, radius_locked),
                     listener_head(yaw)]
-            swung = bearing_point(locked + yaw, radius_locked, height_locked)
-            top = project((swung[0], height_locked - EDGE / 2, swung[2]), True)
-            foot = project((swung[0], FLOOR_Y, swung[2]), True)
-            pose.append(stroke_path(f"M{fmt(top[0])} {fmt(top[1])}L{fmt(foot[0])} {fmt(foot[1])}",
-                                    MUTED, 0.8, opacity=0.5))
             opacity = "" if k == 0 else ' opacity="0"'
             art.append(f'<g class="k k{k}"{opacity}>{"".join(pose)}</g>')
         art.append(scene.box(fixed_point, (EDGE,) * 3, ACCENT, 1, True))
-        start = project(bearing_point(locked, radius_locked, height_locked), True)
-        cube = scene.box((0, 0, 0), (EDGE,) * 3, ACCENT, 2, True)
-        art.append(f'<g class="t w" transform="translate({fmt(start[0])} {fmt(start[1])})">'
-                   f'{cube}</g>')
+        # One animated group carries everything that swings: the footprint on the
+        # floor, the drop line, and the cube lifted by the constant screen
+        # distance between its height and the floor.
+        lift = project((0, height_locked, 0), True)[1] - project((0, FLOOR_Y, 0), True)[1]
+        lift_top = project((0, height_locked - EDGE / 2, 0), True)[1] \
+            - project((0, FLOOR_Y, 0), True)[1]
+        start = project(bearing_point(locked, radius_locked), True)
+        swinging = [floor_square_local(),
+                    stroke_path(f"M0 {fmt(lift_top)}L0 0", MUTED, 0.8, opacity=0.5),
+                    f'<g class="w" transform="translate(0 {fmt(lift)})">'
+                    f'{scene.box((0, 0, 0), (EDGE,) * 3, ACCENT, 2, True)}</g>']
+        art.append(f'<g class="t" transform="translate({fmt(start[0])} {fmt(start[1])})">'
+                   + "".join(swinging) + '</g>')
         body.append(f'<g transform="translate({fmt(origin[0])} {fmt(origin[1])})">'
                     + "".join(art) + '</g>')
 
