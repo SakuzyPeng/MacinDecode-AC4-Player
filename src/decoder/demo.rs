@@ -31,7 +31,17 @@
 //! ground statement against the ostinato; this module's tests then re-derive
 //! the object budget independently and require the two to agree.
 
+#[cfg(any(feature = "decode", test))]
+use crate::decoder::DecodedSceneBlock;
+
 pub(crate) mod score;
+// The synthesiser builds Scene blocks, whose constructors exist only where
+// there is a decoder to have produced one. The score above is plain data and
+// stays available to every build, including the inspection-only shell.
+#[cfg(any(feature = "decode", test))]
+pub(crate) mod stage;
+#[cfg(any(feature = "decode", test))]
+pub(crate) mod voice;
 
 /// One note: when it starts, how long it is held, and which pitch it sounds.
 ///
@@ -155,11 +165,569 @@ impl Phase {
     }
 }
 
+/// The demo track, ready to answer any block on its timeline.
+///
+/// Construction does all the arranging; [`Self::block_at`] only reads. That
+/// split is what makes a block a pure function of its start frame, and it is
+/// the reason a seek is nothing more than a different argument: there is no
+/// state to rewind, no tail to re-render and no index to build.
+#[cfg(any(feature = "decode", test))]
+pub(crate) struct DemoProgram {
+    sample_rate: u32,
+    timbres: Vec<voice::Timbre>,
+    /// Every note, indexed by the slot that sounds it and sorted by onset.
+    by_slot: Vec<Vec<stage::Placement>>,
+    lfe: Vec<(i64, u8)>,
+    duration_frames: u64,
+}
+
+/// Position updates a moving object publishes inside one block.
+///
+/// Windows takes one position per object per render quantum, so an in-block
+/// update quantises to the next boundary there while the `MacinRender` producer
+/// submits it as given. Publishing several per block is what makes that
+/// difference visible instead of theoretical.
+#[cfg(any(feature = "decode", test))]
+const UPDATES_PER_BLOCK: u32 = 4;
+
+#[cfg(any(feature = "decode", test))]
+impl DemoProgram {
+    pub(crate) fn new(sample_rate: u32) -> Self {
+        let timbres = stage::timbres();
+        let arrangement = stage::arrange(sample_rate, &timbres);
+        let mut by_slot = vec![Vec::new(); stage::SLOTS];
+        for placement in arrangement.placements {
+            by_slot[placement.slot].push(placement);
+        }
+        for slot in &mut by_slot {
+            slot.sort_by_key(|placement| placement.onset);
+        }
+        Self {
+            sample_rate,
+            timbres,
+            by_slot,
+            lfe: stage::lfe_onsets(sample_rate),
+            duration_frames: arrangement.duration_frames,
+        }
+    }
+
+    pub(crate) const fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    pub(crate) const fn duration_frames(&self) -> u64 {
+        self.duration_frames
+    }
+
+    /// Frames still to come after `start_frame`, capped at one block.
+    pub(crate) fn block_frames_at(&self, start_frame: i64) -> u32 {
+        let remaining = self
+            .duration_frames
+            .saturating_sub(u64::try_from(start_frame.max(0)).unwrap_or(u64::MAX));
+        u32::try_from(remaining)
+            .unwrap_or(u32::MAX)
+            .min(stage::BLOCK_FRAMES)
+    }
+
+    /// One Scene block, built from the timeline alone.
+    pub(crate) fn block_at(&self, start_frame: i64) -> DecodedSceneBlock {
+        let frames = self.block_frames_at(start_frame);
+        let end = start_frame + i64::from(frames);
+        let length = frames as usize;
+        let mut objects = Vec::with_capacity(stage::SLOTS);
+        let mut updates = Vec::new();
+
+        for slot in 0..stage::SLOTS {
+            let mut samples = vec![0.0f32; length];
+            let mut sounding: Option<&stage::Placement> = None;
+            for placement in &self.by_slot[slot] {
+                if placement.release <= start_frame || placement.onset >= end {
+                    continue;
+                }
+                voice::render(
+                    &mut samples,
+                    &self.timbres[placement.timbre],
+                    voice::frequency_of(placement.pitch),
+                    placement.level,
+                    placement.onset - start_frame,
+                    placement.release - start_frame,
+                    self.sample_rate,
+                );
+                if placement.onset <= start_frame {
+                    sounding = Some(placement);
+                } else {
+                    let offset = u32::try_from(placement.onset - start_frame).unwrap_or(0);
+                    updates.push(stage::update(
+                        stage::element_id(slot),
+                        offset,
+                        placement.ramp_frames,
+                        stage::state_of(placement, self.seconds(placement.onset)),
+                    ));
+                }
+            }
+            let initial = sounding.map_or_else(stage::idle_state, |placement| {
+                stage::state_of(placement, self.seconds(start_frame))
+            });
+            // A moving object republishes inside the block so the picture keeps
+            // up with the ear; a still one has nothing to say until its next
+            // note, and saying it anyway would only cost bandwidth.
+            if let Some(placement) = sounding
+                && matches!(placement.motion, stage::Motion::Orbit { .. })
+            {
+                let step = frames / UPDATES_PER_BLOCK;
+                for index in 1..UPDATES_PER_BLOCK {
+                    let offset = step * index;
+                    updates.push(stage::update(
+                        stage::element_id(slot),
+                        offset,
+                        step,
+                        stage::state_of(placement, self.seconds(start_frame + i64::from(offset))),
+                    ));
+                }
+            }
+            objects.push(stage::object(slot, initial, samples));
+        }
+
+        let mut bed = vec![0.0f32; length];
+        for &(onset, pitch) in &self.lfe {
+            if onset >= end {
+                break;
+            }
+            voice::render(
+                &mut bed,
+                &self.timbres[stage::timbre::TIMPANI],
+                voice::frequency_of(pitch),
+                0.2,
+                onset - start_frame,
+                i64::MAX,
+                self.sample_rate,
+            );
+        }
+
+        updates.sort_by_key(|update| (update.offset_frames(), update.element_id()));
+        stage::block(
+            self.sample_rate,
+            start_frame,
+            frames,
+            objects,
+            Some(stage::lfe(stage::bed_state(), bed)),
+            updates,
+        )
+    }
+
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "a frame index inside a three-minute programme, well under the \
+                  point where f32 stops counting frames exactly"
+    )]
+    fn seconds(&self, frame: i64) -> f32 {
+        frame as f32 / self.sample_rate as f32
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::decoder::{SceneLfePcm, SceneObjectPcm, SpatialObjectState};
 
     const TICKS_PER_BAR: u32 = score::TICKS_PER_BEAT * score::BEATS_PER_BAR;
+
+    const RATE: u32 = 48_000;
+
+    fn programme() -> DemoProgram {
+        DemoProgram::new(RATE)
+    }
+
+    /// Blocks worth looking at: the first and last of every phase, plus a walk
+    /// across each one. Rendering all 4 450 blocks of the programme is the
+    /// ignored sweep below; these cover every transition it could hide.
+    fn sampled_starts(programme: &DemoProgram) -> Vec<i64> {
+        let mut starts = vec![0];
+        for phase in score::PHASES {
+            let (first, last) = phase.span();
+            let start = stage::frame_of(u64::from(first), RATE);
+            let end = stage::frame_of(u64::from(last), RATE);
+            let step = ((end - start) / 6).max(i64::from(stage::BLOCK_FRAMES));
+            let mut frame = start;
+            while frame < end {
+                starts.push(frame - frame % i64::from(stage::BLOCK_FRAMES));
+                frame += step;
+            }
+        }
+        let last = i64::try_from(programme.duration_frames()).expect("a bounded programme");
+        starts.push(last - last % i64::from(stage::BLOCK_FRAMES));
+        starts.retain(|&start| start >= 0 && start < last);
+        starts.sort_unstable();
+        starts.dedup();
+        starts
+    }
+
+    fn peak_of(block: &crate::decoder::DecodedSceneBlock) -> f32 {
+        block
+            .objects()
+            .iter()
+            .flat_map(SceneObjectPcm::samples)
+            .chain(block.lfe().into_iter().flat_map(SceneLfePcm::samples))
+            .fold(0.0f32, |peak, sample| peak.max(sample.abs()))
+    }
+
+    #[test]
+    fn the_whole_programme_holds_one_scene_signature() {
+        // Sixteen slots exist from the first block to the last, so no phase
+        // boundary can look like a topology change and force a rebuild.
+        let programme = programme();
+        let mut signature = None;
+        for start in sampled_starts(&programme) {
+            let block = programme.block_at(start);
+            assert_eq!(block.objects().len(), stage::SLOTS);
+            assert!(block.lfe().is_some(), "the bed must be present throughout");
+            let current = crate::decoder::SceneSignature::from_block(&block);
+            match &signature {
+                None => signature = Some(current),
+                Some(expected) => {
+                    assert_eq!(&current, expected, "the signature changed at frame {start}");
+                }
+            }
+        }
+        assert!(signature.is_some(), "the programme produced no blocks");
+    }
+
+    #[test]
+    fn the_scene_stays_inside_the_object_budget() {
+        let programme = programme();
+        let block = programme.block_at(0);
+        assert!(
+            u32::try_from(block.objects().len()).expect("a small scene")
+                <= score::MAX_DYNAMIC_OBJECTS,
+            "the demo must configure on an endpoint offering sixteen objects"
+        );
+    }
+
+    #[test]
+    fn a_block_depends_on_nothing_but_its_start_frame() {
+        // The property seeking rests on. Two programmes that have rendered
+        // different histories must still answer the same block identically.
+        let played = programme();
+        let seeked = programme();
+        let starts = sampled_starts(&played);
+        for &start in &starts {
+            let _ = played.block_at(start);
+        }
+        let probe = starts[starts.len() / 2];
+        let after_playing = played.block_at(probe);
+        let after_seeking = seeked.block_at(probe);
+        for (left, right) in after_playing.objects().iter().zip(after_seeking.objects()) {
+            assert_eq!(left.element_id(), right.element_id());
+            assert_eq!(left.samples(), right.samples(), "a seek changed the audio");
+        }
+        assert_eq!(
+            after_playing.metadata_updates(),
+            after_seeking.metadata_updates()
+        );
+    }
+
+    #[test]
+    fn nothing_clips_and_the_programme_keeps_its_headroom() {
+        let programme = programme();
+        let mut worst = 0.0f32;
+        for start in sampled_starts(&programme) {
+            let block = programme.block_at(start);
+            for object in block.objects() {
+                assert!(
+                    object.samples().iter().all(|sample| sample.is_finite()),
+                    "a non-finite sample at frame {start}"
+                );
+            }
+            worst = worst.max(peak_of(&block));
+        }
+        assert!(worst < 1.0, "an object clipped at {worst}");
+        // -6 dBFS of summed headroom, so the renderer is not handed a signal
+        // that only survives because nothing happened to line up.
+        assert!(
+            worst < 0.5,
+            "the programme peaks at {worst}, over its budget"
+        );
+    }
+
+    #[test]
+    fn every_metadata_update_declares_what_changed() {
+        // The MacinRender ABI rejects an empty changed-field mask, and a
+        // consumer that received one could not tell an update from a no-op.
+        let programme = programme();
+        for start in sampled_starts(&programme) {
+            for update in programme.block_at(start).metadata_updates() {
+                assert_ne!(update.changed_fields(), 0, "an empty mask at frame {start}");
+                assert!(
+                    update.offset_frames() < stage::BLOCK_FRAMES,
+                    "an update past the end of its block"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn blocks_tile_the_timeline_without_gap_or_overlap() {
+        // Walked by arithmetic alone: rendering all 4 400 blocks is the ignored
+        // sweep below, and a gap would be a gap whether or not it held audio.
+        let programme = programme();
+        let mut frame = 0i64;
+        let mut blocks = 0u32;
+        while programme.block_frames_at(frame) > 0 {
+            frame += i64::from(programme.block_frames_at(frame));
+            blocks += 1;
+            assert!(blocks < 100_000, "the timeline did not terminate");
+        }
+        assert_eq!(
+            u64::try_from(frame).expect("a bounded programme"),
+            programme.duration_frames(),
+            "the blocks must reach the end exactly"
+        );
+        for start in sampled_starts(&programme) {
+            let block = programme.block_at(start);
+            assert_eq!(block.start_frame(), start);
+            assert_eq!(block.duration_frames(), programme.block_frames_at(start));
+            for object in block.objects() {
+                assert_eq!(object.samples().len(), block.duration_frames() as usize);
+            }
+        }
+    }
+
+    #[test]
+    fn a_pool_slot_is_silent_before_it_is_handed_to_another_note() {
+        // The failure the keyboard phase would otherwise put on display: a
+        // decaying note dragged to the position of the note that replaced it.
+        let timbres = stage::timbres();
+        let arrangement = stage::arrange(RATE, &timbres);
+        let keyboard = score::PHASES
+            .iter()
+            .find(|phase| phase.per_note())
+            .expect("a per-note phase");
+        let (first, last) = keyboard.span();
+        let span = stage::frame_of(u64::from(first), RATE)..stage::frame_of(u64::from(last), RATE);
+        let mut previous: Vec<Option<(i64, [f32; 3])>> = vec![None; stage::SLOTS];
+        let mut checked = 0;
+        for placement in &arrangement.placements {
+            if !span.contains(&placement.onset) {
+                continue;
+            }
+            let here = placement.motion.at(0.0);
+            if let Some((release, there)) = previous[placement.slot]
+                && there.iter().zip(here).any(|(a, b)| (a - b).abs() > 1e-6)
+            {
+                assert!(
+                    placement.onset >= release,
+                    "slot {} was moved while frame {release} was still ringing",
+                    placement.slot
+                );
+                checked += 1;
+            }
+            previous[placement.slot] = Some((placement.release, here));
+        }
+        assert!(checked > 100, "only {checked} handovers were examined");
+    }
+
+    #[test]
+    fn the_arrangement_never_takes_a_slot_back_from_a_ringing_note() {
+        // The safety valve exists so the sixteen-object cap holds whatever the
+        // score says; this asserts the shipped programme never needs it. If a
+        // tempo, a decay or a phase boundary changes, this goes red before a
+        // listener hears a tail cut off.
+        let timbres = stage::timbres();
+        assert_eq!(
+            stage::arrange(RATE, &timbres).stolen,
+            0,
+            "a pool slot was reclaimed early; move the phase, shorten the decay \
+             or widen the pool rather than raising the cap"
+        );
+    }
+
+    #[test]
+    fn the_reference_phase_pairs_a_head_locked_twin_with_a_scene_relative_one() {
+        let timbres = stage::timbres();
+        let arrangement = stage::arrange(RATE, &timbres);
+        let phase = score::PHASES
+            .iter()
+            .find(|phase| phase.name() == "reference")
+            .expect("a reference phase");
+        let (first, last) = phase.span();
+        let span = stage::frame_of(u64::from(first), RATE)..stage::frame_of(u64::from(last), RATE);
+        let twins: Vec<_> = arrangement
+            .placements
+            .iter()
+            .filter(|placement| span.contains(&placement.onset) && placement.slot >= stage::SPINE)
+            .collect();
+        let locked = twins
+            .iter()
+            .filter(|placement| placement.tracking.head_locked())
+            .count();
+        assert!(locked > 0, "no head-locked object in the reference phase");
+        assert_eq!(
+            locked * 2,
+            twins.len(),
+            "the comparison needs one of each, playing the same material"
+        );
+        // Same timbre and same pitches: the reference frame is the only
+        // variable, which is the whole point of the comparison.
+        assert!(
+            twins
+                .windows(2)
+                .all(|pair| pair[0].timbre == pair[1].timbre)
+        );
+    }
+
+    #[test]
+    fn a_silent_object_still_declares_its_gain() {
+        // What keeps the gain ring on the floor while the cube recedes: an
+        // object persistently silent by content, not by volume.
+        let timbres = stage::timbres();
+        let arrangement = stage::arrange(RATE, &timbres);
+        let mute: Vec<_> = arrangement
+            .placements
+            .iter()
+            .filter(|placement| placement.level == 0.0)
+            .collect();
+        assert!(!mute.is_empty(), "the gain-ring phase placed nothing");
+        assert!(
+            mute.iter().all(|placement| placement.gain > 0.0),
+            "a silent object must still ask for its gain"
+        );
+        assert!(
+            mute.iter().all(|placement| placement.metadata_active),
+            "and must still be active, or there is nothing to draw"
+        );
+    }
+
+    /// Fold the demo down to a stereo WAV so a person can hear it.
+    ///
+    /// The tests above can say the arithmetic is right, that nothing clips and
+    /// that the signature never moves. None of them can say it sounds like
+    /// Pachelbel -- which is the entire reason a familiar piece was chosen, and
+    /// the one check that has to be done by ear.
+    ///
+    /// This is a listening aid, not a renderer: objects are panned by their `x`
+    /// alone, so it says nothing about elevation, head tracking or what either
+    /// real output path does with the same Scene.
+    ///
+    /// ```text
+    /// MACINDECODE_DEMO_WAV=/tmp/demo.wav cargo test \
+    ///     decoder::demo::tests::folds_the_demo_down_for_listening -- --ignored
+    /// ```
+    #[test]
+    #[ignore = "writes a WAV for listening; needs MACINDECODE_DEMO_WAV"]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        reason = "a listening aid: samples are clamped to [-1, 1] before scaling \
+                  into i16, and the excerpt is bounded to seconds of audio"
+    )]
+    fn folds_the_demo_down_for_listening() {
+        let Ok(path) = std::env::var("MACINDECODE_DEMO_WAV") else {
+            eprintln!("set MACINDECODE_DEMO_WAV to a path to write the excerpt");
+            return;
+        };
+        let seconds = |name: &str, fallback: f64| {
+            std::env::var(name)
+                .ok()
+                .and_then(|value| value.parse::<f64>().ok())
+                .unwrap_or(fallback)
+        };
+        let programme = programme();
+        let rate = f64::from(RATE);
+        let start = (seconds("MACINDECODE_DEMO_WAV_START", 0.0) * rate) as i64;
+        let wanted = (seconds("MACINDECODE_DEMO_WAV_SECONDS", 30.0) * rate) as i64;
+
+        let mut stereo: Vec<i16> = Vec::new();
+        let mut frame = start - start % i64::from(stage::BLOCK_FRAMES);
+        while frame < start + wanted && programme.block_frames_at(frame) > 0 {
+            let block = programme.block_at(frame);
+            let length = block.duration_frames() as usize;
+            let mut left = vec![0.0f32; length];
+            let mut right = vec![0.0f32; length];
+            for object in block.objects() {
+                // Constant power from the object's declared `x`, taken once per
+                // block: enough to tell the voices apart, and no more.
+                let across = object
+                    .initial_state()
+                    .and_then(SpatialObjectState::position)
+                    .map_or(0.0, |position| position.x().clamp(-1.0, 1.0));
+                let gain = object
+                    .initial_state()
+                    .and_then(SpatialObjectState::linear_gain)
+                    .unwrap_or(1.0);
+                let active = object
+                    .initial_state()
+                    .is_some_and(SpatialObjectState::metadata_active);
+                if !active {
+                    continue;
+                }
+                let (gl, gr) = (
+                    f32::midpoint(1.0, -across).sqrt() * gain,
+                    f32::midpoint(1.0, across).sqrt() * gain,
+                );
+                for (index, sample) in object.samples().iter().enumerate() {
+                    left[index] += sample * gl;
+                    right[index] += sample * gr;
+                }
+            }
+            if let Some(bed) = block.lfe() {
+                for (index, sample) in bed.samples().iter().enumerate() {
+                    left[index] += sample * 0.7;
+                    right[index] += sample * 0.7;
+                }
+            }
+            for (l, r) in left.into_iter().zip(right) {
+                stereo.push((l.clamp(-1.0, 1.0) * f32::from(i16::MAX)) as i16);
+                stereo.push((r.clamp(-1.0, 1.0) * f32::from(i16::MAX)) as i16);
+            }
+            frame += i64::from(block.duration_frames());
+        }
+
+        let bytes = u32::try_from(stereo.len() * 2).expect("a bounded excerpt");
+        let mut wav = Vec::with_capacity(stereo.len() * 2 + 44);
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + bytes).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&RATE.to_le_bytes());
+        wav.extend_from_slice(&(RATE * 4).to_le_bytes());
+        wav.extend_from_slice(&4u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&bytes.to_le_bytes());
+        for sample in stereo {
+            wav.extend_from_slice(&sample.to_le_bytes());
+        }
+        std::fs::write(&path, wav).expect("the excerpt could be written");
+        eprintln!("wrote {path}");
+    }
+
+    /// Render every block of the programme end to end.
+    ///
+    /// Ignored for cost, not for dependencies: it needs no media, no device and
+    /// no GPU, just the six seconds a debug build takes to synthesise three
+    /// minutes of audio. That ratio is itself worth knowing -- the decode
+    /// worker has to stay ahead of playback, and thirty times over is the
+    /// margin it does it by.
+    #[test]
+    #[ignore = "renders the whole programme; about six seconds in a debug build"]
+    fn the_whole_programme_renders_within_its_headroom() {
+        let programme = programme();
+        let mut frame = 0i64;
+        let mut worst = 0.0f32;
+        while programme.block_frames_at(frame) > 0 {
+            let block = programme.block_at(frame);
+            assert_eq!(block.start_frame(), frame);
+            for object in block.objects() {
+                assert_eq!(object.samples().len(), block.duration_frames() as usize);
+                assert!(object.samples().iter().all(|sample| sample.is_finite()));
+            }
+            worst = worst.max(peak_of(&block));
+            frame += i64::from(block.duration_frames());
+        }
+        assert!(worst < 0.5, "the programme peaks at {worst}");
+    }
 
     /// Every violin onset in ticks from the first bar, across all three voices.
     fn violin_onsets() -> Vec<u32> {
