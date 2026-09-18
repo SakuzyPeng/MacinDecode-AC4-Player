@@ -51,7 +51,7 @@ that support CSS but do not run animations.
 | `meter-row.svg` | One meter bank row's four marks, and the bank they sit in |
 | `reference-frames.svg` | What scene-relative and head-locked each keep constant when the listener turns |
 | `projection-modes.svg` | Why the projection toggle exists: which footprints a straight-down orthographic view hides |
-| | Its cubes are boxes, not squares: perspective gives each corner its own reach, so an off-axis cube leans and its inward faces come into view, while orthographic shows the top face alone and covers the footprint exactly. Element numbers are the player's seven segments, laid on the top face. |
+| | Its cubes are boxes, not squares: perspective gives each corner its own reach, so an off-axis cube leans and its inward faces come into view, while orthographic shows the top face alone and covers the footprint exactly. Element numbers are the player's seven segments, laid on the top face. The camera is nearer than the player's, because a cube is about a tenth as thick as it is high above the floor and at the player's own distance its side faces come out under two pixels; `TOP_CAMERA_HEIGHT` carries how far that can go before the cube and its footprint stop reading as one object. |
 | `head-tracking.svg` | The same distinction in motion — one bearing arc rigid, the other breathing |
 
 They carry labels only: the prose that explains them lives in the manual beside

@@ -53,9 +53,13 @@ SILENCE_HOLD_SECONDS, SILENCE_FADE_SECONDS = 2.0, 0.6
 PEAK_HOLD_SECONDS = 1.6
 
 # The straight-down view the projection diagram uses, zoomed into the middle of
-# the floor. The height is params::CAMERA_DISTANCE rounded up, so the parallax
-# is the player's own rather than a chosen amount.
-TOP_SCALE, TOP_CAMERA_HEIGHT = 285.0, 9.0
+# the floor. The camera is nearer than the player's params::CAMERA_DISTANCE:
+# an object's cube is only about a tenth as thick as it is high above the floor,
+# so at the player's own distance its side faces come out under two pixels and
+# the box reads as a flat square. This height puts them near four, which is as
+# close as the camera can come before the cube and its footprint drift further
+# apart than the cube is wide and stop reading as one object.
+TOP_SCALE, TOP_CAMERA_HEIGHT = 285.0, 4.5
 
 SANS = "-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif"
 MONO = "ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"
@@ -945,11 +949,15 @@ def top_box(centre, edge, number, *, perspective):
         else:
             quad = [corner(-1, 1, normal), corner(1, 1, normal),
                     corner(1, -1, normal), corner(-1, -1, normal)]
-        sides.append(quad)
+        sides.append((axis, quad))
     parts = []
-    for quad in sides:
+    for axis, quad in sides:
+        # A side face is a few pixels tall from straight above, so it earns its
+        # place by tone rather than by area; the two axes differ so the box
+        # reads as a box and not as an outline.
+        shade = 0.30 if axis == 0 else 0.48
         points = " ".join(f"{fmt(x)},{fmt(y)}" for x, y in quad)
-        parts.append(f'<polygon points="{points}" fill="{blend(ACCENT, INK, 0.22)}"/>')
+        parts.append(f'<polygon points="{points}" fill="{blend(ACCENT, INK, shade)}"/>')
     points = " ".join(f"{fmt(x)},{fmt(y)}" for x, y in top)
     parts.append(f'<polygon points="{points}" fill="{ACCENT}"/>')
     # The element number, as the seven segments the player prints on every face.
@@ -1027,10 +1035,11 @@ def build_projection_modes():
         body.append(text(cx + 26, 460, "visible either way" if visible
                          else "hidden in ORTHO", size=10.5,
                          fill=MUTED if visible else WARNING))
-    body.append(text(42, 490, "The crossover is −18.8 dB. Below it only perspective "
-                     "separates the two — by more the further the object sits from "
-                     "the view axis, so an object near it stays covered.",
-                     size=10.5, fill=MUTED))
+    body.append(caption(42, 488, [
+        "The crossover is −18.8 dB. Below it only perspective separates the two —",
+        "by more the further the object sits from the view axis, so one near the "
+        "axis stays covered.",
+    ], size=10.5, leading=14))
 
     body.append(text(22, height - 18, "Straight down on the same four objects",
                      size=11, fill=TEXT))
