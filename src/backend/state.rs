@@ -139,13 +139,13 @@ pub(super) fn listener_render_state(state: Option<SpatialObjectState>) -> (bool,
 
 /// The same for the LFE bed, which carries activation and gain but no position.
 ///
-/// Unlike its neighbours this one has a single consumer. The scene view draws
-/// the LFE slot from the decoder's `has_lfe`, not from the mirror — the mirror
-/// carries no LFE state at all — so only the render callback, submitting bed
-/// gain to Windows Spatial Audio, ever asks for it.
+/// All consumers use this for the positionless bed's activation and metering.
 #[cfg_attr(
-    not(windows_spatial_output),
-    allow(dead_code, reason = "only the render callback submits LFE bed gain")
+    not(feature = "decode"),
+    allow(
+        dead_code,
+        reason = "LFE rendering and metering require a decoded Scene"
+    )
 )]
 pub(super) fn lfe_render_state(state: Option<SpatialObjectState>) -> (bool, f32) {
     let Some(state) = state else {
@@ -155,6 +155,28 @@ pub(super) fn lfe_render_state(state: Option<SpatialObjectState>) -> (bool, f32)
         state.metadata_active() && state.semantic_complete(),
         state.linear_gain().unwrap_or(1.0),
     )
+}
+
+/// Unweighted LFE channel level before master volume. BS.1770 excludes LFE;
+/// applying its high-pass here would obscure the bass this meter measures.
+#[cfg_attr(
+    not(feature = "decode"),
+    allow(dead_code, reason = "LFE metering requires a Scene consumer")
+)]
+pub(super) fn measure_lfe(samples: &[f32], gain: f32) -> ObjectEnergy {
+    let gain = if gain.is_finite() { gain.max(0.0) } else { 0.0 };
+    let mut sum = 0.0_f64;
+    let mut peak = 0.0_f32;
+    for &sample in samples {
+        let value = f64::from(sample) * f64::from(gain);
+        sum = value.mul_add(value, sum);
+        peak = peak.max(sample.abs() * gain);
+    }
+    ObjectEnergy {
+        sum_squares: sum,
+        frames: u32::try_from(samples.len()).unwrap_or(u32::MAX),
+        peak,
+    }
 }
 
 /// ITU-R BS.1770-4 K-weighting: the head-effect shelf and the RLB high-pass,
@@ -255,7 +277,7 @@ impl KWeighting {
         }
         let gain_squared = f64::from(gain) * f64::from(gain);
         ObjectEnergy {
-            weighted_sum_squares: sum * gain_squared,
+            sum_squares: sum * gain_squared,
             frames: u32::try_from(samples.len()).unwrap_or(u32::MAX),
             peak: peak * gain,
         }
@@ -275,7 +297,7 @@ impl KWeighting {
             sum = weighted.mul_add(weighted, sum);
         }
         ObjectEnergy {
-            weighted_sum_squares: sum,
+            sum_squares: sum,
             frames,
             peak: 0.0,
         }
@@ -405,7 +427,7 @@ mod tests {
     fn measured_loudness(samples: &[f32], gain: f32) -> f64 {
         let mut filter = KWeighting::new(RATE);
         let energy = filter.measure(samples, gain);
-        loudness(energy.weighted_sum_squares / f64::from(energy.frames))
+        loudness(energy.sum_squares / f64::from(energy.frames))
     }
 
     fn reference_loudness(samples: &[f32], gain: f32) -> f64 {
@@ -449,7 +471,7 @@ mod tests {
         let mut filter = KWeighting::new(RATE);
         let energy = filter.measure_silence(480);
         assert_eq!(energy.frames, 480);
-        assert_eq!(energy.weighted_sum_squares.to_bits(), 0.0_f64.to_bits());
+        assert_eq!(energy.sum_squares.to_bits(), 0.0_f64.to_bits());
         assert_eq!(energy.peak.to_bits(), 0.0_f32.to_bits());
     }
 
@@ -472,10 +494,10 @@ mod tests {
 
         assert_eq!(buffered.frames, skipped.frames);
         assert!(
-            (buffered.weighted_sum_squares - skipped.weighted_sum_squares).abs() < 1e-12,
+            (buffered.sum_squares - skipped.sum_squares).abs() < 1e-12,
             "buffered {} vs skipped {}",
-            buffered.weighted_sum_squares,
-            skipped.weighted_sum_squares
+            buffered.sum_squares,
+            skipped.sum_squares
         );
     }
 
@@ -485,16 +507,16 @@ mod tests {
         let unity = KWeighting::new(RATE).measure(&samples, 1.0);
         let halved = KWeighting::new(RATE).measure(&samples, 0.5);
         assert!(
-            (halved.weighted_sum_squares / unity.weighted_sum_squares - 0.25).abs() < 1e-9,
+            (halved.sum_squares / unity.sum_squares - 0.25).abs() < 1e-9,
             "half gain gave {} of the unity energy",
-            halved.weighted_sum_squares / unity.weighted_sum_squares
+            halved.sum_squares / unity.sum_squares
         );
         assert!((halved.peak - unity.peak * 0.5).abs() < f32::EPSILON);
 
         for degenerate in [0.0_f32, -1.0, f32::NAN, f32::INFINITY] {
             let energy = KWeighting::new(RATE).measure(&samples, degenerate);
             assert_eq!(
-                energy.weighted_sum_squares.to_bits(),
+                energy.sum_squares.to_bits(),
                 0.0_f64.to_bits(),
                 "gain {degenerate} should measure as silence"
             );
@@ -506,7 +528,7 @@ mod tests {
     fn an_empty_span_measures_as_nothing_at_all() {
         let energy = KWeighting::new(RATE).measure(&[], 1.0);
         assert_eq!(energy.frames, 0);
-        assert_eq!(energy.weighted_sum_squares.to_bits(), 0.0_f64.to_bits());
+        assert_eq!(energy.sum_squares.to_bits(), 0.0_f64.to_bits());
     }
 
     #[test]

@@ -7,7 +7,7 @@
 //! Three rules keep it out of the audio thread's way, and all three are load
 //! bearing rather than stylistic:
 //!
-//! * **The writer never blocks.** [`SceneViewMirror::write`] takes the lock with
+//! * **The writer never blocks.** [`SceneViewMirror::write_with_lfe`] takes the lock with
 //!   `try_lock` and drops the update if the UI happens to hold it. A missed
 //!   frame is invisible; a late WASAPI callback is a glitch.
 //! * **Neither side allocates.** The object array is fixed at
@@ -34,6 +34,9 @@ use crate::scene3d::params::{TRAIL_INTERVAL_MILLISECONDS, TRAIL_SAMPLES};
 /// static LFE slot; a scene beyond it is truncated and reported, never grown,
 /// because growing it would move the allocation onto the audio thread.
 pub const MAX_VIEW_OBJECTS: usize = 20;
+/// LFE metering never consumes a dynamic-object slot or carries a position.
+pub const LFE_METER_SLOT: usize = MAX_VIEW_OBJECTS;
+pub const METER_SLOTS: usize = MAX_VIEW_OBJECTS + 1;
 
 /// Loudness bins kept per object, and the audio each one nominally covers.
 ///
@@ -61,22 +64,23 @@ pub fn loudness_bin_frames(sample_rate: u32) -> u32 {
         .max(1)
 }
 
-/// K-weighted energy measured over one publication window of one object.
+/// Energy measured over one publication window: K-weighted for dynamic
+/// objects, unweighted for the LFE channel, which is excluded from BS.1770.
 ///
 /// Energy rather than a finished meter reading, and that is the load-bearing
 /// choice in this module. The three consumers publish at cadences that differ
 /// by orders of magnitude, so any value advanced one step per publication would
-/// behave differently on each; and [`SceneViewMirror::write`] deliberately holds
+/// behave differently on each; and [`SceneViewMirror::write_with_lfe`] deliberately holds
 /// the previous frame when an update carries no objects, so a decaying value
 /// stored here would freeze rather than fall. Ballistics therefore belong where
 /// the picture is drawn, applied to what these bins accumulated.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct ObjectEnergy {
-    /// Sum of the squared K-weighted samples, already multiplied by the OAMD
+    /// Sum of squared samples (K-weighted for objects), multiplied by the OAMD
     /// gain the renderer was handed — this is the level the output will
     /// produce, not the level in the object's own track. Accumulated as `f64`
     /// to stay inside the reference implementation's own precision.
-    pub weighted_sum_squares: f64,
+    pub sum_squares: f64,
     /// Frames the sum covers. A timeline gap contributes frames carrying no
     /// energy, because a gap really does render silence; an underrun
     /// contributes neither, because a transport fault is not content.
@@ -97,7 +101,7 @@ impl ObjectEnergy {
         )
     )]
     pub fn absorb(&mut self, other: Self) {
-        self.weighted_sum_squares += other.weighted_sum_squares;
+        self.sum_squares += other.sum_squares;
         self.frames = self.frames.saturating_add(other.frames);
         self.peak = self.peak.max(other.peak);
     }
@@ -112,7 +116,7 @@ impl ObjectEnergy {
 /// narrowing step to account for when the cross-check disagrees.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct LoudnessBin {
-    pub weighted_sum: f64,
+    pub sum_squares: f64,
     pub frames: u32,
     pub peak: f32,
 }
@@ -141,11 +145,21 @@ pub struct ObjectView {
     pub energy: ObjectEnergy,
 }
 
+/// The positionless bed channel, displayed as channel zero.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct LfeView {
+    pub element_id: u64,
+    pub active: bool,
+    pub gain: f32,
+    pub energy: ObjectEnergy,
+}
+
 /// One instant of the scene, as the audio thread last saw it, plus the recent
 /// history of where each object has been.
 #[derive(Debug, Clone, Copy)]
 pub struct SceneViewFrame {
     objects: [ObjectView; MAX_VIEW_OBJECTS],
+    lfe: Option<LfeView>,
     /// Objects the render callback resolved, which may exceed the array.
     total_objects: usize,
     /// Breadcrumbs per object slot, oldest first and contiguous. Kept as a
@@ -170,8 +184,8 @@ pub struct SceneViewFrame {
     /// Loudness bins per object slot, oldest first and contiguous. The last
     /// entry of each slot is the bin still filling, so a reader always has the
     /// freshest audio available rather than waiting a bin for it.
-    loudness: [[LoudnessBin; LOUDNESS_BINS]; MAX_VIEW_OBJECTS],
-    loudness_lens: [usize; MAX_VIEW_OBJECTS],
+    loudness: [[LoudnessBin; LOUDNESS_BINS]; METER_SLOTS],
+    loudness_lens: [usize; METER_SLOTS],
     /// Presentation frame at which the next breadcrumb is due.
     next_trail_frame: i64,
     /// `None` until the first write. Distinguishes "no playback yet" from a
@@ -184,14 +198,15 @@ impl Default for SceneViewFrame {
     fn default() -> Self {
         Self {
             objects: [ObjectView::default(); MAX_VIEW_OBJECTS],
+            lfe: None,
             total_objects: 0,
             trails: [[[0.0; 3]; TRAIL_SAMPLES]; MAX_VIEW_OBJECTS],
             trail_lens: [0; MAX_VIEW_OBJECTS],
             trail_jumps: [[false; TRAIL_SAMPLES]; MAX_VIEW_OBJECTS],
             trail_loudness: [[0.0; TRAIL_SAMPLES]; MAX_VIEW_OBJECTS],
             pending_jump: [false; MAX_VIEW_OBJECTS],
-            loudness: [[LoudnessBin::default(); LOUDNESS_BINS]; MAX_VIEW_OBJECTS],
-            loudness_lens: [0; MAX_VIEW_OBJECTS],
+            loudness: [[LoudnessBin::default(); LOUDNESS_BINS]; METER_SLOTS],
+            loudness_lens: [0; METER_SLOTS],
             next_trail_frame: 0,
             key: None,
             tracking: TrackingSummary::default(),
@@ -200,6 +215,10 @@ impl Default for SceneViewFrame {
 }
 
 impl SceneViewFrame {
+    pub const fn lfe(&self) -> Option<LfeView> {
+        self.lfe
+    }
+
     pub const fn tracking(&self) -> TrackingSummary {
         self.tracking
     }
@@ -295,7 +314,7 @@ impl SceneViewFrame {
             if frames >= window_frames {
                 break;
             }
-            sum += bin.weighted_sum;
+            sum += bin.sum_squares;
             frames = frames.saturating_add(bin.frames);
         }
         if frames == 0 {
@@ -357,7 +376,7 @@ fn push_energy(
         }
     };
     let bin = &mut bins[open];
-    bin.weighted_sum += energy.weighted_sum_squares;
+    bin.sum_squares += energy.sum_squares;
     bin.frames = bin.frames.saturating_add(energy.frames);
     bin.peak = bin.peak.max(energy.peak);
 }
@@ -406,7 +425,7 @@ impl SceneViewMirror {
 
     /// Publish the objects one render quantum resolved. Audio thread only.
     ///
-    /// **An update carrying no objects is discarded rather than stored.** A
+    /// **An update carrying neither objects nor LFE is discarded.** A
     /// quantum resolves no element state whenever it produced only a forward
     /// timeline gap or ran dry, which happens routinely; storing those as an
     /// empty scene would make every object blink out and back roughly once a
@@ -424,8 +443,14 @@ impl SceneViewMirror {
                       scene preview, and neither exists without a decoder"
         )
     )]
-    pub fn write<I>(&self, key: PlaybackKey, objects: I, timeline_frame: i64, sample_rate: u32)
-    where
+    pub fn write_with_lfe<I>(
+        &self,
+        key: PlaybackKey,
+        objects: I,
+        lfe: Option<LfeView>,
+        timeline_frame: i64,
+        sample_rate: u32,
+    ) where
         I: IntoIterator<Item = ObjectView>,
     {
         // Staged off-lock so the critical section stays short.
@@ -439,7 +464,7 @@ impl SceneViewMirror {
             }
             total = total.saturating_add(1);
         }
-        if total == 0 {
+        if total == 0 && lfe.is_none() {
             return;
         }
 
@@ -456,7 +481,7 @@ impl SceneViewMirror {
         if frame.key != Some(key) {
             frame.trail_lens = [0; MAX_VIEW_OBJECTS];
             frame.pending_jump = [false; MAX_VIEW_OBJECTS];
-            frame.loudness_lens = [0; MAX_VIEW_OBJECTS];
+            frame.loudness_lens = [0; METER_SLOTS];
             frame.next_trail_frame = timeline_frame;
         }
         // A trail belongs to an element, not to an array index. If the scene's
@@ -472,6 +497,10 @@ impl SceneViewMirror {
             }
         }
 
+        if frame.lfe.map(|view| view.element_id) != lfe.map(|view| view.element_id) {
+            frame.loudness_lens[LFE_METER_SLOT] = 0;
+        }
+        frame.lfe = lfe;
         frame.objects = staged;
         frame.total_objects = total;
         frame.key = Some(key);
@@ -481,6 +510,14 @@ impl SceneViewMirror {
         // sampled point, and the quantum that carries it is usually not the one
         // a breadcrumb falls on.
         let bin_frames = loudness_bin_frames(sample_rate);
+        if let Some(lfe) = lfe {
+            push_energy(
+                &mut frame.loudness[LFE_METER_SLOT],
+                &mut frame.loudness_lens[LFE_METER_SLOT],
+                lfe.energy,
+                bin_frames,
+            );
+        }
         for slot in 0..total.min(MAX_VIEW_OBJECTS) {
             frame.pending_jump[slot] |= frame.objects[slot].jumped;
             push_energy(
@@ -534,11 +571,66 @@ impl SceneViewMirror {
         let frame = *self.frame.lock().unwrap_or_else(PoisonError::into_inner);
         (frame.key == Some(key)).then_some(frame)
     }
+
+    #[cfg(test)]
+    pub fn write<I>(&self, key: PlaybackKey, objects: I, timeline_frame: i64, sample_rate: u32)
+    where
+        I: IntoIterator<Item = ObjectView>,
+    {
+        self.write_with_lfe(key, objects, None, timeline_frame, sample_rate);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lfe_meter_is_independent_of_dynamic_object_capacity_and_epochs() {
+        let mirror = SceneViewMirror::new();
+        let key = PlaybackKey::new(1, 0);
+        let lfe = LfeView {
+            element_id: 99,
+            active: true,
+            gain: 0.5,
+            energy: ObjectEnergy {
+                sum_squares: 30.0,
+                frames: 480,
+                peak: 0.25,
+            },
+        };
+        mirror.write_with_lfe(key, std::iter::empty(), Some(lfe), 480, 48_000);
+        let frame = mirror.read(key).unwrap();
+        assert!(frame.objects().is_empty());
+        assert_eq!(frame.lfe(), Some(lfe));
+        assert!((frame.mean_square(LFE_METER_SLOT, 480).0 - 0.0625).abs() < 1e-9);
+        mirror.write_with_lfe(
+            key,
+            (0..=MAX_VIEW_OBJECTS).map(|id| object(id as u64 + 1, 0.0)),
+            Some(lfe),
+            960,
+            48_000,
+        );
+        let frame = mirror.read(key).unwrap();
+        assert_eq!(frame.objects().len(), MAX_VIEW_OBJECTS);
+        assert_eq!(frame.hidden_objects(), 1);
+        assert_eq!(frame.lfe(), Some(lfe));
+        let next = PlaybackKey::new(1, 1);
+        let silent = LfeView {
+            energy: ObjectEnergy {
+                frames: 480,
+                ..Default::default()
+            },
+            ..lfe
+        };
+        mirror.write_with_lfe(next, std::iter::empty(), Some(silent), 480, 48_000);
+        assert!(mirror.read(key).is_none());
+        let frame = mirror.read(next).unwrap();
+        assert_eq!(frame.mean_square(LFE_METER_SLOT, 480), (0.0, 480));
+        assert!(frame.sample_peak(LFE_METER_SLOT).abs() < f32::EPSILON);
+        mirror.write_with_lfe(next, [object(1, 0.0)], None, 960, 48_000);
+        assert!(mirror.read(next).unwrap().lfe().is_none());
+    }
 
     #[test]
     fn reference_frames_rotate_only_head_locked_objects_and_reset_their_trails() {
@@ -653,7 +745,7 @@ mod tests {
         for (step, peak) in [0.2_f32, 0.9, 0.4].into_iter().enumerate() {
             let clipping = ObjectView {
                 energy: ObjectEnergy {
-                    weighted_sum_squares: 0.0,
+                    sum_squares: 0.0,
                     frames: bin,
                     peak,
                 },
@@ -700,7 +792,7 @@ mod tests {
         let frame = mirror.read(second).unwrap();
         assert_eq!(frame.loudness_bins(0).len(), 1);
         assert_eq!(
-            frame.loudness_bins(0)[0].weighted_sum.to_bits(),
+            frame.loudness_bins(0)[0].sum_squares.to_bits(),
             0.0_f64.to_bits()
         );
 
@@ -761,7 +853,7 @@ mod tests {
     fn energetic(mean_square: f64, frames: u32) -> ObjectView {
         ObjectView {
             energy: ObjectEnergy {
-                weighted_sum_squares: mean_square * f64::from(frames),
+                sum_squares: mean_square * f64::from(frames),
                 frames,
                 peak: 0.0,
             },

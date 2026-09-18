@@ -6,11 +6,11 @@ use macindecode_windows_spatial_audio::{
 };
 
 use crate::decoder::{DecodedSceneBlock, PlaybackKey, SceneQueueReader, SceneSignature};
-use crate::scene_view::{MAX_VIEW_OBJECTS, ObjectEnergy, ObjectView, SceneViewMirror};
+use crate::scene_view::{LfeView, MAX_VIEW_OBJECTS, ObjectEnergy, ObjectView, SceneViewMirror};
 
 use super::state::{
     KWeighting, block_offset_at, element_state_at, has_instant_update, lfe_render_state,
-    listener_render_state, validate_block,
+    listener_render_state, measure_lfe, validate_block,
 };
 
 pub(super) struct SceneRenderSource {
@@ -145,7 +145,7 @@ impl SceneRenderSource {
         }
 
         let end_of_stream = self.current.is_none() && self.reader.is_end_of_stream();
-        self.publish_scene_view(&objects, &jumped, written);
+        self.publish_scene_view(&objects, lfe.as_ref(), &jumped, written);
         if let Some(pose) = self.pose.try_pose() {
             self.last_pose = pose;
         }
@@ -168,6 +168,7 @@ impl SceneRenderSource {
     fn publish_scene_view(
         &mut self,
         objects: &BTreeMap<u64, TrackedObject>,
+        lfe: Option<&LfeQuantumAccumulator>,
         jumped: &[bool; MAX_VIEW_OBJECTS],
         frames_written: usize,
     ) {
@@ -194,7 +195,28 @@ impl SceneRenderSource {
             *slot_energy = filter.measure(samples, object.audio.gain);
         }
 
-        self.mirror.write(
+        // A gap-only quantum has no new dynamic positions. Keep the mirror's
+        // existing scene just as before, rather than replacing it with LFE alone.
+        let lfe = lfe
+            .filter(|_| {
+                frames_written > 0 && (self.dynamic_object_count == 0 || !objects.is_empty())
+            })
+            .and_then(|lfe| {
+                Some(LfeView {
+                    element_id: self.scene_signature.lfe_element_id()?,
+                    active: lfe.render.active,
+                    gain: lfe.render.gain,
+                    energy: measure_lfe(
+                        &lfe.render.samples[..frames_written.min(lfe.render.samples.len())],
+                        if lfe.render.active {
+                            lfe.render.gain
+                        } else {
+                            0.0
+                        },
+                    ),
+                })
+            });
+        self.mirror.write_with_lfe(
             self.key,
             objects
                 .values()
@@ -208,6 +230,7 @@ impl SceneRenderSource {
                     jumped: jumped.get(slot).copied().unwrap_or(false),
                     energy: energy.get(slot).copied().unwrap_or_default(),
                 }),
+            lfe,
             self.timeline_frame,
             self.sample_rate,
         );
@@ -493,6 +516,42 @@ mod tests {
         assert!(render.active);
         assert!((render.gain - 0.8).abs() < f32::EPSILON);
         assert_eq!(render.samples, vec![4.0, 5.0]);
+    }
+
+    #[test]
+    fn lfe_only_quantum_publishes_gain_and_clipping_without_dynamic_objects() {
+        let key = PlaybackKey::new(1, 0);
+        let (queue, reader) = crate::decoder::scene_queue_pair(key);
+        let block = DecodedSceneBlock::new(
+            48_000,
+            0,
+            480,
+            0,
+            0,
+            None,
+            true,
+            Vec::new(),
+            Some(SceneLfePcm::new(
+                99,
+                Some(SpatialObjectState::new(true, None, Some(2.0), true)),
+                vec![0.75; 480],
+            )),
+            Vec::new(),
+        );
+        let signature = SceneSignature::from_block(&block);
+        queue.try_push(key, block).unwrap();
+        let mirror = Arc::new(SceneViewMirror::new());
+        let mut source =
+            SceneRenderSource::new(reader, Arc::clone(&mirror), 48_000, 0, true, signature, 0);
+        let quantum = source.render_quantum(480).unwrap();
+        assert!(quantum.objects.is_empty());
+        let frame = mirror.read(key).unwrap();
+        assert!(frame.objects().is_empty());
+        let lfe = frame.lfe().unwrap();
+        assert!(lfe.active);
+        assert_eq!(lfe.energy.frames, 480);
+        assert!((lfe.energy.sum_squares - 1080.0).abs() < 1e-9);
+        assert!((lfe.energy.peak - 1.5).abs() < f32::EPSILON);
     }
 
     #[test]

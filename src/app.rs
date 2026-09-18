@@ -180,7 +180,7 @@ fn object_display_number(slot: usize) -> u64 {
 #[derive(Debug, Default)]
 struct ObjectMeters {
     /// Linear level per slot, after attack and release.
-    level: [f32; crate::scene_view::MAX_VIEW_OBJECTS],
+    level: [f32; crate::scene_view::METER_SLOTS],
     /// The momentary loudness of the same slot as a linear RMS: the whole
     /// 400 ms ring, with no ballistics at all.
     ///
@@ -189,17 +189,18 @@ struct ObjectMeters {
     /// different quantity that merely resembled the standard's. The bank draws
     /// this one exactly as measured and lets the fast meter above be the one
     /// that moves.
-    momentary: [f32; crate::scene_view::MAX_VIEW_OBJECTS],
+    momentary: [f32; crate::scene_view::METER_SLOTS],
     /// How long each slot has been continuously below the silence floor, in
     /// seconds. Reset to zero the instant a level comes back, because coming
     /// back is what the view exists to show: only the disappearance is allowed
     /// to take time.
-    silent_for: [f32; crate::scene_view::MAX_VIEW_OBJECTS],
+    silent_for: [f32; crate::scene_view::METER_SLOTS],
     /// Peak markers for both readings, kept in step whichever one is on screen
     /// so that switching the bank's unit does not make a marker lurch.
-    peaks: [[PeakHold; crate::scene_view::MAX_VIEW_OBJECTS]; 2],
+    peaks: [[PeakHold; crate::scene_view::METER_SLOTS]; 2],
     /// Seconds of clip indication still owed to each slot.
-    clip_held: [f32; crate::scene_view::MAX_VIEW_OBJECTS],
+    clip_held: [f32; crate::scene_view::METER_SLOTS],
+    lfe_element: Option<u64>,
     /// The playback these levels belong to. A superseded one starts silent
     /// rather than releasing from the previous stream's last reading.
     key: Option<crate::decoder::PlaybackKey>,
@@ -310,16 +311,16 @@ impl ObjectMeters {
         now: Instant,
     ) {
         if self.key != Some(key) {
-            self.level = [0.0; crate::scene_view::MAX_VIEW_OBJECTS];
-            self.momentary = [0.0; crate::scene_view::MAX_VIEW_OBJECTS];
+            self.level = [0.0; crate::scene_view::METER_SLOTS];
+            self.momentary = [0.0; crate::scene_view::METER_SLOTS];
             // A fresh playback starts fully present rather than inheriting the
             // previous stream's silence: nothing has been measured yet, and
             // "not measured" is not "quiet".
-            self.silent_for = [0.0; crate::scene_view::MAX_VIEW_OBJECTS];
+            self.silent_for = [0.0; crate::scene_view::METER_SLOTS];
             // Peaks and clips are statements about audio that was played. None
             // of it belongs to the stream that starts here.
-            self.peaks = [[PeakHold::default(); crate::scene_view::MAX_VIEW_OBJECTS]; 2];
-            self.clip_held = [0.0; crate::scene_view::MAX_VIEW_OBJECTS];
+            self.peaks = [[PeakHold::default(); crate::scene_view::METER_SLOTS]; 2];
+            self.clip_held = [0.0; crate::scene_view::METER_SLOTS];
             self.key = Some(key);
             self.last_advanced = None;
         }
@@ -328,9 +329,22 @@ impl ObjectMeters {
             .map_or(0.0, |last| now.duration_since(last).as_secs_f32());
         self.last_advanced = Some(now);
 
+        let lfe_element = frame.lfe().map(|lfe| lfe.element_id);
+        if self.lfe_element != lfe_element {
+            let slot = crate::scene_view::LFE_METER_SLOT;
+            self.level[slot] = 0.0;
+            self.momentary[slot] = 0.0;
+            self.silent_for[slot] = 0.0;
+            self.clip_held[slot] = 0.0;
+            for peaks in &mut self.peaks {
+                peaks[slot] = PeakHold::default();
+            }
+            self.lfe_element = lfe_element;
+        }
+
         let window = window_frames(sample_rate);
         let momentary_window = momentary_window_frames(sample_rate);
-        for slot in 0..crate::scene_view::MAX_VIEW_OBJECTS {
+        for slot in 0..crate::scene_view::METER_SLOTS {
             // No audio measured yet is not the same as silence: leave the
             // meter where it is rather than releasing from a reading that was
             // never taken.
@@ -387,7 +401,7 @@ impl ObjectMeters {
     }
 
     /// Linear level per slot, as the meter currently reads it.
-    const fn levels(&self) -> &[f32; crate::scene_view::MAX_VIEW_OBJECTS] {
+    const fn levels(&self) -> &[f32; crate::scene_view::METER_SLOTS] {
         &self.level
     }
 
@@ -2163,7 +2177,8 @@ impl PlayerApp {
 
                 let objects =
                     mirror_frame.map_or(&[][..], crate::scene_view::SceneViewFrame::objects);
-                if objects.is_empty() {
+                let lfe = mirror_frame.and_then(crate::scene_view::SceneViewFrame::lfe);
+                if objects.is_empty() && lfe.is_none() {
                     ui.label(
                         RichText::new("Nothing playing")
                             .size(11.0)
@@ -2177,7 +2192,7 @@ impl PlayerApp {
                     .min_scrolled_height(0.0)
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        self.draw_meter_rows(ui, objects, readout);
+                        self.draw_meter_rows(ui, objects, lfe, readout);
                         let hidden = mirror_frame
                             .map_or(0, crate::scene_view::SceneViewFrame::hidden_objects);
                         if hidden > 0 {
@@ -2193,10 +2208,15 @@ impl PlayerApp {
     }
 
     /// One row per object: number, track, readout.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one shared row layout keeps LFE and object meters aligned"
+    )]
     fn draw_meter_rows(
         &self,
         ui: &mut egui::Ui,
         objects: &[crate::scene_view::ObjectView],
+        lfe: Option<crate::scene_view::LfeView>,
         readout: MeterReadout,
     ) {
         /// Row height in points, before the theme's inter-row spacing.
@@ -2216,14 +2236,38 @@ impl PlayerApp {
         // the nameplate is, so the two columns of digits line up.
         let cell = measure("0".to_owned());
         let readout_width = measure("0".repeat(scene3d::params::NAMEPLATE_CELLS));
+        let lfe_unit_width = measure(" dBFS".to_owned());
 
-        for (slot, object) in objects.iter().enumerate() {
+        let lfe_row = lfe.map(|lfe| {
+            (
+                crate::scene_view::LFE_METER_SLOT,
+                0,
+                crate::scene_view::ObjectView {
+                    element_id: lfe.element_id,
+                    active: lfe.active,
+                    gain: lfe.gain,
+                    ..Default::default()
+                },
+            )
+        });
+        let rows = lfe_row.into_iter().chain(
+            objects
+                .iter()
+                .enumerate()
+                .map(|(slot, object)| (slot, object_display_number(slot), *object)),
+        );
+        for (slot, number, object) in rows {
+            let is_lfe = slot == crate::scene_view::LFE_METER_SLOT;
+            let readout = if is_lfe { MeterReadout::Fast } else { readout };
             let (level, peak, clipped) = self.object_meters.bank_row(slot, readout);
             let (rect, response) = ui.allocate_exact_size(
                 egui::vec2(ui.available_width(), ROW_HEIGHT),
                 egui::Sense::hover(),
             );
             let silent = level < scene3d::params::OBJECT_SILENT_GAIN;
+            // The LFE row names its unit even when the object bank reads LUFS-M.
+            let unit_width = if is_lfe { lfe_unit_width } else { 0.0 };
+            let value_right = rect.right() - unit_width;
             let decibels = readout_decibels(level, readout);
             let (sign, magnitude) = decibel_cells((!silent).then_some(decibels));
 
@@ -2231,7 +2275,7 @@ impl PlayerApp {
             painter.text(
                 egui::pos2(rect.left() + NUMBER_CELL, rect.center().y),
                 Align2::RIGHT_CENTER,
-                object_display_number(slot).to_string(),
+                number.to_string(),
                 font.clone(),
                 // An inactive element has metadata the renderer would not
                 // spatialize; its level is still real, its identity is not.
@@ -2244,7 +2288,7 @@ impl PlayerApp {
 
             let track = egui::Rect::from_min_max(
                 egui::pos2(rect.left() + NUMBER_CELL + GAP, rect.top() + 3.0),
-                egui::pos2(rect.right() - readout_width - GAP, rect.bottom() - 3.0),
+                egui::pos2(value_right - readout_width - GAP, rect.bottom() - 3.0),
             );
             draw_meter_track(painter, track, level, object.gain, peak, clipped);
 
@@ -2256,7 +2300,7 @@ impl PlayerApp {
                 theme::TEXT
             };
             painter.text(
-                egui::pos2(rect.right() - readout_width, rect.center().y),
+                egui::pos2(value_right - readout_width, rect.center().y),
                 Align2::LEFT_CENTER,
                 sign,
                 font.clone(),
@@ -2267,7 +2311,7 @@ impl PlayerApp {
             // nameplate follows, for the same reason.
             if silent {
                 painter.text(
-                    egui::pos2(rect.right() - readout_width + cell, rect.center().y),
+                    egui::pos2(value_right - readout_width + cell, rect.center().y),
                     Align2::LEFT_CENTER,
                     magnitude,
                     font.clone(),
@@ -2275,7 +2319,7 @@ impl PlayerApp {
                 );
             } else {
                 painter.text(
-                    egui::pos2(rect.right(), rect.center().y),
+                    egui::pos2(value_right, rect.center().y),
                     Align2::RIGHT_CENTER,
                     magnitude,
                     font.clone(),
@@ -2283,7 +2327,18 @@ impl PlayerApp {
                 );
             }
 
-            response.on_hover_text(meter_row_tooltip(slot, object, peak, clipped, readout));
+            if is_lfe {
+                painter.text(
+                    egui::pos2(rect.right(), rect.center().y),
+                    Align2::RIGHT_CENTER,
+                    "dBFS",
+                    font.clone(),
+                    theme::MUTED,
+                );
+                response.on_hover_text("0 · LFE\nUnweighted RMS before master volume; gain, sample peak and clipping are included.\nLFE is excluded from programme LUFS loudness.");
+            } else {
+                response.on_hover_text(meter_row_tooltip(slot, &object, peak, clipped, readout));
+            }
         }
     }
 
@@ -2598,8 +2653,7 @@ impl PlayerApp {
         // These are locals because a SceneObject borrows its trail out of the
         // frame, which on `self` would be a self-referential struct. The array
         // is sized to the object budget, so it costs no allocation either way.
-        let mut objects =
-            [scene3d::scene::SceneObject::default(); crate::scene_view::MAX_VIEW_OBJECTS];
+        let mut objects = [scene3d::scene::SceneObject::default(); crate::scene_view::METER_SLOTS];
         let mut hidden_objects = 0usize;
         let mut object_count = 0usize;
         let levels = *self.object_meters.levels();
@@ -2623,6 +2677,21 @@ impl PlayerApp {
                 object_count = object_count.saturating_add(1);
             }
         }
+        let mut nameplate_count = object_count;
+        if let Some(lfe) = mirror_frame.and_then(crate::scene_view::SceneViewFrame::lfe) {
+            objects[nameplate_count] = scene3d::scene::SceneObject {
+                display_number: 0,
+                active: lfe.active,
+                gain: lfe.gain,
+                loudness: levels[crate::scene_view::LFE_METER_SLOT],
+                presence: self
+                    .object_meters
+                    .drawn_presence(crate::scene_view::LFE_METER_SLOT, self.fade_silent_objects),
+                ..Default::default()
+            };
+            nameplate_count += 1;
+        }
+        let nameplates = &objects[..nameplate_count];
         let objects = &objects[..object_count];
         frame.show(ui, |ui| {
             ui.set_min_height(content_height);
@@ -2666,7 +2735,7 @@ impl PlayerApp {
             }
 
             if self.object_loudness_visible {
-                self.draw_object_nameplates(ui, rect, objects);
+                self.draw_object_nameplates(ui, rect, nameplates);
             }
             self.draw_camera_presets(ui, rect);
             self.draw_camera_readout(ui, rect, hidden_objects);
@@ -2709,10 +2778,17 @@ impl PlayerApp {
         // Without a depth buffer this is the only ordering available, and it is
         // at least the ordering the objects themselves have.
         let direction = self.camera.direction();
+        let world_position = |object: &scene3d::scene::SceneObject<'_>| {
+            if object.display_number == 0 {
+                scene3d::scene::lfe_world_position()
+            } else {
+                scene3d::scene::object_world_position(object.position)
+            }
+        };
         let mut order: Vec<usize> = (0..objects.len()).collect();
         order.sort_by(|left, right| {
             let depth = |index: usize| {
-                let position = scene3d::scene::object_world_position(objects[index].position);
+                let position = world_position(&objects[index]);
                 position[0] * direction[0] + position[1] * direction[1] + position[2] * direction[2]
             };
             depth(*left).total_cmp(&depth(*right))
@@ -2724,13 +2800,14 @@ impl PlayerApp {
             if !object.active {
                 continue;
             }
-            let [x, y, z] = scene3d::scene::object_world_position(object.position);
+            let [x, y, z] = world_position(object);
+            let height = if object.display_number == 0 {
+                scene3d::params::LFE_SLAB_HEIGHT
+            } else {
+                scene3d::params::OBJECT_EDGE
+            };
             let anchor = self.camera.project(
-                [
-                    x,
-                    y + scene3d::params::OBJECT_EDGE / 2.0 + scene3d::params::NAMEPLATE_OFFSET,
-                    z,
-                ],
+                [x, y + height / 2.0 + scene3d::params::NAMEPLATE_OFFSET, z],
                 stage,
             );
             // A plate that says nothing but -∞ forever is what crowds the
@@ -5402,7 +5479,7 @@ Filter 10: ON WAT Fc 500 Hz Gain 1 dB Q 1
             active: true,
             gain: 1.0,
             energy: crate::scene_view::ObjectEnergy {
-                weighted_sum_squares: mean_square * f64::from(frames),
+                sum_squares: mean_square * f64::from(frames),
                 frames,
                 peak,
             },

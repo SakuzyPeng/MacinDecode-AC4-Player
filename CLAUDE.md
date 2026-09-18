@@ -291,6 +291,13 @@ that draws it: `try_lock` writes that drop rather than block, a fixed `MAX_VIEW_
 so neither side allocates, and reader-copies-and-leaves. A scene past the budget is truncated and
 reported on screen, never grown.
 
+LFE has its own `LfeView` and `LFE_METER_SLOT`; it never consumes a dynamic-object slot or enters
+reference-frame counts. All three consumers measure unweighted LFE PCM after metadata gain and
+before master volume. The native producer retains its energy bins at presentation time as it does
+for objects. LFE-only publications are valid. Row zero and the cabinet's nameplate always show
+unweighted dBFS, including when object rows show LUFS-M, since BS.1770 excludes LFE. Clear its history
+and display peaks on epoch/element changes or removal.
+
 Each slot also carries a ring of `LOUDNESS_BINS` (40) × `LOUDNESS_BIN_MILLISECONDS` (10 ms) K-weighted
 energy bins — 400 ms, exactly the BS.1770 momentary window, so summing the ring *is* the standard's
 quantity rather than an approximation. **The mirror stores energy, never a meter reading**, for two

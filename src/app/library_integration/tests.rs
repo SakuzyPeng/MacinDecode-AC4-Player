@@ -869,6 +869,75 @@ fn skin_import_switch_override_and_restore_use_the_visual_settings_widgets() {
     assert_eq!(app.preferences.skins.entries.len(), 2);
 }
 
+#[test]
+fn lfe_only_scene_has_a_dbfs_row_and_a_cabinet_nameplate() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut app, context) = open(dir.path());
+    crate::theme::install(&context);
+    settle(&mut app, &context);
+    app.meter_bank_open = true;
+    let key = app.decoder.playback_key();
+    app.output.scene_view().write_with_lfe(
+        key,
+        std::iter::empty(),
+        Some(measured_lfe(0.25, 480)),
+        480,
+        48_000,
+    );
+    let frame = app.output.scene_view().read(key).unwrap();
+    let start = Instant::now();
+    for step in 0..3 {
+        app.object_meters
+            .advance(&frame, key, 48_000, start + Duration::from_secs(step));
+    }
+    for readout in [
+        super::super::MeterReadout::Fast,
+        super::super::MeterReadout::Momentary,
+    ] {
+        app.meter_readout = readout;
+        let _ = meter_bank_frame(&mut app, &context, &frame, egui::vec2(1180.0, 760.0), 0.0);
+        let output = meter_bank_frame(&mut app, &context, &frame, egui::vec2(1180.0, 760.0), 0.0);
+        let text = painted_text(&output);
+        for expected in ["0", "12.0", "dBFS"] {
+            assert!(
+                text.iter().any(|(text, ..)| text == expected),
+                "missing LFE row text {expected}"
+            );
+        }
+        assert!(!text.iter().any(|(text, ..)| text == "Nothing playing"));
+    }
+    let mut output = context.run_ui(
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, 640.0),
+            )),
+            ..Default::default()
+        },
+        |ui| app.draw_scene(ui, Some(&frame)),
+    );
+    output.textures_delta.clear();
+    assert!(
+        painted_text(&output)
+            .iter()
+            .any(|(text, ..)| text == "12.0"),
+        "the LFE cabinet has no measured nameplate"
+    );
+}
+
+fn measured_lfe(level: f32, frames: u32) -> crate::scene_view::LfeView {
+    crate::scene_view::LfeView {
+        element_id: 99,
+        active: true,
+        gain: 1.0,
+        energy: crate::scene_view::ObjectEnergy {
+            sum_squares: f64::from(level).powi(2) * f64::from(frames),
+            frames,
+            peak: level,
+        },
+    }
+}
+
 fn meter_bank_frame(
     app: &mut PlayerApp,
     context: &egui::Context,
@@ -959,7 +1028,7 @@ fn every_meter_row_fits_inside_the_bank_and_reads_out_what_it_measured() {
                 active: true,
                 gain: 1.0,
                 energy: crate::scene_view::ObjectEnergy {
-                    weighted_sum_squares: mean_square * f64::from(bin),
+                    sum_squares: mean_square * f64::from(bin),
                     frames: bin,
                     peak: if slot == 3 { 1.0 } else { 0.0 },
                 },
@@ -967,7 +1036,9 @@ fn every_meter_row_fits_inside_the_bank_and_reads_out_what_it_measured() {
             }
         })
         .collect();
-    app.output.scene_view().write(key, objects, 0, 48_000);
+    app.output
+        .scene_view()
+        .write_with_lfe(key, objects, Some(measured_lfe(0.25, bin)), 0, 48_000);
     let frame = app
         .output
         .scene_view()
@@ -987,8 +1058,8 @@ fn every_meter_row_fits_inside_the_bank_and_reads_out_what_it_measured() {
             output = meter_bank_frame(&mut app, &context, &frame, size, 1000.0);
         }
         let text = painted_text(&output);
-        for slot in 0..crate::scene_view::MAX_VIEW_OBJECTS {
-            let number = (slot + 1).to_string();
+        for number in 0..=crate::scene_view::MAX_VIEW_OBJECTS {
+            let number = number.to_string();
             assert!(
                 text.iter().any(|(value, ..)| *value == number),
                 "no row {number}"

@@ -146,16 +146,22 @@ fn add_figure(mesh: &mut MeshBuilder, figure: Figure, view: &ViewContext) {
 /// three is the signal that this element has no position — putting a cube out in
 /// the room would claim one it does not have. The slot itself is permanent, so an
 /// absent element leaves its outline and the layout stays learnable.
+pub fn lfe_world_position() -> [f32; 3] {
+    let height = params::LFE_SLAB_HEIGHT;
+    let depth = height * 0.65;
+    [
+        0.0,
+        FLOOR_Y + height / 2.0,
+        -ROOM_HALF_DEPTH + depth * (1.0 - params::LFE_WALL_INSET),
+    ]
+}
+
 fn add_lfe_slot(mesh: &mut MeshBuilder, present: bool, show_number: bool, view: &ViewContext) {
     let width = params::LFE_SLAB_WIDTH;
     let height = params::LFE_SLAB_HEIGHT;
     let depth = height * 0.65;
     let object_colour = Rgb::from_color32(theme::ACCENT);
-    let centre = [
-        0.0,
-        FLOOR_Y + height / 2.0,
-        -ROOM_HALF_DEPTH + depth * (1.0 - params::LFE_WALL_INSET),
-    ];
+    let centre = lfe_world_position();
 
     let size = [width, height, depth];
     if present {

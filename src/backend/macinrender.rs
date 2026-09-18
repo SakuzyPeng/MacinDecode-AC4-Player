@@ -5,8 +5,8 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use super::state::{
-    KWeighting, element_state_at, listener_render_state, remaining_ramps, state_at_updates,
-    validate_block,
+    KWeighting, element_state_at, lfe_render_state, listener_render_state, measure_lfe,
+    remaining_ramps, state_at_updates, validate_block,
 };
 use super::{
     OutputDeviceInfo, OutputDeviceSelection, OutputPhase, OutputSettings, OutputSnapshot,
@@ -17,7 +17,8 @@ use crate::decoder::{
 };
 use crate::head_tracking::NativeTarget;
 use crate::scene_view::{
-    LoudnessBin, MAX_VIEW_OBJECTS, ObjectEnergy, ObjectView, SceneViewMirror, loudness_bin_frames,
+    LfeView, LoudnessBin, MAX_VIEW_OBJECTS, ObjectEnergy, ObjectView, SceneViewMirror,
+    loudness_bin_frames,
 };
 use macindecode_macinrender as native;
 
@@ -378,8 +379,9 @@ struct MetadataFrame {
     duration: u32,
     complete: bool,
     objects: Vec<(u64, Option<SpatialObjectState>)>,
+    lfe: Option<(u64, Option<SpatialObjectState>)>,
     updates: Vec<SceneMetadataUpdate>,
-    /// Object-major, `objects.len() * bins` entries.
+    /// Object-major; a final channel of unweighted bins follows for the LFE.
     energy: Vec<LoudnessBin>,
     bins: usize,
 }
@@ -402,7 +404,8 @@ impl MetadataFrame {
             .unwrap_or(usize::MAX)
             .max(1);
         let head = usize::try_from(offset).unwrap_or(usize::MAX);
-        let mut energy = vec![LoudnessBin::default(); objects.len() * bins];
+        let channels = objects.len() + usize::from(block.lfe().is_some());
+        let mut energy = vec![LoudnessBin::default(); channels * bins];
         for (slot, (element_id, _)) in objects.iter().enumerate() {
             let (Some(filter), Some(object)) = (
                 loudness.get_mut(slot),
@@ -435,21 +438,68 @@ impl MetadataFrame {
                 let (_, _, gain) = listener_render_state(state);
                 let measured = filter.measure(&samples[from..to], gain);
                 if let Some(cell) = energy.get_mut(slot * bins + bin) {
-                    cell.weighted_sum = measured.weighted_sum_squares;
+                    cell.sum_squares = measured.sum_squares;
                     cell.frames = measured.frames;
                     cell.peak = measured.peak;
                 }
             }
         }
 
+        if block.lfe().is_some() {
+            Self::measure_lfe_bins(block, head, span, &mut energy[objects.len() * bins..]);
+        }
         Self {
             start: block.start_frame(),
             duration: block.duration_frames(),
             complete: block.state_complete(),
             objects,
+            lfe: block
+                .lfe()
+                .map(|lfe| (lfe.element_id(), lfe.initial_state())),
             updates: block.metadata_updates().to_vec(),
             energy,
             bins,
+        }
+    }
+
+    fn measure_lfe_bins(
+        block: &DecodedSceneBlock,
+        head: usize,
+        span: usize,
+        bins: &mut [LoudnessBin],
+    ) {
+        let Some(lfe) = block.lfe() else {
+            return;
+        };
+        for (bin, cell) in bins.iter_mut().enumerate() {
+            let from = bin.saturating_mul(span).max(head);
+            let to = bin
+                .saturating_add(1)
+                .saturating_mul(span)
+                .min(lfe.samples().len());
+            if from >= to {
+                continue;
+            }
+            let state = element_state_at(
+                block,
+                lfe.element_id(),
+                lfe.initial_state(),
+                u32::try_from(from).unwrap_or(u32::MAX),
+            );
+            let (active, gain) = lfe_render_state(state);
+            let measured = measure_lfe(
+                &lfe.samples()[from..to],
+                if active && block.state_complete() {
+                    gain
+                } else {
+                    0.0
+                },
+            );
+            *cell = LoudnessBin {
+                sum_squares: measured.sum_squares,
+                frames: measured.frames,
+                peak: measured.peak,
+            };
         }
     }
     fn bytes(&self) -> usize {
@@ -466,7 +516,7 @@ impl MetadataFrame {
                 break;
             };
             total.absorb(ObjectEnergy {
-                weighted_sum_squares: cell.weighted_sum,
+                sum_squares: cell.sum_squares,
                 frames: cell.frames,
                 peak: cell.peak,
             });
@@ -914,7 +964,21 @@ fn run(
                             i64::try_from(last_bin.saturating_add(1)).unwrap_or(i64::MAX),
                         ));
             }
-            mirror.write(
+            let lfe = frame.lfe.map(|(id, initial)| {
+                let (active, gain) =
+                    lfe_render_state(state_at_updates(&frame.updates, id, initial, offset));
+                LfeView {
+                    element_id: id,
+                    active: active && frame.complete,
+                    gain,
+                    energy: if emitting {
+                        frame.energy_over(frame.objects.len(), first_bin, last_bin)
+                    } else {
+                        ObjectEnergy::default()
+                    },
+                }
+            });
+            mirror.write_with_lfe(
                 reader.playback_key(),
                 frame
                     .objects
@@ -943,6 +1007,7 @@ fn run(
                             },
                         }
                     }),
+                lfe,
                 view_time,
                 config.sample_rate,
             );
@@ -1374,6 +1439,51 @@ mod tests {
     }
 
     #[test]
+    fn native_demo_publishes_lfe_energy_even_with_master_volume_muted() {
+        let key = PlaybackKey::new(1, 0);
+        let (queue, reader) = scene_queue_pair(key);
+        let block = crate::decoder::demo::DemoProgram::new(48_000).block_at(0);
+        let signature = SceneSignature::from_block(&block);
+        queue.try_push(key, block).unwrap();
+        queue.mark_end_of_stream(key);
+        let config = OutputStreamConfig::new(
+            1,
+            0,
+            0,
+            48_000,
+            signature,
+            OutputDeviceSelection::SystemDefault,
+        )
+        .unwrap();
+        let settings = OutputSettings {
+            null_output: true,
+            mode: SpatialBackendKind::SafBinaural,
+            ..Default::default()
+        };
+        let mirror = Arc::new(SceneViewMirror::new());
+        let runtime =
+            Runtime::spawn(config, settings, reader, Arc::clone(&mirror), true, 0.0).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let status = runtime.snapshot();
+            assert_ne!(status.phase, OutputPhase::Failed, "{:?}", status.error);
+            if let Some(frame) = mirror.read(key)
+                && frame
+                    .mean_square(crate::scene_view::LFE_METER_SLOT, 48_000)
+                    .0
+                    > 0.0
+            {
+                assert!(frame.lfe().unwrap().active);
+                assert_eq!(frame.objects().len(), 16);
+                assert!(frame.sample_peak(crate::scene_view::LFE_METER_SLOT) > 0.0);
+                break;
+            }
+            assert!(Instant::now() < deadline, "no LFE measurement: {status:?}");
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
     fn reconfiguration_at_eos_remains_ended_even_when_paused() {
         let key = PlaybackKey::new(4, 2);
         let (queue, reader) = scene_queue_pair(key);
@@ -1598,6 +1708,43 @@ mod tests {
         assert_eq!(renderer_fields(8), 4);
         assert_eq!(renderer_fields(1 | 2 | 8), 7);
         assert_eq!(renderer_fields(4), 0);
+    }
+
+    #[test]
+    fn lfe_history_measures_trimmed_pcm_and_metadata_gain_without_k_weighting() {
+        use crate::decoder::SceneLfePcm;
+        let active = SpatialObjectState::new(true, None, Some(0.5), true);
+        let inactive = SpatialObjectState::new(false, None, Some(0.5), true);
+        let block = DecodedSceneBlock::new(
+            48_000,
+            0,
+            960,
+            0,
+            0,
+            None,
+            true,
+            Vec::new(),
+            Some(SceneLfePcm::new(99, Some(active), vec![1.0; 960])),
+            vec![SceneMetadataUpdate::new(
+                99,
+                480,
+                0,
+                crate::decoder::FIELD_ACTIVE,
+                inactive,
+            )],
+        );
+        let mut filters = [KWeighting::new(48_000); MAX_VIEW_OBJECTS];
+        let history = MetadataFrame::new(&block, 240, &mut filters, 480);
+        assert!(history.objects.is_empty());
+        assert_eq!(history.lfe.unwrap().0, 99);
+        let first = history.energy_over(0, 0, 0);
+        assert_eq!(first.frames, 240);
+        assert!((first.sum_squares - 60.0).abs() < 1e-9);
+        assert!((first.peak - 0.5).abs() < f32::EPSILON);
+        let muted = history.energy_over(0, 1, 1);
+        assert_eq!(muted.frames, 480);
+        assert!(muted.sum_squares.abs() < f64::EPSILON);
+        assert!(muted.peak.abs() < f32::EPSILON);
     }
 
     #[test]

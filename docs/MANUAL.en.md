@@ -182,7 +182,7 @@ steps back to a dim that stays readable without crowding the objects that are do
 Trail breadcrumbs are sized by the loudness recorded when each was taken, so a trail is itself a
 short history of level.
 
-Loudness is measured before rendering, K-weighted per ITU-R BS.1770, and cross-checked against the
+Dynamic-object loudness is measured before rendering, K-weighted per ITU-R BS.1770, and cross-checked against the
 reference implementation in the tests. Worth knowing: per-object loudness is not a standardised
 quantity — BS.1770 is defined over a channel-based programme, and object audio has to be rendered to
 a reference layout first. So the scene labels this reading dBFS rather than pretending it is
@@ -212,6 +212,12 @@ it is rather than restarting its hold.
 
 The only one of the four that is off by default, because it is the only one that takes width from
 the scene. It opens a strip to the right of the 3D view with one row per object.
+
+When LFE is present, **row 0** appears first, with level, metadata gain, peak hold and clipping.
+The LFE cabinet also has a level nameplate. Both use unweighted RMS **dBFS**, including metadata
+gain and independent of master volume. Row 0 explicitly keeps its dBFS unit when the object bank
+switches to LUFS-M: LFE is excluded from BS.1770 programme loudness. It does not consume any of the
+20 dynamic-object slots.
 
 ![One meter bank row's four marks: the bar is the measured level, a tick is the gain the metadata asked for on the same scale, a line is the peak marker, and a red segment at full scale means a sample clipped.](../assets/readme/meter-row.svg)
 

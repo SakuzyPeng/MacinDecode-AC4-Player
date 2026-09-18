@@ -27,11 +27,14 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::decoder::{DecodedSceneBlock, PlaybackKey, SceneQueueReader, SceneSignature};
-use crate::scene_view::{MAX_VIEW_OBJECTS, ObjectEnergy, ObjectView, SceneViewMirror};
+use crate::scene_view::{
+    LFE_METER_SLOT, LfeView, MAX_VIEW_OBJECTS, METER_SLOTS, ObjectEnergy, ObjectView,
+    SceneViewMirror,
+};
 
 use super::state::{
-    KWeighting, block_offset_at, element_state_at, has_instant_update, listener_render_state,
-    validate_block,
+    KWeighting, block_offset_at, element_state_at, has_instant_update, lfe_render_state,
+    listener_render_state, measure_lfe, validate_block,
 };
 
 /// Where the walk has reached inside one popped block.
@@ -129,7 +132,7 @@ impl ScenePreview {
         };
 
         let mut jumped = [false; MAX_VIEW_OBJECTS];
-        let mut energy = [ObjectEnergy::default(); MAX_VIEW_OBJECTS];
+        let mut energy = [ObjectEnergy::default(); METER_SLOTS];
         while remaining > 0 {
             let exhausted = self
                 .current
@@ -172,6 +175,12 @@ impl ScenePreview {
                     if let Some(slot_energy) = energy.get_mut(slot) {
                         slot_energy.absorb(filter.measure_silence(gap_frames));
                     }
+                }
+                if self.scene_signature.lfe_element_id().is_some() {
+                    energy[LFE_METER_SLOT].absorb(ObjectEnergy {
+                        frames: gap_frames,
+                        ..Default::default()
+                    });
                 }
                 self.timeline_frame = self.timeline_frame.saturating_add(gap);
                 remaining -= gap;
@@ -220,7 +229,7 @@ impl ScenePreview {
         span_end: u32,
         loudness: &mut [KWeighting; MAX_VIEW_OBJECTS],
         jumped: &mut [bool; MAX_VIEW_OBJECTS],
-        energy: &mut [ObjectEnergy; MAX_VIEW_OBJECTS],
+        energy: &mut [ObjectEnergy; METER_SLOTS],
     ) {
         for (slot, element_id) in element_ids.iter().enumerate().take(MAX_VIEW_OBJECTS) {
             if let Some(flag) = jumped.get_mut(slot)
@@ -248,6 +257,29 @@ impl ScenePreview {
                 element_state_at(&cursor.block, *element_id, object.initial_state(), span_end);
             let (_, _, gain) = listener_render_state(state);
             slot_energy.absorb(filter.measure(span, gain));
+        }
+        if let Some(lfe) = cursor.block.lfe() {
+            let state = element_state_at(
+                &cursor.block,
+                lfe.element_id(),
+                lfe.initial_state(),
+                cursor.offset_frames,
+            );
+            let (active, gain) = lfe_render_state(state);
+            let from = usize::try_from(cursor.offset_frames)
+                .unwrap_or(usize::MAX)
+                .min(lfe.samples().len());
+            let to = usize::try_from(span_end)
+                .unwrap_or(usize::MAX)
+                .min(lfe.samples().len());
+            energy[LFE_METER_SLOT].absorb(measure_lfe(
+                &lfe.samples()[from..to],
+                if active && cursor.block.state_complete() {
+                    gain
+                } else {
+                    0.0
+                },
+            ));
         }
     }
 
@@ -294,11 +326,7 @@ impl ScenePreview {
     }
 
     /// Resolve every element where the walk stopped and hand it to the mirror.
-    fn publish(
-        &self,
-        jumped: &[bool; MAX_VIEW_OBJECTS],
-        energy: &[ObjectEnergy; MAX_VIEW_OBJECTS],
-    ) {
+    fn publish(&self, jumped: &[bool; MAX_VIEW_OBJECTS], energy: &[ObjectEnergy; METER_SLOTS]) {
         let Some(cursor) = self.current.as_ref() else {
             return;
         };
@@ -340,8 +368,19 @@ impl ScenePreview {
                 })
             });
 
+        let lfe = cursor.block.lfe().map(|lfe| {
+            let state =
+                element_state_at(&cursor.block, lfe.element_id(), lfe.initial_state(), offset);
+            let (active, gain) = lfe_render_state(state);
+            LfeView {
+                element_id: lfe.element_id(),
+                active: active && cursor.block.state_complete(),
+                gain,
+                energy: energy[LFE_METER_SLOT],
+            }
+        });
         self.mirror
-            .write(self.key, views, self.timeline_frame, self.sample_rate);
+            .write_with_lfe(self.key, views, lfe, self.timeline_frame, self.sample_rate);
     }
 }
 
@@ -449,6 +488,36 @@ mod tests {
         frame.objects().first().expect("one object").position[0]
     }
 
+    #[test]
+    fn lfe_only_preview_publishes_measured_level_without_a_position() {
+        use crate::decoder::{SceneLfePcm, SpatialObjectState};
+        let key = PlaybackKey::new(1, 0);
+        let block = DecodedSceneBlock::new(
+            RATE,
+            0,
+            BLOCK,
+            0,
+            0,
+            None,
+            true,
+            Vec::new(),
+            Some(SceneLfePcm::new(
+                99,
+                Some(SpatialObjectState::new(true, None, Some(0.5), true)),
+                vec![0.5; BLOCK as usize],
+            )),
+            Vec::new(),
+        );
+        let (_queue, mirror, mut preview) = preview_over(key, vec![block]);
+        preview.advance(0.02);
+        let frame = mirror.read(key).unwrap();
+        assert!(frame.objects().is_empty());
+        let lfe = frame.lfe().unwrap();
+        assert!(lfe.active && lfe.energy.frames > 0);
+        assert!((frame.mean_square(LFE_METER_SLOT, RATE).0 - 0.0625).abs() < 1e-9);
+        assert!((lfe.energy.peak - 0.25).abs() < f32::EPSILON);
+    }
+
     /// The demo, walked by the consumer Linux actually uses.
     ///
     /// On a build with no renderer nothing else pops the FIFO, so this is the
@@ -496,7 +565,7 @@ mod tests {
                 .expect("violin one is in the scene");
             track.push(violin.position);
             for object in published.objects() {
-                loudest = loudest.max(object.energy.weighted_sum_squares);
+                loudest = loudest.max(object.energy.sum_squares);
             }
         }
 
