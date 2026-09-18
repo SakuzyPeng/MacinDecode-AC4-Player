@@ -13,6 +13,13 @@ use std::time::Duration;
 
 use crate::media::MediaSource;
 
+#[allow(
+    dead_code,
+    reason = "the demo score's only consumer is the synthesiser that builds Scene \
+              blocks from it, which lands on top of this; until then the tables are \
+              read by this module's own tests"
+)]
+pub(crate) mod demo;
 #[cfg_attr(not(feature = "decode"), allow(dead_code))]
 pub(crate) mod metadata;
 mod tracking;
