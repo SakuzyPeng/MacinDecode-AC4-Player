@@ -422,8 +422,10 @@ separates chain latency from head-tracking response.
 
 - **Details…** on the file card — the bitstream details window: container, presentation, object
   count, LFE channel, bit rate and more.
-- The **`...`** button next to the scene heading — diagnostics: buffering, decode and output state.
-  Start here when something is wrong; it is what tells a file problem from a device problem.
+- The **`...`** menu next to the scene heading — output compatibility notices, the software-binaural
+  shortcut, and **Playback diagnostics** for buffering, decode and output state. The menu button
+  changes color when a notice is available, without taking a separate row above the scene.
+  Diagnostics help distinguish a file problem from a device problem.
 
 The order to check things in when there is no sound is in the README's [FAQ](../README.en.md#faq).
 

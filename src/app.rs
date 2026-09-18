@@ -2464,13 +2464,37 @@ impl PlayerApp {
                 ui.horizontal(|ui| {
                     ui.heading(RichText::new("Object scene").color(theme::TEXT));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui
-                            .add_sized([36.0, 30.0], egui::Button::new("..."))
-                            .on_hover_text("Open diagnostics")
-                            .clicked()
-                        {
-                            self.diagnostics_open = true;
-                        }
+                        let warning = mirror_frame.is_some_and(|frame| {
+                            let tracking = frame.tracking();
+                            tracking.unsupported > 0
+                                || (tracking.head_relative > 0
+                                    && self.output.settings().mode.resolved()
+                                        == SpatialBackendKind::SystemSpatial)
+                        });
+                        ui.menu_button(
+                            RichText::new("...").color(if warning {
+                                theme::WARNING
+                            } else {
+                                theme::TEXT
+                            }),
+                            |ui| {
+                                ui.set_max_width(320.0);
+                                if ui.button("Playback diagnostics").clicked() {
+                                    self.diagnostics_open = true;
+                                    ui.close();
+                                }
+                                if warning {
+                                    ui.separator();
+                                    self.draw_tracking_status(ui, mirror_frame);
+                                }
+                            },
+                        )
+                        .response
+                        .on_hover_text(if warning {
+                            "Scene options · output compatibility warning"
+                        } else {
+                            "Scene options and diagnostics"
+                        });
                         ui.add_space(4.0);
                         let format = decoder.metrics().map_or_else(
                             || "48 kHz · planar f32".to_owned(),
@@ -2482,47 +2506,57 @@ impl PlayerApp {
                 ui.add_space(10.0);
 
                 metric_strip(ui, &decoder);
-                self.draw_tracking_status(ui);
 
                 ui.add_space(16.0);
                 self.draw_stage(ui, &decoder, mirror_frame);
             });
     }
 
-    fn draw_tracking_status(&mut self, ui: &mut egui::Ui) {
-        let Some(frame) = self.output.scene_view().read(self.decoder.playback_key()) else {
+    fn draw_tracking_status(
+        &mut self,
+        ui: &mut egui::Ui,
+        frame: Option<&crate::scene_view::SceneViewFrame>,
+    ) {
+        let Some(frame) = frame else {
             return;
         };
         let tracking = frame.tracking();
         if tracking.unsupported > 0 {
-            ui.colored_label(
-                theme::WARNING,
-                format!(
-                    "{} object(s) use fixed-scene fallback · see diagnostics",
-                    tracking.unsupported
-                ),
+            ui.add(
+                egui::Label::new(
+                    RichText::new(format!(
+                        "{} object(s) use fixed-scene fallback · see diagnostics",
+                        tracking.unsupported
+                    ))
+                    .color(theme::WARNING),
+                )
+                .wrap(),
             );
         }
         if tracking.head_relative > 0
             && self.output.settings().mode.resolved() == SpatialBackendKind::SystemSpatial
         {
-            ui.horizontal_wrapped(|ui| {
-                ui.colored_label(
-                    theme::WARNING,
-                    "This output cannot keep individual sounds attached to your head.",
-                );
-                if ui
-                    .add_enabled(
-                        !self.output.settings_pending() && self.pending_output_change.is_none(),
-                        egui::Button::new("Use software binaural"),
+            ui.add(
+                egui::Label::new(
+                    RichText::new(
+                        "This output cannot keep individual sounds attached to your head.",
                     )
-                    .clicked()
-                {
-                    let mut settings = self.output.settings().clone();
-                    settings.mode = SpatialBackendKind::SafBinaural;
-                    self.change_output_settings(settings, ui.ctx());
-                }
-            });
+                    .color(theme::WARNING),
+                )
+                .wrap(),
+            );
+            if ui
+                .add_enabled(
+                    !self.output.settings_pending() && self.pending_output_change.is_none(),
+                    egui::Button::new("Use software binaural"),
+                )
+                .clicked()
+            {
+                ui.close();
+                let mut settings = self.output.settings().clone();
+                settings.mode = SpatialBackendKind::SafBinaural;
+                self.change_output_settings(settings, ui.ctx());
+            }
         }
     }
 
