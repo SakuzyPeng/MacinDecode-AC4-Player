@@ -5,8 +5,8 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use super::state::{
-    KWeighting, element_state_at, lfe_render_state, listener_render_state, measure_lfe,
-    remaining_ramps, state_at_updates, validate_block,
+    KWeighting, element_state_at, lfe_render_state, listener_render_state, remaining_ramps,
+    state_at_updates, validate_block,
 };
 use super::{
     OutputDeviceInfo, OutputDeviceSelection, OutputPhase, OutputSettings, OutputSnapshot,
@@ -17,8 +17,8 @@ use crate::decoder::{
 };
 use crate::head_tracking::NativeTarget;
 use crate::scene_view::{
-    LfeView, LoudnessBin, MAX_VIEW_OBJECTS, ObjectEnergy, ObjectView, SceneViewMirror,
-    loudness_bin_frames,
+    LFE_METER_SLOT, LfeView, LoudnessBin, MAX_VIEW_OBJECTS, METER_SLOTS, ObjectEnergy, ObjectView,
+    SceneViewMirror, loudness_bin_frames,
 };
 use macindecode_macinrender as native;
 
@@ -381,7 +381,7 @@ struct MetadataFrame {
     objects: Vec<(u64, Option<SpatialObjectState>)>,
     lfe: Option<(u64, Option<SpatialObjectState>)>,
     updates: Vec<SceneMetadataUpdate>,
-    /// Object-major; a final channel of unweighted bins follows for the LFE.
+    /// Object-major; a final channel of K-weighted bins follows for the LFE.
     energy: Vec<LoudnessBin>,
     bins: usize,
 }
@@ -389,7 +389,7 @@ impl MetadataFrame {
     fn new(
         block: &DecodedSceneBlock,
         offset: u32,
-        loudness: &mut [KWeighting; MAX_VIEW_OBJECTS],
+        loudness: &mut [KWeighting; METER_SLOTS],
         bin_frames: u32,
     ) -> Self {
         let mut objects: Vec<_> = block
@@ -406,7 +406,7 @@ impl MetadataFrame {
         let head = usize::try_from(offset).unwrap_or(usize::MAX);
         let channels = objects.len() + usize::from(block.lfe().is_some());
         let mut energy = vec![LoudnessBin::default(); channels * bins];
-        for (slot, (element_id, _)) in objects.iter().enumerate() {
+        for (slot, (element_id, _)) in objects.iter().enumerate().take(MAX_VIEW_OBJECTS) {
             let (Some(filter), Some(object)) = (
                 loudness.get_mut(slot),
                 block
@@ -446,7 +446,13 @@ impl MetadataFrame {
         }
 
         if block.lfe().is_some() {
-            Self::measure_lfe_bins(block, head, span, &mut energy[objects.len() * bins..]);
+            Self::measure_lfe_bins(
+                block,
+                head,
+                span,
+                &mut energy[objects.len() * bins..],
+                &mut loudness[LFE_METER_SLOT],
+            );
         }
         Self {
             start: block.start_frame(),
@@ -467,6 +473,7 @@ impl MetadataFrame {
         head: usize,
         span: usize,
         bins: &mut [LoudnessBin],
+        filter: &mut KWeighting,
     ) {
         let Some(lfe) = block.lfe() else {
             return;
@@ -487,7 +494,7 @@ impl MetadataFrame {
                 u32::try_from(from).unwrap_or(u32::MAX),
             );
             let (active, gain) = lfe_render_state(state);
-            let measured = measure_lfe(
+            let measured = filter.measure(
                 &lfe.samples()[from..to],
                 if active && block.state_complete() {
                     gain
@@ -756,7 +763,7 @@ fn run(
     let mut pending = None::<DecodedSceneBlock>;
     let mut history = VecDeque::<MetadataFrame>::new();
     let mut history_bytes = 0;
-    let mut loudness = [KWeighting::new(config.sample_rate); MAX_VIEW_OBJECTS];
+    let mut loudness = [KWeighting::new(config.sample_rate); METER_SLOTS];
     let bin_frames = loudness_bin_frames(config.sample_rate);
     // Absolute frame through which energy has already been handed to the
     // mirror. This path publishes far more often than the bin grid, so without
@@ -815,7 +822,7 @@ fn run(
                         .reset_failed = true;
                     return Err(error);
                 }
-                loudness = [KWeighting::new(config.sample_rate); MAX_VIEW_OBJECTS];
+                loudness = [KWeighting::new(config.sample_rate); METER_SLOTS];
                 emitted_through = i64::MIN;
                 next_sample = target;
                 first = true;
@@ -1093,7 +1100,7 @@ fn run(
                     // owns which slot, and a filter's memory belongs to the
                     // audio it has been fed. Start them clean, as the mirror
                     // does with the bins on the same event.
-                    loudness = [KWeighting::new(config.sample_rate); MAX_VIEW_OBJECTS];
+                    loudness = [KWeighting::new(config.sample_rate); METER_SLOTS];
                     emitted_through = i64::MIN;
                     signature = actual;
                 }
@@ -1711,7 +1718,7 @@ mod tests {
     }
 
     #[test]
-    fn lfe_history_measures_trimmed_pcm_and_metadata_gain_without_k_weighting() {
+    fn lfe_history_measures_trimmed_pcm_and_gain_with_k_weighting() {
         use crate::decoder::SceneLfePcm;
         let active = SpatialObjectState::new(true, None, Some(0.5), true);
         let inactive = SpatialObjectState::new(false, None, Some(0.5), true);
@@ -1733,13 +1740,14 @@ mod tests {
                 inactive,
             )],
         );
-        let mut filters = [KWeighting::new(48_000); MAX_VIEW_OBJECTS];
+        let mut filters = [KWeighting::new(48_000); METER_SLOTS];
         let history = MetadataFrame::new(&block, 240, &mut filters, 480);
         assert!(history.objects.is_empty());
         assert_eq!(history.lfe.unwrap().0, 99);
         let first = history.energy_over(0, 0, 0);
         assert_eq!(first.frames, 240);
-        assert!((first.sum_squares - 60.0).abs() < 1e-9);
+        let expected = KWeighting::new(48_000).measure(&[1.0; 240], 0.5);
+        assert!((first.sum_squares - expected.sum_squares).abs() < 1e-9);
         assert!((first.peak - 0.5).abs() < f32::EPSILON);
         let muted = history.energy_over(0, 1, 1);
         assert_eq!(muted.frames, 480);

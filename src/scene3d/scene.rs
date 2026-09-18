@@ -38,7 +38,7 @@ pub struct SceneObject<'a> {
     /// present but silent.
     pub gain: f32,
     /// Measured level the renderer will actually produce for this object,
-    /// already through the meter's ballistics. Read on the same decibel scale
+    /// using the selected fast or momentary window. Read on the same decibel scale
     /// as `gain`, so it can never exceed it — see [`params::FOOTPRINT_RING_POINTS`].
     pub loudness: f32,
     /// How present this object should read, `1.0` normally and `0.0` once it

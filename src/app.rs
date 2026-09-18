@@ -194,7 +194,7 @@ struct ObjectMeters {
     /// seconds. Reset to zero the instant a level comes back, because coming
     /// back is what the view exists to show: only the disappearance is allowed
     /// to take time.
-    silent_for: [f32; crate::scene_view::METER_SLOTS],
+    silent_for: [[f32; crate::scene_view::METER_SLOTS]; 2],
     /// Peak markers for both readings, kept in step whichever one is on screen
     /// so that switching the bank's unit does not make a marker lurch.
     peaks: [[PeakHold; crate::scene_view::METER_SLOTS]; 2],
@@ -207,7 +207,7 @@ struct ObjectMeters {
     last_advanced: Option<Instant>,
 }
 
-/// Which quantity the meter bank reads out.
+/// The shared measurement selection for the scene and meter bank.
 ///
 /// Both are measured from the same K-weighted energy the mirror carries; they
 /// differ in how much of it they take, and that is not a detail. The fast meter
@@ -239,7 +239,7 @@ impl MeterReadout {
                 "dBFS, a 30 ms window with meter ballistics — the same reading the scene draws."
             }
             Self::Momentary => {
-                "LUFS-M, the BS.1770 momentary loudness: the full 400 ms window, unballistic."
+                "LUFS-M, 400 ms momentary channel loudness for the scene and meter bank."
             }
         }
     }
@@ -259,7 +259,7 @@ impl MeterReadout {
     /// The decibel offset from a K-weighted mean square to this unit.
     ///
     /// BS.1770-4 defines loudness as `-0.691 + 10*log10(mean square)`; the
-    /// scene's dBFS reading is the same mean square without that offset. Naming
+    /// fast dBFS reading is the same mean square without that offset. Naming
     /// the difference here is what keeps the two columns from being quietly
     /// the same number under two labels.
     const fn offset_decibels(self) -> f32 {
@@ -316,7 +316,7 @@ impl ObjectMeters {
             // A fresh playback starts fully present rather than inheriting the
             // previous stream's silence: nothing has been measured yet, and
             // "not measured" is not "quiet".
-            self.silent_for = [0.0; crate::scene_view::METER_SLOTS];
+            self.silent_for = [[0.0; crate::scene_view::METER_SLOTS]; 2];
             // Peaks and clips are statements about audio that was played. None
             // of it belongs to the stream that starts here.
             self.peaks = [[PeakHold::default(); crate::scene_view::METER_SLOTS]; 2];
@@ -334,7 +334,9 @@ impl ObjectMeters {
             let slot = crate::scene_view::LFE_METER_SLOT;
             self.level[slot] = 0.0;
             self.momentary[slot] = 0.0;
-            self.silent_for[slot] = 0.0;
+            for timers in &mut self.silent_for {
+                timers[slot] = 0.0;
+            }
             self.clip_held[slot] = 0.0;
             for peaks in &mut self.peaks {
                 peaks[slot] = PeakHold::default();
@@ -360,18 +362,19 @@ impl ObjectMeters {
             level += (target - level) * alpha.clamp(0.0, 1.0);
             self.level[slot] = level;
 
-            if level < scene3d::params::OBJECT_SILENT_GAIN {
-                self.silent_for[slot] += elapsed;
-            } else {
-                self.silent_for[slot] = 0.0;
-            }
-
             // The momentary reading takes the whole ring and no ballistics, so
             // "not measured yet" is the only state it has to hold through.
             if let Some(momentary) = root_mean_square(frame.mean_square(slot, momentary_window)) {
                 self.momentary[slot] = momentary;
             }
             let momentary = self.momentary[slot];
+            for (lane, reading) in [level, momentary].into_iter().enumerate() {
+                if reading < scene3d::params::OBJECT_SILENT_GAIN {
+                    self.silent_for[lane][slot] += elapsed;
+                } else {
+                    self.silent_for[lane][slot] = 0.0;
+                }
+            }
             self.peaks[MeterReadout::Fast.lane()][slot].advance(level, elapsed);
             self.peaks[MeterReadout::Momentary.lane()][slot].advance(momentary, elapsed);
 
@@ -389,10 +392,7 @@ impl ObjectMeters {
     /// What the bank should draw for `slot`: the reading, its peak marker and
     /// whether the object clipped recently.
     fn bank_row(&self, slot: usize, readout: MeterReadout) -> (f32, f32, bool) {
-        let level = match readout {
-            MeterReadout::Fast => self.level[slot],
-            MeterReadout::Momentary => self.momentary[slot],
-        };
+        let level = self.levels(readout)[slot];
         (
             level,
             self.peaks[readout.lane()][slot].level,
@@ -401,8 +401,11 @@ impl ObjectMeters {
     }
 
     /// Linear level per slot, as the meter currently reads it.
-    const fn levels(&self) -> &[f32; crate::scene_view::METER_SLOTS] {
-        &self.level
+    const fn levels(&self, readout: MeterReadout) -> &[f32; crate::scene_view::METER_SLOTS] {
+        match readout {
+            MeterReadout::Fast => &self.level,
+            MeterReadout::Momentary => &self.momentary,
+        }
     }
 
     /// How present each slot should be drawn, `1.0` fully and `0.0` faded out.
@@ -411,8 +414,8 @@ impl ObjectMeters {
     /// different floors from the same fade: the plate takes it as an opacity
     /// and so disappears, while the cube uses it to recede toward the stage and
     /// stops at [`scene3d::params::SILENT_PRESENCE_FLOOR`].
-    fn presence(&self, slot: usize) -> f32 {
-        let Some(silent_for) = self.silent_for.get(slot) else {
+    fn presence(&self, slot: usize, readout: MeterReadout) -> f32 {
+        let Some(silent_for) = self.silent_for[readout.lane()].get(slot) else {
             return 1.0;
         };
         // Expressed as time remaining rather than as the fraction elapsed. The
@@ -435,14 +438,18 @@ impl ObjectMeters {
     /// deliberately blind to whether the loudness readout is on — that is a
     /// third, independent switch, and an object worth hiding is worth hiding
     /// whether or not its level is being printed.
-    fn drawn_presence(&self, slot: usize, fading: bool) -> f32 {
-        if fading { self.presence(slot) } else { 1.0 }
+    fn drawn_presence(&self, slot: usize, fading: bool, readout: MeterReadout) -> f32 {
+        if fading {
+            self.presence(slot, readout)
+        } else {
+            1.0
+        }
     }
 
     /// Slots that have faded out completely.
-    fn faded_out(&self, objects: usize) -> usize {
+    fn faded_out(&self, objects: usize, readout: MeterReadout) -> usize {
         (0..objects.min(crate::scene_view::MAX_VIEW_OBJECTS))
-            .filter(|slot| self.presence(*slot) <= 0.0)
+            .filter(|slot| self.presence(*slot, readout) <= 0.0)
             .count()
     }
 }
@@ -2124,10 +2131,6 @@ impl PlayerApp {
                             .strong()
                             .color(theme::MUTED),
                     );
-                    if lfe.is_some() {
-                        ui.label(RichText::new("0: dBFS").size(10.0).color(theme::MUTED))
-                            .on_hover_text("LFE uses unweighted dBFS in both meter modes");
-                    }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         // The unit is the whole button: there are two of them,
                         // and the one not shown is the one a click gives you.
@@ -2152,27 +2155,6 @@ impl PlayerApp {
                         }
                     });
                 });
-                // Both ends of the scale, in the unit on screen and through the
-                // same two functions the rows use, so the legend cannot come to
-                // describe a scale the bars are not drawn on.
-                let (floor_sign, floor) = decibel_cells(Some(readout_decibels(
-                    scene3d::params::OBJECT_SILENT_GAIN,
-                    readout,
-                )));
-                let (top_sign, top) = decibel_cells(Some(readout_decibels(1.0, readout)));
-                // Two lines on purpose. Left to wrap on its own this breaks in
-                // the middle of "line = peak", which reads as three marks named
-                // badly rather than as a scale and a key.
-                ui.label(
-                    RichText::new(format!(
-                        "{}{floor} → {}{top} {}",
-                        floor_sign.trim(),
-                        top_sign.trim(),
-                        readout.unit(),
-                    ))
-                    .size(10.0)
-                    .color(theme::MUTED),
-                );
                 ui.label(
                     RichText::new("tick = gain · line = peak · red = clip")
                         .size(10.0)
@@ -2257,7 +2239,6 @@ impl PlayerApp {
         );
         for (slot, number, object) in rows {
             let is_lfe = slot == crate::scene_view::LFE_METER_SLOT;
-            let readout = if is_lfe { MeterReadout::Fast } else { readout };
             let (level, peak, clipped) = self.object_meters.bank_row(slot, readout);
             let (rect, response) = ui.allocate_exact_size(
                 egui::vec2(ui.available_width(), ROW_HEIGHT),
@@ -2325,7 +2306,7 @@ impl PlayerApp {
             }
 
             if is_lfe {
-                response.on_hover_text("0 · LFE\nUnweighted RMS before master volume; gain, sample peak and clipping are included.\nLFE is excluded from programme LUFS loudness.");
+                response.on_hover_text("LFE · channel 0");
             } else {
                 response.on_hover_text(meter_row_tooltip(slot, &object, peak, clipped, readout));
             }
@@ -2612,6 +2593,10 @@ impl PlayerApp {
     /// no seam, and it deliberately gets no darker "viewport" backdrop of its
     /// own — that is the surest way to break the paper metaphor.
     ///
+    #[allow(
+        clippy::too_many_lines,
+        reason = "stage geometry and labels share one frame and unit selection"
+    )]
     fn draw_stage(
         &mut self,
         ui: &mut egui::Ui,
@@ -2619,8 +2604,10 @@ impl PlayerApp {
         mirror_frame: Option<&crate::scene_view::SceneViewFrame>,
     ) {
         let silent_objects = mirror_frame.and_then(|mirrored| {
-            self.fade_silent_objects
-                .then(|| self.object_meters.faded_out(mirrored.objects().len()))
+            self.fade_silent_objects.then(|| {
+                self.object_meters
+                    .faded_out(mirrored.objects().len(), self.meter_readout)
+            })
         });
         draw_tracking_counts(
             ui,
@@ -2646,7 +2633,7 @@ impl PlayerApp {
         let mut objects = [scene3d::scene::SceneObject::default(); crate::scene_view::METER_SLOTS];
         let mut hidden_objects = 0usize;
         let mut object_count = 0usize;
-        let levels = *self.object_meters.levels();
+        let levels = *self.object_meters.levels(self.meter_readout);
         if let Some(mirrored) = mirror_frame {
             hidden_objects = mirrored.hidden_objects();
             for (slot, object) in mirrored.objects().iter().enumerate() {
@@ -2656,13 +2643,19 @@ impl PlayerApp {
                     active: object.active,
                     gain: object.gain,
                     loudness: levels.get(slot).copied().unwrap_or(0.0),
-                    presence: self
-                        .object_meters
-                        .drawn_presence(slot, self.fade_silent_objects),
+                    presence: self.object_meters.drawn_presence(
+                        slot,
+                        self.fade_silent_objects,
+                        self.meter_readout,
+                    ),
                     head_locked: object.tracking.head_locked(),
                     trail: mirrored.trail(slot),
                     trail_jumps: mirrored.trail_jumps(slot),
-                    trail_loudness: mirrored.trail_loudness(slot),
+                    trail_loudness: if self.meter_readout == MeterReadout::Momentary {
+                        mirrored.trail_momentary(slot)
+                    } else {
+                        mirrored.trail_loudness(slot)
+                    },
                 };
                 object_count = object_count.saturating_add(1);
             }
@@ -2674,9 +2667,11 @@ impl PlayerApp {
                 active: lfe.active,
                 gain: lfe.gain,
                 loudness: levels[crate::scene_view::LFE_METER_SLOT],
-                presence: self
-                    .object_meters
-                    .drawn_presence(crate::scene_view::LFE_METER_SLOT, self.fade_silent_objects),
+                presence: self.object_meters.drawn_presence(
+                    crate::scene_view::LFE_METER_SLOT,
+                    self.fade_silent_objects,
+                    self.meter_readout,
+                ),
                 ..Default::default()
             };
             nameplate_count += 1;
@@ -2821,9 +2816,9 @@ impl PlayerApp {
             // Infinity has no decimal point to align, so it sits next to the
             // sign instead — which is what keeps the sign itself still in every
             // state the readout has.
-            let decibels = readout_decibels(object.loudness, MeterReadout::Fast);
+            let decibels = readout_decibels(object.loudness, self.meter_readout);
             let baseline = plate.top() + (plate.height() - strip) / 2.0;
-            let text_colour = if decibels > -0.5 && !silent {
+            let text_colour = if decibels > self.meter_readout.offset_decibels() - 0.5 && !silent {
                 fade(theme::WARNING, alpha)
             } else {
                 fade(theme::BACKGROUND, alpha)
@@ -4769,7 +4764,7 @@ fn decode_metric_values(decoder: &DecoderSnapshot) -> [(&'static str, String, St
                 || "—".to_owned(),
                 |value| if value.has_lfe() { "1" } else { "0" }.to_owned(),
             ),
-            "Native bed component".to_owned(),
+            "Low-frequency effects".to_owned(),
         ),
         (
             "POSITION",
@@ -5377,66 +5372,68 @@ Filter 10: ON WAT Fc 500 Hz Gain 1 dB Q 1
     #[test]
     fn presence_holds_then_fades_and_a_returning_level_restores_it_at_once() {
         let mut meters = ObjectMeters::default();
-        assert!((meters.presence(0) - 1.0).abs() < f32::EPSILON);
+        assert!((meters.presence(0, MeterReadout::Fast) - 1.0).abs() < f32::EPSILON);
 
         // Inside the hold, a silent object is still fully present: the hold is
         // there to cross phrase gaps and decay tails without flicker.
-        meters.silent_for[0] = scene3d::params::SILENCE_HOLD_SECONDS - 0.01;
-        assert!((meters.presence(0) - 1.0).abs() < f32::EPSILON);
+        meters.silent_for[MeterReadout::Fast.lane()][0] =
+            scene3d::params::SILENCE_HOLD_SECONDS - 0.01;
+        assert!((meters.presence(0, MeterReadout::Fast) - 1.0).abs() < f32::EPSILON);
 
         // Halfway through the fade, halfway out.
-        meters.silent_for[0] =
+        meters.silent_for[MeterReadout::Fast.lane()][0] =
             scene3d::params::SILENCE_HOLD_SECONDS + scene3d::params::SILENCE_FADE_SECONDS / 2.0;
-        let half = meters.presence(0);
+        let half = meters.presence(0, MeterReadout::Fast);
         assert!(
             (half - 0.5).abs() < 0.01,
             "half a fade in, presence was {half}"
         );
 
         // Past the fade it stays at zero rather than going negative.
-        meters.silent_for[0] =
+        meters.silent_for[MeterReadout::Fast.lane()][0] =
             scene3d::params::SILENCE_HOLD_SECONDS + scene3d::params::SILENCE_FADE_SECONDS * 4.0;
-        assert!(meters.presence(0).abs() < f32::EPSILON);
+        assert!(meters.presence(0, MeterReadout::Fast).abs() < f32::EPSILON);
 
         // Coming back is immediate. Disappearing may take time; reappearing may
         // not, because reappearing is the event the view exists to show.
-        meters.silent_for[0] = 0.0;
-        assert!((meters.presence(0) - 1.0).abs() < f32::EPSILON);
+        meters.silent_for[MeterReadout::Fast.lane()][0] = 0.0;
+        assert!((meters.presence(0, MeterReadout::Fast) - 1.0).abs() < f32::EPSILON);
     }
 
     #[test]
     fn the_silent_count_reports_only_the_slots_that_faded_all_the_way_out() {
         let mut meters = ObjectMeters::default();
         let gone = scene3d::params::SILENCE_HOLD_SECONDS + scene3d::params::SILENCE_FADE_SECONDS;
-        meters.silent_for[0] = gone;
-        meters.silent_for[1] = gone;
+        meters.silent_for[MeterReadout::Fast.lane()][0] = gone;
+        meters.silent_for[MeterReadout::Fast.lane()][1] = gone;
         // Still inside the hold, so not yet counted — the badge reports what has
         // actually left the picture, not what is merely quiet this instant.
-        meters.silent_for[2] = scene3d::params::SILENCE_HOLD_SECONDS / 2.0;
-        assert_eq!(meters.faded_out(4), 2);
+        meters.silent_for[MeterReadout::Fast.lane()][2] =
+            scene3d::params::SILENCE_HOLD_SECONDS / 2.0;
+        assert_eq!(meters.faded_out(4, MeterReadout::Fast), 2);
         // A slot beyond the reported object count is not counted at all.
-        meters.silent_for[5] = gone;
-        assert_eq!(meters.faded_out(4), 2);
-        assert_eq!(meters.faded_out(6), 3);
+        meters.silent_for[MeterReadout::Fast.lane()][5] = gone;
+        assert_eq!(meters.faded_out(4, MeterReadout::Fast), 2);
+        assert_eq!(meters.faded_out(6, MeterReadout::Fast), 3);
     }
 
     #[test]
     fn turning_the_fade_off_restores_presence_without_stopping_the_silence_clock() {
         let mut meters = ObjectMeters::default();
-        meters.silent_for[0] =
+        meters.silent_for[MeterReadout::Fast.lane()][0] =
             scene3d::params::SILENCE_HOLD_SECONDS + scene3d::params::SILENCE_FADE_SECONDS;
-        assert!(meters.drawn_presence(0, true).abs() < f32::EPSILON);
+        assert!(meters.drawn_presence(0, true, MeterReadout::Fast).abs() < f32::EPSILON);
 
         // Switching the fade off is a drawing decision, so the object is back
         // at once and at full strength.
-        assert!((meters.drawn_presence(0, false) - 1.0).abs() < f32::EPSILON);
+        assert!((meters.drawn_presence(0, false, MeterReadout::Fast) - 1.0).abs() < f32::EPSILON);
 
         // The clock it came back from is still running underneath, so switching
         // the fade on again finds the object where it actually is instead of
         // handing it a fresh hold. Nothing here reads the loudness switch: the
         // readout and the fade are separate controls.
-        assert!(meters.presence(0).abs() < f32::EPSILON);
-        assert!(meters.drawn_presence(0, true).abs() < f32::EPSILON);
+        assert!(meters.presence(0, MeterReadout::Fast).abs() < f32::EPSILON);
+        assert!(meters.drawn_presence(0, true, MeterReadout::Fast).abs() < f32::EPSILON);
     }
 
     #[test]

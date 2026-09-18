@@ -157,28 +157,6 @@ pub(super) fn lfe_render_state(state: Option<SpatialObjectState>) -> (bool, f32)
     )
 }
 
-/// Unweighted LFE channel level before master volume. BS.1770 excludes LFE;
-/// applying its high-pass here would obscure the bass this meter measures.
-#[cfg_attr(
-    not(feature = "decode"),
-    allow(dead_code, reason = "LFE metering requires a Scene consumer")
-)]
-pub(super) fn measure_lfe(samples: &[f32], gain: f32) -> ObjectEnergy {
-    let gain = if gain.is_finite() { gain.max(0.0) } else { 0.0 };
-    let mut sum = 0.0_f64;
-    let mut peak = 0.0_f32;
-    for &sample in samples {
-        let value = f64::from(sample) * f64::from(gain);
-        sum = value.mul_add(value, sum);
-        peak = peak.max(sample.abs() * gain);
-    }
-    ObjectEnergy {
-        sum_squares: sum,
-        frames: u32::try_from(samples.len()).unwrap_or(u32::MAX),
-        peak,
-    }
-}
-
 /// ITU-R BS.1770-4 K-weighting: the head-effect shelf and the RLB high-pass,
 /// cascaded into one fourth-order section, with one filter's memory.
 ///

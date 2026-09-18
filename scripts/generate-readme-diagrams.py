@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the four explanatory SVGs the manual and the READMEs share.
+"""Generate the explanatory SVGs the manual and the READMEs share.
 
 Run with Python and Node/npm: python3 scripts/generate-readme-diagrams.py.
 Use --unoptimized to skip SVGO, and --only <name> to rebuild one diagram.
@@ -45,6 +45,8 @@ ACCENT_SOFT, WARNING = "#f4e2d1", "#b0483a"
 # The silence floor, as decibels. OBJECT_SILENT_GAIN is 10^-1.8, and
 # app::loudness_fraction maps the scale linearly in decibels from it to zero.
 SILENT_DECIBELS = -36.0
+# app::MeterReadout::Momentary: offset from K-weighted mean square to LUFS.
+MOMENTARY_OFFSET = -0.691
 FOOTPRINT_MIN_SCALE, FOOTPRINT_MAX_SCALE = 0.45, 1.60
 NAMEPLATE_SILENT_ALPHA = 0.32
 SILENT_PRESENCE_FLOOR = 0.10
@@ -466,7 +468,7 @@ def footprint_corner(scale, decibels, extreme):
 def build_object_footprint():
     """The floor mark's two readings: the gain asked for, the level delivered."""
     width, height = 880, 560
-    body = card(width, height, "Object footprint", "LVL / TWO READINGS")
+    body = card(width, height, "Object footprint", "LVL / dBFS EXAMPLE")
 
     # Drawn large, because the gap between the ring and the core is the entire
     # reading and a thumbnail hides it.
@@ -477,7 +479,7 @@ def build_object_footprint():
     plate_edge = art_x + 31
     plate_y = art_y - art_scale * 0.355 * 0.9397 - 24
     right = [
-        (96, "nameplate", "dBFS, and nothing else", (plate_edge, plate_y + 12)),
+        (96, "nameplate", "selected dBFS or LUFS-M", (plate_edge, plate_y + 12)),
         (232, "hairline ring", "the gain the metadata asks for",
          footprint_corner(art_scale, gain, "right")),
     ]
@@ -534,13 +536,14 @@ def build_object_footprint():
         "with a wide ring around a small core because it was positioned and "
         "gained but carries almost no signal, and a silent object whose core "
         "has bottomed out at the -36 dB floor while its readout shows minus "
-        "infinity.", body)
+        "infinity. This example uses dBFS; the unit button also changes nameplates, "
+        "footprint levels and trails to LUFS-M, including LFE channel zero.", body)
 
 
 def build_silent_objects():
     """What a persistently silent object loses, and the one thing it keeps."""
     width, height = 880, 430
-    body = card(width, height, "Persistently silent objects", "FADE / WHAT STAYS")
+    body = card(width, height, "Persistently silent objects", "FADE / dBFS EXAMPLE")
 
     panels = [
         (24, "Sounding", -4.0, -18.3, ("−", "18.3"), 1.0, False,
@@ -548,7 +551,7 @@ def build_silent_objects():
         (310, "Signal stops", -4.0, -40.0, ("−", "∞"), NAMEPLATE_SILENT_ALPHA, False,
          ["The readout turns to −∞ and the plate", "steps back to a dim that stays readable."]),
         (596, f"After {fmt(SILENCE_HOLD_SECONDS)} s", -4.0, -40.0, None, 0.0, True,
-         ["The plate is gone and the cube is a ghost —", "but the gain ring is still on the floor."]),
+         ["The plate is gone; the cube is faint.", "but the gain ring is still on the floor."]),
     ]
     for x, title, gain_db, level_db, plate, plate_opacity, faded, lines in panels:
         body.append(rect(x, 62, 260, 208, fill=SURFACE, stroke=BORDER, radius=4))
@@ -605,7 +608,8 @@ def build_silent_objects():
         "dim. After two seconds of silence and a six-tenths-of-a-second fade the "
         "plate is gone and the cube is a ghost, but the gain ring stays on the "
         "floor, because full gain with an empty track is the fault worth seeing. "
-        "With fading switched off the cube stays fully drawn instead.", body)
+        "With fading switched off the cube stays fully drawn instead. This example uses "
+        "dBFS; in LUFS-M the scene follows the selected momentary window.", body)
 
 
 def build_meter_row():
@@ -620,7 +624,7 @@ def build_meter_row():
     body.append(text(236, 126, "3", size=15, mono=True, fill=TEXT, anchor="end"))
     body.append(meter_track(track_x, track_y, track_w, track_h, level_db=level,
                             gain_db=gain, peak_db=peak, clip=True, clip_width=8))
-    body.append(text(730, 126, "−12.0", size=15, mono=True, fill=TEXT, anchor="end"))
+    body.append(text(730, 126, f"−{abs(level + MOMENTARY_OFFSET):.1f}", size=15, mono=True, fill=TEXT, anchor="end"))
 
     # Above the track, left to right, so no two labels share a column.
     body.append(text(260, 72, "level", size=11.5, weight=600, fill=TEXT))
@@ -652,18 +656,18 @@ def build_meter_row():
     body.append(text(42, 226, "METER BANK", size=10, weight=600, fill=MUTED,
                      spacing=0.6))
     body.append(rect(222, 214, 58, 20, fill=BACKGROUND, stroke=BORDER, radius=3))
-    body.append(text(251, 228, "dBFS", size=10, weight=600, fill=TEXT,
+    body.append(text(251, 228, "LUFS-M", size=10, weight=600, fill=TEXT,
                      anchor="middle"))
-    body.append(text(42, 248, "−36.0 → 0.0 dBFS", size=10, fill=MUTED))
-    body.append(text(42, 261, "tick = gain · line = peak · red = clip", size=10,
+    body.append(text(42, 245, "tick = gain · line = peak · red = clip", size=10,
                      fill=MUTED))
-    rows = [(1, -6.0, -5.0, -4.0, False, ("−", "6.0"), False),
-            (2, -2.0, -1.0, -0.2, True, ("−", "2.0"), False),
-            (3, -31.0, -3.0, -29.0, False, ("−", "31.0"), True),
+    rows = [(0, -15.0, 0.0, -13.0, False, ("−", "15.7"), False),
+            (1, -6.0, -5.0, -4.0, False, ("−", "6.7"), False),
+            (2, -2.0, -1.0, -0.2, True, ("−", "2.7"), False),
+            (3, -31.0, -3.0, -29.0, False, ("−", "31.7"), True),
             (4, -40.0, -8.0, -38.0, False, ("−", "∞"), False)]
     for index, (number, row_level, row_gain, row_peak, clip, readout,
                 flagged) in enumerate(rows):
-        y = 276 + index * 18
+        y = 258 + index * 18
         silent = readout[1] == "∞"
         ink = WARNING if clip else MUTED if silent else TEXT
         if flagged:
@@ -680,9 +684,9 @@ def build_meter_row():
     body.append(text(364, 226, "Two units, one button", size=11.5, weight=600,
                      fill=TEXT))
     body.append(caption(364, 244, [
-        "dBFS — a 30 ms window with ballistics: the reading the scene draws.",
-        "LUFS-M — the full 400 ms BS.1770 momentary window, unballistic.",
-        "The switch changes what the bar and the number both measure.",
+        "dBFS — fast 30 ms levels with meter ballistics.",
+        "LUFS-M — K-weighted 400 ms channel loudness, unballistic.",
+        "One selection for rows 0–20, nameplates, footprints and trails.",
     ], size=10.5, leading=15))
     body.append(text(364, 306, "A bar far short of the tick", size=11.5,
                      weight=600, fill=WARNING))
@@ -692,9 +696,9 @@ def build_meter_row():
     ], size=10.5, leading=15))
     # Stops at the card's edge: a leader reaching in would cross the readouts
     # of the rows above the one it names, so the row is tinted instead.
-    body.append(leader([(360, 302), (312, 302), (306, 315)],
+    body.append(leader([(360, 302), (312, 302), (306, 321)],
                        color=blend(WARNING, STAGE, 0.4)))
-    body.append(text(22, height - 18, "One row per object, right of the scene",
+    body.append(text(22, height - 18, "One row per channel, including LFE 0",
                      size=11, fill=TEXT))
     body.append(text(width - 22, height - 18,
                      "Clipping is the one reading that is not weighted at all",
@@ -706,7 +710,8 @@ def build_meter_row():
         "gain the metadata asked for on the same scale, a peak marker that holds "
         "1.6 seconds and then slides, a red segment at full scale when a sample "
         "clipped, and the readout. Beside it the bank as laid out, with a unit "
-        "button switching between dBFS and LUFS-M, and a row whose bar falls far "
+        "button controlling dBFS and LUFS-M for every row and the scene, including LFE "
+        "channel zero. Another row has a bar far "
         "short of its gain tick — an object positioned and gained with nothing "
         "in its track.", body)
 

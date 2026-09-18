@@ -64,8 +64,8 @@ pub fn loudness_bin_frames(sample_rate: u32) -> u32 {
         .max(1)
 }
 
-/// Energy measured over one publication window: K-weighted for dynamic
-/// objects, unweighted for the LFE channel, which is excluded from BS.1770.
+/// K-weighted energy measured over one publication window of an individual
+/// channel, including LFE. These channel meters are not a programme sum.
 ///
 /// Energy rather than a finished meter reading, and that is the load-bearing
 /// choice in this module. The three consumers publish at cadences that differ
@@ -76,7 +76,7 @@ pub fn loudness_bin_frames(sample_rate: u32) -> u32 {
 /// the picture is drawn, applied to what these bins accumulated.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct ObjectEnergy {
-    /// Sum of squared samples (K-weighted for objects), multiplied by the OAMD
+    /// Sum of squared K-weighted samples, multiplied by the OAMD
     /// gain the renderer was handed — this is the level the output will
     /// produce, not the level in the object's own track. Accumulated as `f64`
     /// to stay inside the reference implementation's own precision.
@@ -177,6 +177,8 @@ pub struct SceneViewFrame {
     /// the same objection would apply to the present level — but a reading
     /// taken at the moment the mark was is simply what was true then.
     trail_loudness: [[f32; TRAIL_SAMPLES]; MAX_VIEW_OBJECTS],
+    /// The same historical points measured over the full 400 ms window.
+    trail_momentary: [[f32; TRAIL_SAMPLES]; MAX_VIEW_OBJECTS],
     /// A discontinuity seen since the last breadcrumb was taken. Latched here
     /// because a quantum is roughly a quarter of the sampling interval, so the
     /// update that jumped is usually not the one being sampled.
@@ -204,6 +206,7 @@ impl Default for SceneViewFrame {
             trail_lens: [0; MAX_VIEW_OBJECTS],
             trail_jumps: [[false; TRAIL_SAMPLES]; MAX_VIEW_OBJECTS],
             trail_loudness: [[0.0; TRAIL_SAMPLES]; MAX_VIEW_OBJECTS],
+            trail_momentary: [[0.0; TRAIL_SAMPLES]; MAX_VIEW_OBJECTS],
             pending_jump: [false; MAX_VIEW_OBJECTS],
             loudness: [[LoudnessBin::default(); LOUDNESS_BINS]; METER_SLOTS],
             loudness_lens: [0; METER_SLOTS],
@@ -263,6 +266,13 @@ impl SceneViewFrame {
     pub fn trail_loudness(&self, slot: usize) -> &[f32] {
         match self.trail_lens.get(slot) {
             Some(&len) => &self.trail_loudness[slot][..len],
+            None => &[],
+        }
+    }
+
+    pub fn trail_momentary(&self, slot: usize) -> &[f32] {
+        match self.trail_lens.get(slot) {
+            Some(&len) => &self.trail_momentary[slot][..len],
             None => &[],
         }
     }
@@ -386,12 +396,14 @@ struct Breadcrumb {
     point: [f32; 3],
     jumped: bool,
     loudness: f32,
+    momentary: f32,
 }
 
 fn push_trail(
     trail: &mut [[f32; 3]; TRAIL_SAMPLES],
     jumps: &mut [bool; TRAIL_SAMPLES],
     loudness: &mut [f32; TRAIL_SAMPLES],
+    momentary: &mut [f32; TRAIL_SAMPLES],
     len: &mut usize,
     mark: Breadcrumb,
 ) {
@@ -399,15 +411,18 @@ fn push_trail(
         *slot = mark.point;
         jumps[*len] = mark.jumped;
         loudness[*len] = mark.loudness;
+        momentary[*len] = mark.momentary;
         *len = len.saturating_add(1);
         return;
     }
     trail.copy_within(1.., 0);
     jumps.copy_within(1.., 0);
     loudness.copy_within(1.., 0);
+    momentary.copy_within(1.., 0);
     trail[TRAIL_SAMPLES - 1] = mark.point;
     jumps[TRAIL_SAMPLES - 1] = mark.jumped;
     loudness[TRAIL_SAMPLES - 1] = mark.loudness;
+    momentary[TRAIL_SAMPLES - 1] = mark.momentary;
 }
 
 /// The shared handle. `SpatialOutputController` owns it, the render source
@@ -536,25 +551,33 @@ impl SceneViewMirror {
                 let jumped = std::mem::take(&mut frame.pending_jump[slot]);
                 // Read before the borrow below: this is what the object
                 // measured around the instant the mark is being taken.
-                let (mean_square, measured) = frame.mean_square(slot, bin_frames);
                 #[allow(
                     clippy::cast_possible_truncation,
                     reason = "a breadcrumb's level is a display value, well inside f32"
                 )]
-                let loudness = if measured == 0 {
-                    0.0
-                } else {
-                    mean_square.sqrt() as f32
+                let rms = |window| {
+                    let (mean_square, measured) = frame.mean_square(slot, window);
+                    if measured == 0 {
+                        0.0
+                    } else {
+                        mean_square.sqrt() as f32
+                    }
                 };
+                let loudness = rms(bin_frames);
+                let momentary = rms(
+                    bin_frames.saturating_mul(u32::try_from(LOUDNESS_BINS).unwrap_or(u32::MAX))
+                );
                 push_trail(
                     &mut frame.trails[slot],
                     &mut frame.trail_jumps[slot],
                     &mut frame.trail_loudness[slot],
+                    &mut frame.trail_momentary[slot],
                     &mut frame.trail_lens[slot],
                     Breadcrumb {
                         point,
                         jumped,
                         loudness,
+                        momentary,
                     },
                 );
             }
@@ -584,6 +607,31 @@ impl SceneViewMirror {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn breadcrumbs_keep_fast_and_momentary_levels_separately() {
+        let mirror = SceneViewMirror::new();
+        let key = PlaybackKey::new(1, 0);
+        for bin in 0..=40 {
+            let level: f32 = if bin < 37 { 0.5 } else { 0.05 };
+            let view = ObjectView {
+                energy: ObjectEnergy {
+                    sum_squares: f64::from(level).powi(2) * 480.0,
+                    frames: 480,
+                    peak: level,
+                },
+                ..object(7, 0.0)
+            };
+            mirror.write(key, [view], i64::from(bin * 480), 48_000);
+        }
+        let frame = mirror.read(key).unwrap();
+        assert!(frame.trail_loudness(0).last().unwrap() < &0.1);
+        assert!(frame.trail_momentary(0).last().unwrap() > &0.4);
+        assert_eq!(
+            frame.trail_loudness(0).len(),
+            frame.trail_momentary(0).len()
+        );
+    }
 
     #[test]
     fn lfe_meter_is_independent_of_dynamic_object_capacity_and_epochs() {

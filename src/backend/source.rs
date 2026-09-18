@@ -6,11 +6,14 @@ use macindecode_windows_spatial_audio::{
 };
 
 use crate::decoder::{DecodedSceneBlock, PlaybackKey, SceneQueueReader, SceneSignature};
-use crate::scene_view::{LfeView, MAX_VIEW_OBJECTS, ObjectEnergy, ObjectView, SceneViewMirror};
+use crate::scene_view::{
+    LFE_METER_SLOT, LfeView, MAX_VIEW_OBJECTS, METER_SLOTS, ObjectEnergy, ObjectView,
+    SceneViewMirror,
+};
 
 use super::state::{
     KWeighting, block_offset_at, element_state_at, has_instant_update, lfe_render_state,
-    listener_render_state, measure_lfe, validate_block,
+    listener_render_state, validate_block,
 };
 
 pub(super) struct SceneRenderSource {
@@ -34,7 +37,7 @@ pub(super) struct SceneRenderSource {
     /// because that map is rebuilt every callback while the filter's memory has
     /// to carry across block and quantum boundaries alike. An epoch change
     /// rebuilds this whole source, so the filters never need clearing.
-    loudness: [KWeighting; MAX_VIEW_OBJECTS],
+    loudness: [KWeighting; METER_SLOTS],
 }
 
 impl SceneRenderSource {
@@ -63,7 +66,7 @@ impl SceneRenderSource {
                 start_frame.cast_signed()
             },
             current: None,
-            loudness: [KWeighting::new(sample_rate); MAX_VIEW_OBJECTS],
+            loudness: [KWeighting::new(sample_rate); METER_SLOTS],
         }
     }
 
@@ -206,7 +209,7 @@ impl SceneRenderSource {
                     element_id: self.scene_signature.lfe_element_id()?,
                     active: lfe.render.active,
                     gain: lfe.render.gain,
-                    energy: measure_lfe(
+                    energy: self.loudness[LFE_METER_SLOT].measure(
                         &lfe.render.samples[..frames_written.min(lfe.render.samples.len())],
                         if lfe.render.active {
                             lfe.render.gain
@@ -550,7 +553,8 @@ mod tests {
         let lfe = frame.lfe().unwrap();
         assert!(lfe.active);
         assert_eq!(lfe.energy.frames, 480);
-        assert!((lfe.energy.sum_squares - 1080.0).abs() < 1e-9);
+        let expected = KWeighting::new(48_000).measure(&[0.75; 480], 2.0);
+        assert!((lfe.energy.sum_squares - expected.sum_squares).abs() < 1e-9);
         assert!((lfe.energy.peak - 1.5).abs() < f32::EPSILON);
     }
 

@@ -168,25 +168,25 @@ each cube.
 
 - **The hairline ring is gain** — the value the metadata *asks* for.
 - **The filled core is level** — the value the object actually *delivers*.
-- Both are read on one decibel scale with the same −36.0 dB floor. The core can therefore never
+- Both use a consistent level range and decibel-based geometry. The core can never
   exceed the ring, and **the gap between them is the whole reading**.
 
 **A wide ring around a small core** is an object that was positioned and gained but has almost no
 signal in it. That is exactly the fault gain alone can never show: the gain is full, the picture
 looks right, and there is no sound.
 
-**The nameplate reports dBFS and nothing else.** Its width is fixed and the sign and digits each own
-a cell, so nothing shifts sideways as the level crosses −10 dB. A plate that has dropped to `−∞`
-steps back to a dim that stays readable without crowding the objects that are doing something.
+**The meter bank's unit button controls every readout.** dBFS selects the fast 30 ms meter;
+LUFS-M selects the full 400 ms momentary reading. Object and **LFE channel 0** nameplates, meter
+rows, footprint cores and trail levels all follow that selection. The scene keeps the selected unit
+when the bank is hidden.
 
-Trail breadcrumbs are sized by the loudness recorded when each was taken, so a trail is itself a
-short history of level.
+Nameplates keep a fixed width with separate sign and digit cells. A silent reading dims before it
+fades; each measurement window retains its own silence timer. Trails retain both historical levels,
+so changing units still shows what was measured at each breadcrumb.
 
-Dynamic-object loudness is measured before rendering, K-weighted per ITU-R BS.1770, and cross-checked against the
-reference implementation in the tests. Worth knowing: per-object loudness is not a standardised
-quantity — BS.1770 is defined over a channel-based programme, and object audio has to be rendered to
-a reference layout first. So the scene labels this reading dBFS rather than pretending it is
-something else.
+All channels use the same K-weighting before rendering, including metadata gain and excluding
+master volume, with reference-implementation checks. These are individual channel diagnostics,
+not a programme loudness sum. The LFE nameplate is anchored above its fixed front-wall cabinet.
 
 ### Fading persistently silent objects
 
@@ -213,12 +213,9 @@ it is rather than restarting its hold.
 The only one of the four that is off by default, because it is the only one that takes width from
 the scene. It opens a strip to the right of the 3D view with one row per object.
 
-When LFE is present, **row 0** appears first, with level, metadata gain, peak hold and clipping.
-The LFE cabinet also has a level nameplate. Both use unweighted RMS **dBFS**, including metadata
-gain and independent of master volume. The header's **0: dBFS** keeps its unit clear when the object
-bank switches to LUFS-M, while all bars and readout columns stay aligned. LFE is excluded from
-BS.1770 programme loudness and does not consume any of the
-20 dynamic-object slots.
+When LFE is present, **row 0** appears first with level, metadata gain, peak hold and clipping.
+It follows the selected unit just like every other row. All bars and readout columns stay aligned,
+and LFE does not consume any of the 20 dynamic-object slots.
 
 ![One meter bank row's four marks: the bar is the measured level, a tick is the gain the metadata asked for on the same scale, a line is the peak marker, and a red segment at full scale means a sample clipped.](../assets/readme/meter-row.svg)
 
@@ -235,10 +232,9 @@ again, read exactly here rather than by eye.
 
 **The button in the header switches the unit, and its label is the unit you are looking at:**
 
-- **`dBFS`** — the same fast reading the scene draws: a 30 ms window with meter ballistics.
-- **`LUFS-M`** — the ITU-R BS.1770 momentary loudness over the full 400 ms window. The standard's
-  own quantity, and **unballistic** — an attack and a release would make it a different quantity that
-  merely resembled the standard's.
+- **`dBFS`** — fast levels for every channel: a 30 ms window with meter ballistics.
+- **`LUFS-M`** — K-weighted momentary channel loudness over the full 400 ms window,
+  **without meter ballistics**.
 
 Switching changes **what the bar and the number both measure**, rather than relabelling one value.
 

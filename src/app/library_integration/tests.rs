@@ -870,59 +870,84 @@ fn skin_import_switch_override_and_restore_use_the_visual_settings_widgets() {
 }
 
 #[test]
-fn lfe_only_scene_has_a_dbfs_row_and_a_cabinet_nameplate() {
+fn meter_unit_switches_lfe_and_object_rows_and_scene_readouts() {
+    use super::super::MeterReadout;
+    use crate::scene_view::ObjectView;
     let dir = tempfile::tempdir().unwrap();
     let (mut app, context) = open(dir.path());
     crate::theme::install(&context);
     settle(&mut app, &context);
     app.meter_bank_open = true;
     let key = app.decoder.playback_key();
-    app.output.scene_view().write_with_lfe(
-        key,
-        std::iter::empty(),
-        Some(measured_lfe(0.25, 480)),
-        480,
-        48_000,
-    );
+    // A loud 370 ms followed by a quiet 30 ms distinguishes the actual
+    // averaging windows as well as their numeric unit offsets.
+    for bin in 0..40 {
+        let lfe = measured_lfe(if bin < 37 { 0.5 } else { 0.05 }, 480);
+        app.output.scene_view().write_with_lfe(
+            key,
+            [ObjectView {
+                element_id: 7,
+                active: true,
+                gain: 1.0,
+                position: [0.3, 0.4, -0.2],
+                energy: lfe.energy,
+                ..Default::default()
+            }],
+            Some(lfe),
+            i64::from(bin * 480),
+            48_000,
+        );
+    }
     let frame = app.output.scene_view().read(key).unwrap();
     let start = Instant::now();
     for step in 0..3 {
         app.object_meters
             .advance(&frame, key, 48_000, start + Duration::from_secs(step));
     }
-    for readout in [
-        super::super::MeterReadout::Fast,
-        super::super::MeterReadout::Momentary,
+    for (readout, expected) in [
+        (MeterReadout::Fast, "26.0"),
+        (MeterReadout::Momentary, "7.0"),
     ] {
         app.meter_readout = readout;
         let _ = meter_bank_frame(&mut app, &context, &frame, egui::vec2(1180.0, 760.0), 0.0);
         let output = meter_bank_frame(&mut app, &context, &frame, egui::vec2(1180.0, 760.0), 0.0);
         let text = painted_text(&output);
-        for expected in ["0", "12.0", "0: dBFS"] {
+        for label in ["0", "1", readout.unit()] {
             assert!(
-                text.iter().any(|(text, ..)| text == expected),
-                "missing LFE row text {expected}"
+                text.iter().any(|(text, ..)| text == label),
+                "missing meter label {label}"
             );
         }
-        assert!(!text.iter().any(|(text, ..)| text == "Nothing playing"));
+        assert_eq!(
+            text.iter().filter(|(text, ..)| text == expected).count(),
+            2,
+            "LFE and object meter must both use {readout:?}"
+        );
+        assert!(
+            !text
+                .iter()
+                .any(|(text, ..)| text.contains('→') || text == "0: dBFS")
+        );
+        let mut output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(900.0, 640.0),
+                )),
+                ..Default::default()
+            },
+            |ui| app.draw_scene(ui, Some(&frame)),
+        );
+        output.textures_delta.clear();
+        assert_eq!(
+            painted_text(&output)
+                .iter()
+                .filter(|(text, ..)| text == expected)
+                .count(),
+            2,
+            "LFE and object nameplates must both use {readout:?}"
+        );
     }
-    let mut output = context.run_ui(
-        egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(900.0, 640.0),
-            )),
-            ..Default::default()
-        },
-        |ui| app.draw_scene(ui, Some(&frame)),
-    );
-    output.textures_delta.clear();
-    assert!(
-        painted_text(&output)
-            .iter()
-            .any(|(text, ..)| text == "12.0"),
-        "the LFE cabinet has no measured nameplate"
-    );
 }
 
 fn measured_lfe(level: f32, frames: u32) -> crate::scene_view::LfeView {

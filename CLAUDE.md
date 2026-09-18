@@ -292,11 +292,12 @@ so neither side allocates, and reader-copies-and-leaves. A scene past the budget
 reported on screen, never grown.
 
 LFE has its own `LfeView` and `LFE_METER_SLOT`; it never consumes a dynamic-object slot or enters
-reference-frame counts. All three consumers measure unweighted LFE PCM after metadata gain and
-before master volume. The native producer retains its energy bins at presentation time as it does
-for objects. LFE-only publications are valid. Row zero and the cabinet's nameplate always show
-unweighted dBFS, including when object rows show LUFS-M, since BS.1770 excludes LFE. Clear its history
-and display peaks on epoch/element changes or removal.
+reference-frame counts. All three consumers use a persistent K-weighting filter for each channel,
+including LFE, after metadata gain and before master volume. LFE-only publications are valid.
+`MeterReadout` controls every bank row, scene nameplate, footprint core and trail level, with no
+LFE exception: fast 30 ms dBFS with ballistics or unballistic 400 ms LUFS-M. These are individual
+channel diagnostics, not a programme loudness sum. Both modes retain their silence timers, peaks
+and trail readings. Keep the header free of range text and separate LFE unit labels.
 
 Each slot also carries a ring of `LOUDNESS_BINS` (40) × `LOUDNESS_BIN_MILLISECONDS` (10 ms) K-weighted
 energy bins — 400 ms, exactly the BS.1770 momentary window, so summing the ring *is* the standard's
@@ -324,7 +325,7 @@ Per-object loudness is not a standardised quantity (BS.1770 is defined over a ch
 programme; object audio is measured by rendering to a reference layout first). The arithmetic is
 pinned instead: `ebur128` is a **dev-dependency only**, and `backend::state`'s cross-check asserts
 agreement with `EbuR128::loudness_momentary` within 0.01 LU. Keep that test passing rather than
-loosening it, and keep the UI labelling the in-scene readout as dBFS. `scene3d` draws it through wgpu (real depth buffer, MSAA) with
+loosening it, and keep scene and bank readouts on the same selected unit. `scene3d` draws it through wgpu (real depth buffer, MSAA) with
 everything except `scene3d::gpu` unit-tested without an adapter.
 
 The same bins feed a second consumer, `app::draw_meter_bank` — an optional strip right of the scene,

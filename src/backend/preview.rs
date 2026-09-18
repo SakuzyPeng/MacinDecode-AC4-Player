@@ -34,7 +34,7 @@ use crate::scene_view::{
 
 use super::state::{
     KWeighting, block_offset_at, element_state_at, has_instant_update, lfe_render_state,
-    listener_render_state, measure_lfe, validate_block,
+    listener_render_state, validate_block,
 };
 
 /// Where the walk has reached inside one popped block.
@@ -66,7 +66,7 @@ pub(super) struct ScenePreview {
     /// boundaries, and the walk's cursor does not. Slots are stable for the
     /// life of a stream: an element-set change alters the `SceneSignature` and
     /// rebuilds the preview, which starts these clean.
-    loudness: [KWeighting; MAX_VIEW_OBJECTS],
+    loudness: [KWeighting; METER_SLOTS],
 }
 
 impl ScenePreview {
@@ -89,7 +89,7 @@ impl ScenePreview {
             error: None,
             last_tick: None,
             carry_frames: 0.0,
-            loudness: [KWeighting::new(sample_rate); MAX_VIEW_OBJECTS],
+            loudness: [KWeighting::new(sample_rate); METER_SLOTS],
         }
     }
 
@@ -176,12 +176,6 @@ impl ScenePreview {
                         slot_energy.absorb(filter.measure_silence(gap_frames));
                     }
                 }
-                if self.scene_signature.lfe_element_id().is_some() {
-                    energy[LFE_METER_SLOT].absorb(ObjectEnergy {
-                        frames: gap_frames,
-                        ..Default::default()
-                    });
-                }
                 self.timeline_frame = self.timeline_frame.saturating_add(gap);
                 remaining -= gap;
                 continue;
@@ -227,7 +221,7 @@ impl ScenePreview {
         cursor: &BlockCursor,
         element_ids: &[u64],
         span_end: u32,
-        loudness: &mut [KWeighting; MAX_VIEW_OBJECTS],
+        loudness: &mut [KWeighting; METER_SLOTS],
         jumped: &mut [bool; MAX_VIEW_OBJECTS],
         energy: &mut [ObjectEnergy; METER_SLOTS],
     ) {
@@ -272,7 +266,7 @@ impl ScenePreview {
             let to = usize::try_from(span_end)
                 .unwrap_or(usize::MAX)
                 .min(lfe.samples().len());
-            energy[LFE_METER_SLOT].absorb(measure_lfe(
+            energy[LFE_METER_SLOT].absorb(loudness[LFE_METER_SLOT].measure(
                 &lfe.samples()[from..to],
                 if active && cursor.block.state_complete() {
                     gain
@@ -489,13 +483,14 @@ mod tests {
     }
 
     #[test]
-    fn lfe_only_preview_publishes_measured_level_without_a_position() {
+    fn lfe_only_preview_matches_reference_momentary_loudness() {
         use crate::decoder::{SceneLfePcm, SpatialObjectState};
         let key = PlaybackKey::new(1, 0);
+        let frames = RATE * 400 / 1000;
         let block = DecodedSceneBlock::new(
             RATE,
             0,
-            BLOCK,
+            frames,
             0,
             0,
             None,
@@ -504,17 +499,25 @@ mod tests {
             Some(SceneLfePcm::new(
                 99,
                 Some(SpatialObjectState::new(true, None, Some(0.5), true)),
-                vec![0.5; BLOCK as usize],
+                vec![0.5; frames as usize],
             )),
             Vec::new(),
         );
         let (_queue, mirror, mut preview) = preview_over(key, vec![block]);
-        preview.advance(0.02);
+        preview.advance(0.25);
+        preview.advance(0.15);
         let frame = mirror.read(key).unwrap();
         assert!(frame.objects().is_empty());
         let lfe = frame.lfe().unwrap();
         assert!(lfe.active && lfe.energy.frames > 0);
-        assert!((frame.mean_square(LFE_METER_SLOT, RATE).0 - 0.0625).abs() < 1e-9);
+        let (mean, measured) = frame.mean_square(LFE_METER_SLOT, frames);
+        assert_eq!(measured, frames);
+        let mut reference = ebur128::EbuR128::new(1, RATE, ebur128::Mode::M).unwrap();
+        reference
+            .add_frames_f32(&vec![0.25; frames as usize])
+            .unwrap();
+        let actual = -0.691 + 10.0 * mean.log10();
+        assert!((actual - reference.loudness_momentary().unwrap()).abs() < 0.01);
         assert!((lfe.energy.peak - 0.25).abs() < f32::EPSILON);
     }
 

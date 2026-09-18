@@ -39,7 +39,7 @@ telling you and what each setting does, see the [user manual](docs/MANUAL.en.md)
 - **Keep several playlists.** Create, rename, reorder, drag, copy or move items between lists. Close
   the app and it comes back to the same track and position, paused.
 - **Watch the scene in 3D.** Every audio object moves in space as playback advances, from any angle
-  you like. Dynamic objects and LFE channel 0 have level readouts and meter rows; LFE uses unweighted dBFS.
+  you like. One dBFS / LUFS-M button controls the scene and meter readings for all objects and LFE channel 0.
 - **Diagnose problems.** A diagnostics window shows buffering, decode and output state, so you can
   tell a file problem from a device problem.
 - **Play the built-in demo.** Press **Demo**, top right, and something is playing without a file of
