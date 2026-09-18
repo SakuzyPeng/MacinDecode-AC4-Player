@@ -19,9 +19,16 @@ OUTPUT = ROOT / "assets/readme/spatial-orbit.svg"
 WIDTH, HEIGHT = 880, 560
 SCALE = 215
 ORIGIN = (WIDTH / 2, 264)
-DURATION = 4
-# Match scene3d::params: forty fixed-size samples, one every 40 ms. The
-# illustrative orbit is fast enough for individual samples to remain legible.
+# One revolution. The sample clock below is fixed, so this is the only thing
+# deciding how far the whole trail jumps in one step, and a step wider than a
+# sample cube breaks the ribbon into separate dots. At four seconds the fastest
+# part of the orbit moved the trail 11.0 px against a 9.9 px cube, so it came
+# apart and re-formed twice per revolution — a pumping the eye reads long before
+# it can name it, and with no overlap left to absorb a dropped or late frame.
+# Six seconds puts the fastest step at 7.4 px. The elevation wobble is not the
+# cause: removing it entirely only takes 11.0 px down to 10.8.
+DURATION = 6
+# Match scene3d::params: forty fixed-size samples, one every 40 ms.
 TRAIL_SAMPLES = 40
 TRAIL_INTERVAL = 0.04
 STEPS = round(DURATION / TRAIL_INTERVAL)

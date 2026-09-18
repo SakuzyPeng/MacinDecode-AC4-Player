@@ -15,10 +15,17 @@ markup in a README. No JavaScript, external fonts, or network assets are used.
 decoded audio. Two orbit among four stationary objects, so individual trails
 remain easy to distinguish.
 
-The four-second loop includes floor projections and forty position samples at
+The six-second loop includes floor projections and forty position samples at
 40 ms intervals, matching the player's 1.6-second history. The sample cubes are
 30% of an object's edge length. Their positions update on the sample clock;
-objects move continuously between samples. Solid face colors fade toward the
+objects move continuously between samples.
+
+The period is the one free variable, and it is not cosmetic. The 40 ms clock and
+the sample size both belong to the player, so the period alone decides how far
+the trail travels between two samples — and once that exceeds a sample cube's
+own width, consecutive samples stop overlapping and the ribbon comes apart into
+separate dots wherever the orbit is fast. Keep the fastest step under the cube's
+9.9 px; `DURATION` carries the measurement and the reasoning. Solid face colors fade toward the
 stage color before shading, with 45% color weight for the smaller floor marks.
 Object numbers use the same near-black ink as the player (`#332a1f`).
 Matching front and back layers let objects pass behind the listener.
