@@ -15,20 +15,26 @@ markup in a README. No JavaScript, external fonts, or network assets are used.
 decoded audio. Two orbit among four stationary objects, so individual trails
 remain easy to distinguish.
 
-The six-second loop includes floor projections and forty position samples at
+The four-second loop includes floor projections and forty position samples at
 40 ms intervals, matching the player's 1.6-second history. The sample cubes are
 30% of an object's edge length. Their positions update on the sample clock;
-objects move continuously between samples.
-
-The period is the one free variable, and it is not cosmetic. The 40 ms clock and
-the sample size both belong to the player, so the period alone decides how far
-the trail travels between two samples — and once that exceeds a sample cube's
-own width, consecutive samples stop overlapping and the ribbon comes apart into
-separate dots wherever the orbit is fast. Keep the fastest step under the cube's
-9.9 px; `DURATION` carries the measurement and the reasoning. Solid face colors fade toward the
+objects move continuously between samples. Solid face colors fade toward the
 stage color before shading, with 45% color weight for the smaller floor marks.
 Object numbers use the same near-black ink as the player (`#332a1f`).
 Matching front and back layers let objects pass behind the listener.
+
+The orbit's steps are deliberately not evenly spaced in angle. A circle seen
+from twenty degrees projects to a narrow ellipse, so at a constant angular rate
+the object crosses the screen seven times faster at the sides than at the turns
+— and a trail sampled on a fixed clock then fuses into a rope at one end of that
+range and comes apart into separate dots at the other, twice per revolution.
+That pumping is easier to see than to name, and it showed up where the page gave
+the image less of a frame budget while the same file looked fine opened on its
+own. `SPEED_EVENNESS` pulls the angles toward constant screen speed, holding
+every step between 4.7 and 8.6 px against a 9.9 px cube. It stops short of fully
+even so the gap between marks still reads as speed, varying 1.5x rather than 7x.
+Slowing the whole orbit is not a substitute: it moves both ends of the range down
+together, fuses more of the trail, and costs the motion its life.
 
 `prefers-reduced-motion: reduce` disables the animations. Base transforms and
 visibility retain the starting scene for reduced-motion users and SVG viewers

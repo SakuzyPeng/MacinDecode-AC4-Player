@@ -8,7 +8,7 @@ Geometry, palette, face numbers and sampled trails follow src/scene3d/;
 the looping trajectories are illustrative, not decoded media.
 """
 
-from math import cos, pi, radians, sin
+from math import cos, hypot, pi, radians, sin
 from pathlib import Path
 import argparse
 import shutil
@@ -19,15 +19,23 @@ OUTPUT = ROOT / "assets/readme/spatial-orbit.svg"
 WIDTH, HEIGHT = 880, 560
 SCALE = 215
 ORIGIN = (WIDTH / 2, 264)
-# One revolution. The sample clock below is fixed, so this is the only thing
-# deciding how far the whole trail jumps in one step, and a step wider than a
-# sample cube breaks the ribbon into separate dots. At four seconds the fastest
-# part of the orbit moved the trail 11.0 px against a 9.9 px cube, so it came
-# apart and re-formed twice per revolution — a pumping the eye reads long before
-# it can name it, and with no overlap left to absorb a dropped or late frame.
-# Six seconds puts the fastest step at 7.4 px. The elevation wobble is not the
-# cause: removing it entirely only takes 11.0 px down to 10.8.
-DURATION = 6
+# One revolution. With SPEED_EVENNESS this decides how far the trail travels
+# between two samples: a step wider than a sample cube breaks the ribbon into
+# separate dots, and one much narrower fuses it into a rope. Four seconds with
+# the angles evened out keeps every step between 4.7 and 8.6 px against a 9.9 px
+# cube, which is a trail rather than either of those.
+DURATION = 4
+# How far the orbit's angles are pulled from constant-angle toward constant
+# screen speed. A circle seen from twenty degrees projects to a narrow ellipse,
+# so at a constant angular rate the object crosses the screen seven times faster
+# at the sides than at the turns. Sampled on a fixed clock, the trail fused into
+# a rope at one end of that range and came apart into separate dots at the
+# other, twice per revolution — a pumping that survived being looked at for a
+# while before it could be named. Evening the angles out is what fixes it;
+# slowing the whole orbit only moves both ends down together and costs the
+# motion its life. Short of 1.0 on purpose, so the gap between marks still reads
+# as speed, varying 1.5x rather than 7x.
+SPEED_EVENNESS = 0.75
 # Match scene3d::params: forty fixed-size samples, one every 40 ms.
 TRAIL_SAMPLES = 40
 TRAIL_INTERVAL = 0.04
@@ -148,16 +156,50 @@ def position(ring, theta):
     return (ground[0], height, ground[2])
 
 
+_ORBIT_ANGLES = {}
+
+
+def orbit_angles(ring):
+    """One revolution as STEPS angles, spaced by projected arc length."""
+    if ring not in _ORBIT_ANGLES:
+        samples = 4000
+        points = [project(position(ring, 2 * pi * i / samples))
+                  for i in range(samples + 1)]
+        cumulative = [0.0]
+        for a, b in zip(points, points[1:]):
+            cumulative.append(cumulative[-1] + hypot(b[0] - a[0], b[1] - a[1]))
+        total, angles, index = cumulative[-1], [], 0
+        for step in range(STEPS):
+            target = total * step / STEPS
+            while index < samples and cumulative[index + 1] < target:
+                index += 1
+            span = cumulative[index + 1] - cumulative[index]
+            offset = (target - cumulative[index]) / span if span else 0
+            even = 2 * pi * (index + offset) / samples
+            angles.append((1 - SPEED_EVENNESS) * (2 * pi * step / STEPS)
+                          + SPEED_EVENNESS * even)
+        # moving() assigns front/back by step index, which only agrees with the
+        # depth sign because the orbit is point-symmetric: the elevation
+        # wobble's period is pi, so half the steps carry half the arc. An
+        # asymmetric orbit would swap two layers without any other symptom, so
+        # this is checked rather than assumed.
+        assert abs(angles[STEPS // 2] - pi) < 1e-9, (
+            f"{ring}: half the steps is not half the orbit, so the front/back "
+            "split in moving() no longer lands on the crossing")
+        _ORBIT_ANGLES[ring] = angles
+    return _ORBIT_ANGLES[ring]
+
+
 def motion_name(ring, floor=False, drop=False):
     return ("u" if ring == "upper" else "l") + ("d" if drop else "f" if floor else "")
 
 
 def trajectory(ring, floor=False, drop=False):
     frames = []
+    angles = orbit_angles(ring)
     for step in range(STEPS + 1):
         # Use exactly the same endpoint to make the loop seamless.
-        theta = 2 * pi * (step % STEPS) / STEPS
-        point = position(ring, theta)
+        point = position(ring, angles[step % STEPS])
         if drop:
             height = (point[1] - EDGE / 2 - FLOOR) * cos(ELEVATION) * SCALE
             value = f"scaleY({fmt(height)})"
@@ -171,15 +213,15 @@ def trajectory(ring, floor=False, drop=False):
     return f"@keyframes {name}{{" + "".join(frames) + "}"
 
 
-def phase_index(theta, age=0):
-    return (round(theta / (2 * pi) * STEPS) - round(age / TRAIL_INTERVAL)) % STEPS
+def phase_index(start, age=0):
+    """The step a mark sits on: a start fraction of the loop, aged backwards."""
+    return (round(start * STEPS) - round(age / TRAIL_INTERVAL)) % STEPS
 
 
-def moving(ring, theta, *, sprite=None, content="", layer=None, floor=False,
+def moving(ring, start, *, sprite=None, content="", layer=None, floor=False,
            age=0, opacity=1, sampled=False, color_class=""):
-    phase = phase_index(theta, age)
-    angle = phase / STEPS * 2 * pi
-    point = position(ring, angle)
+    phase = phase_index(start, age)
+    point = position(ring, orbit_angles(ring)[phase])
     if floor:
         point = (point[0], FLOOR, point[2])
     x, y = project(point)
@@ -202,13 +244,12 @@ def moving(ring, theta, *, sprite=None, content="", layer=None, floor=False,
 
 
 def build():
-    objects = [(1, "upper", .32), (4, "lower", 1.18)]
+    # Where each orbiting object starts, as a fraction of the loop.
+    objects = [(1, "upper", .05), (4, "lower", .19)]
     stationary = [(2, (-.91, .41, -.89)), (3, (.88, .02, -.89)),
                   (5, (-.88, -.10, .87)), (6, (.88, .41, .87))]
-    objects = [(number, ring, phase_index(theta) / STEPS * 2 * pi)
-               for number, ring, theta in objects]
-    phases = sorted({phase_index(theta, sample * TRAIL_INTERVAL)
-                     for _, _, theta in objects for sample in range(TRAIL_SAMPLES + 1)})
+    phases = sorted({phase_index(start, sample * TRAIL_INTERVAL)
+                     for _, _, start in objects for sample in range(TRAIL_SAMPLES + 1)})
     svg = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{WIDTH}" height="{HEIGHT}" '
            f'viewBox="0 0 {WIDTH} {HEIGHT}" role="img" aria-labelledby="title desc">',
            '<title id="title">MacinDecode AC-4 Player — spatial object scene</title>',
@@ -276,27 +317,27 @@ def build():
     for _, (x, y, z) in stationary:
         svg.append(floor_mark((x, FLOOR, z), EDGE * 1.60, footprint_color))
         svg.append(line((x, y - EDGE / 2, z), (x, FLOOR, z), blend(MUTED, BORDER, .35), .8))
-    for _, ring, theta in objects:
+    for _, ring, start in objects:
         for sample in range(TRAIL_SAMPLES, 0, -1):
-            svg.append(moving(ring, theta, sprite="tf", floor=True, color_class=f"c{sample}",
+            svg.append(moving(ring, start, sprite="tf", floor=True, color_class=f"c{sample}",
                               age=sample * TRAIL_INTERVAL, sampled=True))
-        svg.append(moving(ring, theta, sprite="p", floor=True))
-        point = position(ring, theta)
+        svg.append(moving(ring, start, sprite="p", floor=True))
+        point = position(ring, orbit_angles(ring)[phase_index(start)])
         height = (point[1] - EDGE / 2 - FLOOR) * cos(ELEVATION) * SCALE
         guide = (f'<g class="m {motion_name(ring, drop=True)}" transform="scale(1 {fmt(height)})">'
                  f'<path d="M0 0V-1" stroke="{MUTED}" stroke-width=".7" '
                  'vector-effect="non-scaling-stroke"/></g>')
-        svg.append(moving(ring, theta, content=guide, floor=True, opacity=.5))
+        svg.append(moving(ring, start, content=guide, floor=True, opacity=.5))
 
     def moving_layer(layer):
         for number, point in stationary:
             if (dot(point, TOWARD) >= 0) == (layer == "front"):
                 svg.append(box(point, (EDGE,) * 3, ACCENT, number))
-        for number, ring, theta in objects:
+        for number, ring, start in objects:
             for sample in range(TRAIL_SAMPLES, 0, -1):
-                svg.append(moving(ring, theta, sprite="t", layer=layer, color_class=f"c{sample}",
+                svg.append(moving(ring, start, sprite="t", layer=layer, color_class=f"c{sample}",
                                   age=sample * TRAIL_INTERVAL, sampled=True))
-            svg.append(moving(ring, theta, sprite=f"o{number}", layer=layer))
+            svg.append(moving(ring, start, sprite=f"o{number}", layer=layer))
 
     moving_layer("back")
     skin = blend(MUTED, TEXT, .22)
