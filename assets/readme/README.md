@@ -1,9 +1,10 @@
 # README artwork
 
-Five SVGs are shared by the Chinese and English READMEs and by
-[`docs/MANUAL.md`](../../docs/MANUAL.md) and its English twin: one animated
-scene, and four static diagrams that annotate what the player draws. All of
-them follow the palette and geometry in `src/theme.rs` and `src/scene3d/`.
+Eight SVGs are shared by the Chinese and English READMEs and by
+[`docs/MANUAL.md`](../../docs/MANUAL.md) and its English twin: the animated
+scene, six static diagrams that annotate what the player draws, and one more
+animation for the single thing a still picture cannot show. All of them follow
+the palette and geometry in `src/theme.rs` and `src/scene3d/`.
 
 Every one is self-contained: SVG geometry, local fragment references, and CSS
 only. Embed them as Markdown images; GitHub does not accept raw inline SVG
@@ -48,11 +49,27 @@ that support CSS but do not run animations.
 | `object-footprint.svg` | The floor mark's two readings — the gain ring and the level core — and the three cases they produce |
 | `silent-objects.svg` | What a persistently silent object loses, and the gain ring it keeps |
 | `meter-row.svg` | One meter bank row's four marks, and the bank they sit in |
+| `reference-frames.svg` | What scene-relative and head-locked each keep constant when the listener turns |
+| `projection-modes.svg` | Why the projection toggle exists: which footprints a straight-down orthographic view hides |
+| `head-tracking.svg` | The same distinction in motion — one bearing arc rigid, the other breathing |
 
-They are still pictures rather than animations, and they carry labels only: the
-prose that explains them lives in the manual beside each image, where it can be
-translated and searched. Their frame, palette and isometric camera are the
-scene's, so the five read as one set.
+They carry labels only: the prose that explains them lives in the manual beside
+each image, where it can be translated and searched. Their frame, palette and
+isometric camera are the scene's, so all eight read as one set.
+
+`head-tracking.svg` is the one diagram that moves, because the distinction it
+draws only exists while the head turns — two objects standing still are
+identical whatever frame they are in. It is also the reason the reference-frame
+pictures measure a **bearing** rather than only a position: scene relative keeps
+its place and gives up its bearing, head locked keeps its bearing and gives up
+its place, and the bearing is the part you hear. A diagram that only asked
+"which one moved" would teach the inversion backwards.
+
+Its poses are stepped: everything but the head is a pure translation and rides a
+transform animation, while a turning cube changes shape and needs its own
+geometry per pose. A pose's negative delay is a whole loop minus its own slice —
+delaying by the slice alone plays the poses backwards, silently desynchronising
+them from the transform animation.
 
 `generate-readme-diagrams.py` imports the palette, the camera and the voxel
 geometry from `generate-readme-scene.py` rather than restating them, and

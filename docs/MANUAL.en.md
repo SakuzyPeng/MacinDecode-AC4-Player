@@ -52,15 +52,37 @@ Opening the **meter bank** takes a strip from the right of the scene; see
 
 **Moving the view:** drag to orbit, `Shift` + drag to pan, scroll to zoom. The `ISO` / `TOP` /
 `BACK` / `SIDE` / `RESET` buttons jump to fixed viewpoints, and a separate button switches between
-perspective and orthographic projection.
+perspective (`PERSP`) and orthographic (`ORTHO`) projection.
+
+**That switch is not a matter of taste; it answers a specific problem.** The footprint carries gain
+by growing, so an object quieter than **−18.8 dB** has a footprint narrower than its own cube — and
+an orthographic straight-down view puts a cube and the footprint beneath it on exactly the same
+pixels:
+
+![Orthographic and perspective compared from straight down. The footprints of the -26 dB and -33 dB objects are completely covered by their own cubes in ORTHO, and reappear in PERSP once parallax slides the two apart.](../assets/readme/projection-modes.svg)
+
+Below that crossover a footprint is **invisible** in `ORTHO` + `TOP`. Perspective separates the two
+by parallax — by more the further the object sits from the view axis — and the footprints come back.
+So when something is missing from a straight-down view, try the projection toggle first.
 
 **At most 20 objects are drawn at once.** Past that, the bottom left says how many were left out —
 left out of the picture, not out of the audio.
 
 **Reference frames:** with element numbers enabled, **black numbers identify scene-relative objects**
-(the sound stays with the picture) and **white numbers identify head-locked objects** (the sound
-follows your head). Live counts for both appear above the scene in fixed square badges with centred
-numbers, so nothing shifts when a count goes from one digit to two.
+and **white numbers identify head-locked objects**. Live counts for both appear above the scene in
+fixed square badges with centred numbers, so nothing shifts when a count goes from one digit to two.
+
+The difference **only exists while the head turns**, and it runs the opposite way to the intuition:
+
+![Reference frames compared, head forward and then turned 45 degrees. The scene-relative object stays in its cell while its bearing changes from 100 to 55 degrees; the head-locked object keeps a bearing of 75 degrees while its place swings 45 degrees with the head.](../assets/readme/reference-frames.svg)
+
+Each keeps a different thing constant: **scene relative keeps its place and gives up its bearing;
+head locked keeps its bearing and gives up its place**. And **the bearing is what you hear**. So the
+head tracking everyone knows — sound pinned to the room, something apparently moving past you as you
+turn — is **scene relative**. **Head locked** sounds like nothing changed at all; only the picture
+follows your head.
+
+The one that moves on screen is the one that does not move in your ears.
 
 The scene answers where a sounding object is. How much it is sounding is what the switches below
 decide.
@@ -313,6 +335,10 @@ diffuse-field profile. The presets published in the AutoEq repository target Har
 content-declared scene-relative and head-relative behaviour, including live changes. System spatial
 output keeps your selected mode and shows its limitation for head-relative objects. Uninterpretable
 policies use a scene-relative fallback with diagnostics.
+
+![Head tracking in motion: the listener turns from side to side. The scene-relative object stays put while the arc to it opens and closes; the head-locked object swings around with the head while its arc stays exactly the same angle.](../assets/readme/head-tracking.svg)
+
+One arc breathes and one is rigid — **the one that breathes is the change your ears hear**.
 
 **Listener orientation** is adjusted on the `Head` page, and where it comes from depends on the mode:
 
