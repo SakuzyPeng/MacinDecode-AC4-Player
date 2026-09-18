@@ -587,6 +587,59 @@ mod tests {
     }
 
     #[test]
+    fn the_keyboard_lays_its_keys_out_like_a_keyboard() {
+        // This was wrong once, and no test noticed: the sharps were placed
+        // nearer the listener than the naturals, which is the opposite of an
+        // instrument and turns the mapping into a scale with a wobble in it.
+        // Reading the manual against the code found it; this keeps it found.
+        let timbres = stage::timbres();
+        let arrangement = stage::arrange(RATE, &timbres);
+        let keyboard = score::PHASES
+            .iter()
+            .find(|phase| phase.per_note())
+            .expect("a per-note phase");
+        let (first, last) = keyboard.span();
+        let span = stage::frame_of(u64::from(first), RATE)..stage::frame_of(u64::from(last), RATE);
+
+        let mut keys: Vec<(u8, [f32; 3])> = arrangement
+            .placements
+            .iter()
+            // The ground and the continuo keep their own places through this
+            // phase; only the pool's notes are laid out as keys.
+            .filter(|placement| {
+                span.contains(&placement.onset) && placement.timbre == stage::timbre::HARPSICHORD
+            })
+            .map(|placement| (placement.pitch, placement.motion.at(0.0)))
+            .collect();
+        keys.sort_by_key(|&(pitch, _)| pitch);
+        keys.dedup_by_key(|&mut (pitch, _)| pitch);
+        assert!(keys.len() > 12, "only {} distinct keys", keys.len());
+
+        for pair in keys.windows(2) {
+            assert!(
+                pair[1].1[0] > pair[0].1[0],
+                "MIDI {} must sit right of {}",
+                pair[1].0,
+                pair[0].0
+            );
+        }
+        let sharp = |pitch: u8| matches!(pitch % 12, 1 | 3 | 6 | 8 | 10);
+        let naturals = keys.iter().filter(|(pitch, _)| !sharp(*pitch));
+        let sharps = keys.iter().filter(|(pitch, _)| sharp(*pitch));
+        let nearest_natural = naturals
+            .map(|(_, position)| position[1])
+            .fold(f32::MIN, f32::max);
+        let furthest_sharp = sharps
+            .map(|(_, position)| position[1])
+            .fold(f32::MAX, f32::min);
+        assert!(
+            furthest_sharp > nearest_natural,
+            "every sharp must sit further forward than every natural: \
+             sharps from {furthest_sharp}, naturals to {nearest_natural}"
+        );
+    }
+
+    #[test]
     fn the_reference_phase_pairs_a_head_locked_twin_with_a_scene_relative_one() {
         let timbres = stage::timbres();
         let arrangement = stage::arrange(RATE, &timbres);

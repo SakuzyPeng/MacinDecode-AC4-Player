@@ -233,10 +233,12 @@ fn keyboard_position(pitch: u8) -> [f32; 3] {
     let (low, high) = score::PITCH_RANGE;
     let span = f32::from(high - low).max(1.0);
     let across = (f32::from(pitch - low) / span).mul_add(1.8, -0.9);
+    // `y` is forward, so a black key takes the *larger* value: on a keyboard
+    // they sit further from the player, not nearer.
     let black = matches!(pitch % 12, 1 | 3 | 6 | 8 | 10);
     [
         across,
-        if black { 0.45 } else { 0.7 },
+        if black { 0.85 } else { 0.6 },
         pitch_elevation(pitch) * 0.5,
     ]
 }

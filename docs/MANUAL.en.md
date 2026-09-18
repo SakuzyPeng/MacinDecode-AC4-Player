@@ -14,6 +14,7 @@ headphone compensation appears in only one of them, see [playback modes](#playba
 ## Contents
 
 - [The window](#the-window)
+- [The built-in demo](#the-built-in-demo)
 - [The 3D scene](#the-3d-scene)
 - [Visual settings](#visual-settings)
   - [Element numbers (IDs)](#element-numbers-ids)
@@ -39,14 +40,66 @@ Four regions, all in fixed positions:
   them); the items below belong to it. **Single-click** an item to inspect it, **double-click** (or
   press Enter, or right-click → Play) to start playback.
 - **The centre** — the 3D scene, where every object's position is drawn live.
-- **The top right** — two settings buttons. **Audio settings** decides how sound leaves the app,
-  **Visual settings** decides how the scene is drawn. They are independent, and changing either one
-  never interrupts decoding of the current track.
+- **The top right** — **Demo** plays the built-in demo track (see [below](#the-built-in-demo)),
+  **About** shows the version and the third-party licences, and two settings buttons follow.
+  **Audio settings** decides how sound leaves the app, **Visual settings** decides how the scene is
+  drawn. Those two are independent, and changing either one never interrupts decoding of the
+  current track.
 - **The bottom** — the transport: previous / play / next, the timeline, volume, mute, and the
   sequential, repeat-one, repeat-all and shuffle modes.
 
 Opening the **meter bank** takes a strip from the right of the scene; see
 [the meter bank](#the-meter-bank).
+
+## The built-in demo
+
+The **Demo** button in the top right plays a piece the application carries with it. It needs no
+file, so the 3D scene, the meter bank, HRTF switching and head tracking are all demonstrable the
+moment you install — AC-4 spatial material is hard to come by otherwise. Press it again (it reads
+**Stop demo**) to stop.
+
+**It is not AC-4.** The sound is synthesised by the application in real time and never passes
+through the decoder, which is why the container field in the status line reads `built-in demo`
+rather than `raw AC-4` or `ISO BMFF`. It can show you that the output path, the renderer, the scene
+view and the meters are working; it can say nothing about the decoder. That cuts the other way too,
+and usefully: when something misbehaves, pressing Demo separates a decoding problem from an output
+problem in one step.
+
+The demo is not a playlist item and does not disturb where you had got to — stop it and the library
+is exactly as you left it.
+
+### The piece
+
+Pachelbel's Canon in D (1694, public domain), about three minutes. Choosing a piece everyone knows
+is deliberate: if the renderer drops a voice or puts an object in the wrong place, an unfamiliar
+piece just sounds like itself, whereas in the canon the second voice is playing what the first
+played eight beats ago — the thing to compare against is already in your short-term memory.
+
+The three violins play one melodic line, two bars apart. On stage they share a circular path with
+their angular offset proportional to their delay, so **what you hear echoing is what you see going
+round**.
+
+### What it demonstrates, in order
+
+The piece is divided into phases, each showing one thing. Boundaries fall where the bass returns to
+its first note:
+
+| Roughly | What to watch |
+| --- | --- |
+| 0–20 s | The bass alone, then the three violins entering in turn. Plain bearing, and the trails. |
+| 20–60 s | Three voices circling, 120° apart. The canon's form becomes the scene's structure. |
+| 60–87 s | The densest passage in the piece. Deliberately *not* split into objects: the three lines keep flying. |
+| 87–127 s | Twin objects on the same material in the same timbre, one head-locked and one scene-relative. Turn your head and only one follows you — the single comparison in this manual most worth trying yourself. |
+| 127–153 s | The keyboard: every ringing note gets an object of its own, placed by its pitch. Higher notes sit further right and higher up, and sharps sit further back, because that is where the black keys are. |
+| 153–173 s | What the metadata can say and the audio cannot: an object at full gain sounding nothing (the footprint keeps its gain ring while the cube recedes), an object switching `metadata_active` on and off, and two whose gain ramps rather than steps. |
+| 173 s– | Back to the circling, and the close. |
+
+**About height**: pitch is mapped to elevation, and that mapping is clearly visible but only coarsely
+audible. Elevation cues come almost entirely from the folds of your own ears, and the difference
+people can resolve there is 10°–20°, far worse than from side to side. That limit is itself the
+point: it makes this the place to compare
+[software binaural and HRTFs](#software-binaural-and-hrtfs) — load a different SOFA profile and
+watch how much more, or less, of that height contour you can actually hear.
 
 ## The 3D scene
 

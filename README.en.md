@@ -42,6 +42,10 @@ telling you and what each setting does, see the [user manual](docs/MANUAL.en.md)
   you like.
 - **Diagnose problems.** A diagnostics window shows buffering, decode and output state, so you can
   tell a file problem from a device problem.
+- **Play the built-in demo.** Press **Demo**, top right, and something is playing without a file of
+  any kind — immersive AC-4 material is hard to come by. It is synthesised in real time and never
+  passes through the decoder, so it exercises the output path but says nothing about decoding; see
+  [the manual](docs/MANUAL.en.md#the-built-in-demo).
 
 Supported files: `.m4a`, `.mp4` and `.ac4`, each of which must carry an AC-4 track. The current focus
 is **Full A-JOC** immersive content; other AC-4 flavors may fail to play — but you can still inspect
@@ -73,7 +77,8 @@ the checksum and build information attachments do not need to be installed. You 
 
 ## Five steps to your first playback
 
-1. Launch the app.
+1. Launch the app. No AC-4 file to hand? Press **Demo** in the top right and there is immediately
+   something to look at and listen to.
 2. Click **Add files** in the sidebar, or drag files onto the window.
 3. Pick a playlist at the top of the sidebar (`+` creates one, `⋯` manages them). **Single-click** an
    item to inspect it; **double-click** (or press Enter, or right-click → Play) to start playback.
@@ -319,3 +324,10 @@ The design docs, which describe how the code is organised, are written in Chines
 
 Released under the [MIT License](LICENSE). The app's About page embeds the license notices of every
 third-party dependency.
+
+The built-in demo is Pachelbel's Canon in D (*Canon per 3 Violini e Basso*, 1694), a public-domain
+composition synthesised in real time by this application — **no recording is included**. The notes
+were transcribed from the LilyPond typesetting published by the Mutopia Project as
+`Mutopia-2015/09/02-2047`, maintained by Michael Fischer v. Mollard, which is licensed under
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). The same attribution appears on the
+app's About page.
