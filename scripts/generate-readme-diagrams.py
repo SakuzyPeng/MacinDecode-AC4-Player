@@ -53,6 +53,15 @@ SILENT_PRESENCE_FLOOR = 0.10
 OBJECT_SILENT_FADE = 0.55
 SILENCE_HOLD_SECONDS, SILENCE_FADE_SECONDS = 2.0, 0.6
 PEAK_HOLD_SECONDS = 1.6
+# The jump annotation, from src/scene3d/params.rs. Two separate questions live
+# here. Whether a position update was a discontinuity is a fact, decided in
+# backend::state by ramp_frames == 0. Whether the distance is worth annotating
+# is a perceptual judgement, and without it every small instant correction
+# would turn a whole trail into a chain of hollow marks.
+JUMP_MIN_DISTANCE = 0.30
+JUMP_MARK_SCALE = 1.6
+JUMP_ARROW_POINTS, JUMP_ARROW_HEAD_POINTS = 26.0, 9.0
+JUMP_ARROW_HEAD_DEGREES = 32.0
 
 # The straight-down view the projection diagram uses, zoomed into the middle of
 # the floor.
@@ -1221,6 +1230,161 @@ def build_head_tracking():
         scene.SCALE = previous
 
 
+def wire_box(centre, edge, colour, width=1.15):
+    """A hollow marker, drawn the way `scene3d::mesh::add_wire_box` draws it.
+
+    All twelve edges, including the ones a solid box hides. That is what makes
+    it read as an outline rather than as a paler cube.
+    """
+    half = edge / 2
+    segments = []
+    for axis in range(3):
+        for a in (-1, 1):
+            for b in (-1, 1):
+                ends = []
+                for side in (-1, 1):
+                    offset = [a, b]
+                    offset.insert(axis, side)
+                    ends.append(project(tuple(c + o * half for c, o in
+                                              zip(centre, offset)), True))
+                segments.append(f"M{fmt(ends[0][0])} {fmt(ends[0][1])}"
+                                f"L{fmt(ends[1][0])} {fmt(ends[1][1])}")
+    return stroke_path("".join(segments), colour, width)
+
+
+def jump_arrow(start, end, colour):
+    """The direction half of the annotation, as `scene3d::scene::jump_arrow`.
+
+    The shaft is measured in screen points rather than in the world, so it is
+    the same length at any zoom; it is reproduced at the player's own points
+    instead of being scaled with the diagram. It begins clear of the departure
+    marker — started at the centre, half of it would be buried in the wire box
+    and the two would read as one cluttered glyph.
+    """
+    span = [e - s for s, e in zip(start, end)]
+    length = sum(v * v for v in span) ** 0.5
+    clearance = scene.TRAIL_EDGE * JUMP_MARK_SCALE * 0.75 / length
+    ax, ay = project(tuple(s + v * clearance for s, v in zip(start, span)), True)
+    bx, by = project(end, True)
+    across = ((bx - ax) ** 2 + (by - ay) ** 2) ** 0.5
+    ux, uy = (bx - ax) / across, (by - ay) / across
+    # Never overshoot what it annotates: on a short span the arrow shrinks.
+    shaft = min(JUMP_ARROW_POINTS, across)
+    tx, ty = ax + ux * shaft, ay + uy * shaft
+    parts = [stroke_path(f"M{fmt(ax)} {fmt(ay)}L{fmt(tx)} {fmt(ty)}", colour, 1.15)]
+    for sign in (1, -1):
+        angle = radians(180 - JUMP_ARROW_HEAD_DEGREES) * sign
+        c, s = cos(angle), sin(angle)
+        barb = (ux * c - uy * s, ux * s + uy * c)
+        parts.append(stroke_path(
+            f"M{fmt(tx)} {fmt(ty)}"
+            f"L{fmt(tx + barb[0] * JUMP_ARROW_HEAD_POINTS)} "
+            f"{fmt(ty + barb[1] * JUMP_ARROW_HEAD_POINTS)}", colour, 1.15))
+    return "".join(parts)
+
+
+def breadcrumb(centre, freshness, *, hollow=False):
+    """One trail mark and its floor projection, aged as `add_trail` ages them.
+
+    A hollow mark is deliberately not faded: age is what the rest of the trail
+    encodes, and these two are the marks the eye is meant to find.
+    """
+    aged = blend(ACCENT, STAGE, scene.TRAIL_FADE * (1 - freshness))
+    colour = ACCENT if hollow else aged
+    mark = (wire_box(centre, scene.TRAIL_EDGE * JUMP_MARK_SCALE, ACCENT) if hollow
+            else scene.box(centre, [scene.TRAIL_EDGE] * 3, aged, local=True))
+    floor = scene.floor_mark(
+        (centre[0], FLOOR_Y, centre[2]), scene.TRAIL_EDGE * 0.7,
+        blend(colour, STAGE, 1 - scene.FLOOR_TRAIL_WEIGHT), local=True)
+    return floor + mark
+
+
+def build_trail_jumps():
+    """What a trail says, and what the hollow marks add where it is broken."""
+    previous = scene.SCALE
+    scene.SCALE = 250
+    try:
+        width, height = 880, 464
+        body = card(width, height, "Object trails and jumps", "TRAIL EXAMPLE")
+
+        # Laid along the camera's own right vector, so the path is level on
+        # screen and the only thing that varies between the panels is spacing.
+        # The marks ride above the floor; their projections land on it.
+        along = lambda t: scene.add(scene.multiply(scene.RIGHT, t), (0, -0.45, 0))
+        travelled = [along(-0.45 + 0.1 * i) for i in range(10)]
+        jumped = [along(t) for t in (-0.45, -0.40, -0.35, -0.30, -0.25,
+                                     0.25, 0.30, 0.35, 0.40, 0.45)]
+        # The jump lands on index 5: it and the mark before it are the two ends.
+        panels = [
+            (24, "Travelled", travelled, None, [
+                "Ten marks, evenly spaced. Nothing is hollow, so every gap was",
+                "crossed — and how wide they are is how fast it was going.",
+            ]),
+            (452, "Jumped", jumped, 5, [
+                "The same span over the same 400 ms, but it was never in",
+                "between. Two hollow ends, an arrow, and nothing joining them.",
+            ]),
+        ]
+        for x, title, marks, jump, lines in panels:
+            body.append(rect(x, 62, 404, 250, fill=SURFACE, stroke=BORDER, radius=4))
+            body.append(text(x + 18, 88, title, size=12, weight=600, fill=TEXT))
+            art = [floor_grid(half=0.45, cells=6)]
+            for index, centre in enumerate(marks):
+                freshness = (index + 1) / len(marks)
+                hollow = jump is not None and index in (jump - 1, jump)
+                art.append(breadcrumb(centre, freshness, hollow=hollow))
+            if jump is not None:
+                art.append(jump_arrow(marks[jump - 1], marks[jump], ACCENT))
+            body.append(f'<g transform="translate({x + 202},46)">{"".join(art)}</g>')
+            body.append(caption(x + 18, 272, lines, size=10.5, fill=MUTED))
+
+        # Name the two ends once, on the panel that has them. Their screen
+        # places follow the same projection the marks do rather than being
+        # guessed, so moving the trail moves the labels with it.
+        for index, label, anchor in ((4, "left here", "end"), (5, "appeared here", "start")):
+            px, py = project(jumped[index], True)
+            at = (652 + px, 46 + py)
+            body.append(leader([(at[0], at[1] - 18), (at[0], at[1] - 8)],
+                               color=blend(MUTED, STAGE, 0.25), dot=False))
+            body.append(text(at[0] + (-6 if anchor == "end" else 6), at[1] - 24,
+                             label, size=10, fill=TEXT, anchor="middle"))
+
+        body.append(rect(24, 328, 832, 70, fill=SURFACE, stroke=BORDER, radius=4))
+        body.append(rect(24, 328, 3, 70, fill=MUTED))
+        body.append(text(44, 350, "Two questions, and they are not the same one",
+                         size=11.5, weight=600, fill=TEXT))
+        body.append(caption(44, 368, [
+            "Was it a discontinuity? A fact, read off the metadata in "
+            "backend::state: a position update whose ramp is zero frames.",
+            "Is it worth a marker? A judgement, and it lives in params.rs: the "
+            f"two ends must be {fmt(JUMP_MIN_DISTANCE)} apart in a room that "
+            "spans −1 to 1.",
+        ], size=10.5, leading=14))
+        body.append(text(22, height - 18,
+                         "Age is the only thing a trail encodes — the hollow "
+                         "marks are the exception, and never fade",
+                         size=11, fill=TEXT))
+        body.append(text(width - 22, height - 18,
+                         "No line, because none of it was travelled",
+                         size=11, fill=WARNING, anchor="end"))
+        return "trail-jumps.svg", document(
+            width, height, "MacinDecode AC-4 Player — object trails and jumps",
+            "Two trails across the same room over the same 400 milliseconds. In "
+            "the first every mark is a solid cube and the spacing is even, so "
+            "the object travelled and the gaps read as its speed. In the second "
+            "the marks bunch at each side and the two facing the gap are hollow "
+            "outlines, with a short arrow at the end the object left pointing "
+            "the way it went. Nothing joins the two hollow marks, because none "
+            "of that distance was travelled: the metadata moved the object "
+            "instantly. Whether an update was instant is a fact read off the "
+            "bitstream; whether the distance is worth a marker is a threshold "
+            "in the player. Each mark also drops a smaller projection onto the "
+            "floor grid, which is what places the path when the view is "
+            "grazing.", body)
+    finally:
+        scene.SCALE = previous
+
+
 BUILDERS = {
     "playback-paths": build_playback_paths,
     "reference-frames": build_reference_frames,
@@ -1229,6 +1393,7 @@ BUILDERS = {
     "object-footprint": build_object_footprint,
     "silent-objects": build_silent_objects,
     "meter-row": build_meter_row,
+    "trail-jumps": build_trail_jumps,
 }
 
 

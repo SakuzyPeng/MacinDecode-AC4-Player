@@ -38,7 +38,7 @@ Two user-facing pairs, each of which a user-visible change lands in both halves 
 `README.en.md` (install, quickstart, platform support, FAQ, building) and `docs/MANUAL.md` /
 `docs/MANUAL.en.md` (the interface reference — the 3D scene, every Visual settings switch and what it
 reads, the playback modes in depth). Reference material about the UI belongs in the manual, not in
-the README; the README links into it. The manual's seven diagrams come from
+the README; the README links into it. The manual's eight diagrams come from
 `scripts/generate-readme-diagrams.py`, which transcribes the constants it annotates (the silence
 floor, the footprint scales, the nameplate dim, the silence hold) into one block — change one of
 those in `src/scene3d/params.rs` or `src/app.rs` and that block has to follow. Reference frames are

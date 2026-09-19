@@ -97,6 +97,13 @@ its first note:
 | 153–173 s | What the metadata can say and the audio cannot: an object at full gain sounding nothing (the footprint keeps its gain ring while the cube recedes), an object switching `metadata_active` on and off, and two whose gain ramps rather than steps. |
 | 173 s– | Back to the circling, and the close. |
 
+**The demo produces a lot of hollow wire boxes**, the keyboard phase most of all. Its sixteen object
+slots are time-division multiplexed: when a note takes a slot over, the player sends a position
+update with a zero-frame ramp, so that object **teleports** to the new note's place. Those hollow
+marks therefore say "this slot changed hands", not "an object flew across the room" — they are the
+jump annotation described under [the 3D scene](#the-3d-scene). The circling phases are the opposite:
+their position updates carry ramps, and come out as even trails.
+
 **About height**: pitch is mapped to elevation, and that mapping is clearly visible but only coarsely
 audible. Elevation cues come almost entirely from the folds of your own ears, and the difference
 people can resolve there is 10°–20°, far worse than from side to side. That limit is itself the
@@ -139,6 +146,42 @@ turn — is **scene relative**. **Head locked** sounds like nothing changed at a
 follows your head.
 
 The one that moves on screen is the one that does not move in your ears.
+
+**Trails:** every object drags a string of small marks behind it, the places it has been. One is
+taken every **40 ms** and the most recent **40** are kept, so a trail is **1.6 seconds** of history;
+each mark is 0.30 of the object's own edge — floating up and down with what that mark measured, when
+the loudness readout is on — and older ones are paler. A trail **encodes age and nothing else** —
+not gain — which is what gives it a direction without needing an arrowhead: the bright end is the
+new one. Each mark also drops a fainter copy of itself onto the floor. That
+projection is not decoration: at a grazing or axis-aligned view the airborne marks carry no depth at
+all, and the projection is what still places the path on the grid.
+
+The **gap between marks is speed**. An OAMD ramp is a piecewise-linear path, so it comes out as
+evenly spaced marks, and the shorter the ramp the wider they spread.
+
+**But "crossed quickly" and "was never in between" are different things, and spacing alone cannot
+tell them apart.**
+
+![A travelled trail and a jumped one compared. On the left ten solid marks are evenly spaced, so the object crossed the room. On the right the marks bunch at each side, the two facing the gap are hollow outlines, a short arrow sits at the end it left, and nothing joins them.](../assets/readme/trail-jumps.svg)
+
+When the metadata moves an object **instantly** — a position update whose ramp is zero frames — the
+player draws **both ends of that jump as hollow wire boxes**, 1.6 times the size of an ordinary mark
+and **never faded by age**, because these are the two marks the eye is meant to find. At the end the
+object **left**, a short arrow points the way it went. The arrow is measured in screen points, so it
+stays the same size at any zoom.
+
+Nothing joins the two, deliberately: none of that distance was travelled. Joined by a line — or left
+solid like every other mark — the jump would read as "it crossed the room very fast", which is
+exactly the reading worth preventing.
+
+Two thresholds, and they are not the same one. **Whether it was a jump** is a fact, decided by
+`ramp_frames == 0` on the position update in the bitstream. **Whether it is worth marking** is a
+perceptual judgement: the two ends must be at least **0.30** apart, in a room whose coordinates run
+−1 to 1. Without that second one, a stream that sends a small instant correction on every update
+would turn the whole trail into a chain of hollow marks, which is worse than the problem.
+
+Trails clear in two places: when the playback key changes (a seek, a new source), and when a slot
+**changes element or reference frame** — the history belongs to an object, not to a slot number.
 
 The scene answers where a sounding object is. How much it is sounding is what the switches below
 decide.

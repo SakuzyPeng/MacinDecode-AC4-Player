@@ -1,8 +1,8 @@
 # README artwork
 
-Eight SVGs are shared by the Chinese and English READMEs and by
+Nine SVGs are shared by the Chinese and English READMEs and by
 [`docs/MANUAL.md`](../../docs/MANUAL.md) and its English twin: the animated
-scene, six static diagrams that annotate what the player draws, and one more
+scene, seven static diagrams that annotate what the player draws, and one more
 animation for the single thing a still picture cannot show. All of them follow
 the palette and geometry in `src/theme.rs` and `src/scene3d/`.
 
@@ -49,14 +49,15 @@ that support CSS but do not run animations.
 | `object-footprint.svg` | The floor mark's two readings — the gain ring and the level core — and the three cases they produce |
 | `silent-objects.svg` | What a persistently silent object loses, and the gain ring it keeps |
 | `meter-row.svg` | One meter bank row's four marks, and the bank they sit in |
+| `trail-jumps.svg` | What a trail's spacing says, and what the hollow marks add where the path is broken |
 | `reference-frames.svg` | What scene-relative and head-locked each keep constant when the listener turns |
 | `projection-modes.svg` | Why the projection toggle exists: which footprints a straight-down orthographic view hides |
-| | Its cubes are boxes, not squares: perspective gives each corner its own reach, so an off-axis cube leans and its inward faces come into view, while orthographic shows the top face alone and covers the footprint exactly. Element numbers are the player's seven segments, laid on the top face. Its objects sit low in the room, and that is what makes the boxes legible: side faces are as tall as a cube is thick, while the gap to the footprint is as wide as the cube is high above the floor, so the two grow together as the camera comes in. High in the room that ratio is about a tenth and the side faces land under two pixels; low it is nearer a third, which buys a much closer camera at the same separation, and with the faces that size they carry `params::TONE_LEFT` and `TONE_RIGHT` unexaggerated — one shading rule across all eight pictures. Nothing distorts from that — every point at one height shares one reach, so the floor grid stays square however near the camera comes, and orthographic is scaled at the floor so both panels draw one room at one size. |
+| | Its cubes are boxes, not squares: perspective gives each corner its own reach, so an off-axis cube leans and its inward faces come into view, while orthographic shows the top face alone and covers the footprint exactly. Element numbers are the player's seven segments, laid on the top face. Its objects sit low in the room, and that is what makes the boxes legible: side faces are as tall as a cube is thick, while the gap to the footprint is as wide as the cube is high above the floor, so the two grow together as the camera comes in. High in the room that ratio is about a tenth and the side faces land under two pixels; low it is nearer a third, which buys a much closer camera at the same separation, and with the faces that size they carry `params::TONE_LEFT` and `TONE_RIGHT` unexaggerated — one shading rule across all nine pictures. Nothing distorts from that — every point at one height shares one reach, so the floor grid stays square however near the camera comes, and orthographic is scaled at the floor so both panels draw one room at one size. |
 | `head-tracking.svg` | The same distinction in motion — one bearing arc rigid, the other breathing |
 
 They carry labels only: the prose that explains them lives in the manual beside
 each image, where it can be translated and searched. Their frame, palette and
-isometric camera are the scene's, so all eight read as one set.
+isometric camera are the scene's, so all nine read as one set.
 
 `head-tracking.svg` is the one diagram that moves, because the distinction it
 draws only exists while the head turns — two objects standing still are
