@@ -48,17 +48,49 @@ jobs:
           rustup target add "$TARGET"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          # Cargo/native outputs still follow the renderer revision. Keep the
-          # legacy paths so existing archives can seed the independent SDK cache.
+          # Cargo/native outputs follow the renderer revision. OpenBLAS and
+          # the license tool also have independently reusable caches below.
           key: ${{ matrix.target }}-static-v1-xcode26.3-${{ hashFiles('crates/macinrender/native/CMakeLists.txt') }}
+          # Retire entries that may have been saved before Release compilation.
+          prefix-key: v1-complete-rust
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-workspace-crates: true
-          cache-on-failure: true
+          cache-on-failure: false
           cache-directories: |
             .ci-tools
             .ci-inputs/native-dependencies
             .ci-inputs/macinrender
             .ci-inputs/openblas-static
+      - name: Compute license tool cache identity
+        id: license_tool
+        run: |
+          python - <<'PYTHON'
+          import os, sys
+          sys.path.insert(0, "scripts")
+          from package import ABOUT_VERSION
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              print(f"version={ABOUT_VERSION}", file=output)
+          PYTHON
+      - name: Restore license tool
+        id: license_restore
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: license-tool-${{ matrix.os }}-${{ matrix.target }}-${{ steps.license_tool.outputs.version }}
+          path: .ci-tools/bin
+      - name: Prepare and verify license tool
+        run: |
+          python - <<'PYTHON'
+          import sys
+          sys.path.insert(0, "scripts")
+          from package import cargo_about
+          print(cargo_about())
+          PYTHON
+      - name: Save verified license tool
+        if: steps.license_restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: license-tool-${{ matrix.os }}-${{ matrix.target }}-${{ steps.license_tool.outputs.version }}
+          path: .ci-tools/bin
       - name: Compute Windows OpenBLAS SDK cache identity
         if: runner.os == 'Windows'
         id: openblas_sdk
