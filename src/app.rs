@@ -4764,7 +4764,7 @@ fn decode_metric_values(decoder: &DecoderSnapshot) -> [(&'static str, String, St
                 || "—".to_owned(),
                 |value| if value.has_lfe() { "1" } else { "0" }.to_owned(),
             ),
-            "Low-frequency effects".to_owned(),
+            "Channel 0".to_owned(),
         ),
         (
             "POSITION",
