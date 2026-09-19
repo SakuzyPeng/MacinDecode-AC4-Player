@@ -23,6 +23,9 @@ MacinDecode AC-4 Player **v0.1.2 预览版**新增耳机补偿、逐对象电平
 
 ### 本次更新
 
+- **内置演示曲目**：点击右上角 Demo，无需导入文件即可体验空间音频、头部追踪和对象运动；支持循环播放，停止后恢复原文件断点并保持暂停。演示音频由应用实时合成，用于体验渲染与输出链路。
+- **LFE 与统一读数**：Meter bank 新增 Channel 0 低频声道电平，dBFS / LUFS-M 切换统一作用于表带和场景读数。
+- **轨迹与跳变说明**：中英文手册新增轨迹采样、瞬移空心标记和内置演示中的槽位复用说明，配有对照示意图。
 - **耳机补偿（HpTF）**：SAF binaural 模式支持导入和管理 AutoEq 参数均衡器配置，查看频响曲线、
   悬停对比其他配置，调整 Bass / Tilt，并将调整保存成新配置。可从 [AutoEq 网站](https://autoeq.app/)
   下载耳机对应的参数均衡器文本文件。
@@ -84,6 +87,9 @@ developer. Make sure you downloaded them from this repository's release page. Yo
 
 ### What's new
 
+- **Built-in demo:** click Demo at the top right to experience spatial audio, head tracking and object movement without importing a file. It supports looping and restores the original file position, paused, when stopped. The app synthesises the audio in real time to demonstrate rendering and output.
+- **LFE and consistent readings:** the Meter bank now includes the Channel 0 low-frequency meter; switching between dBFS and LUFS-M applies to both the bank and scene readings.
+- **Trails and jumps explained:** both manuals now cover trail sampling, hollow jump markers and slot reuse in the built-in demo, with a comparison diagram.
 - **Headphone compensation (HpTF):** SAF binaural can import and manage AutoEq parametric EQ profiles,
   plot their response, preview another profile on hover, adjust Bass / Tilt and save the result as a
   new profile. Download a parametric EQ text profile for your headphones from the [AutoEq website](https://autoeq.app/).
