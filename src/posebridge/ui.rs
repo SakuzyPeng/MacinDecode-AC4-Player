@@ -10,9 +10,50 @@ use std::time::{Duration, Instant};
 /// look up and come back without hurrying, short enough not to be a pose.
 const CAPTURE: Duration = Duration::from_secs(4);
 
+/// Calibration belongs to one device configuration and acquisition/reference
+/// epoch. A connection can change while this window is closed.
+#[derive(Clone, PartialEq, Eq)]
+struct CheckSource {
+    request: u64,
+    device: Device,
+    stream: (u64, u64, u64),
+}
+impl CheckSource {
+    fn current(
+        head: &HeadSnapshot,
+        prefs: &Preferences,
+        view: &View,
+        enabled: bool,
+    ) -> Option<Self> {
+        if !enabled
+            || view.phase != Phase::Tracking
+            || head.status != crate::head_tracking::HeadStatus::BridgeActive
+        {
+            return None;
+        }
+        let device = view.device.as_ref()?;
+        // Applying a suggestion changes preferences before the running
+        // connection adopts them. No new check may mix those two mappings.
+        if device != &prefs.device {
+            return None;
+        }
+        let source = &view.snapshot.as_ref()?.descriptor;
+        Some(Self {
+            request: view.request,
+            device: device.clone(),
+            stream: (
+                source.instance_id,
+                source.session_id,
+                source.reference_epoch,
+            ),
+        })
+    }
+}
+
 /// A mounting check in progress.
 #[derive(Default)]
 struct Check {
+    source: Option<CheckSource>,
     calibration: mounting::Calibration,
     /// The motion being captured, the pose it began from, and when it ends.
     capturing: Option<(mounting::Motion, Quaternion, Instant)>,
@@ -24,6 +65,18 @@ struct Check {
     results: [Option<mounting::Observation>; 3],
     /// Why the last motion was not counted, until the next one starts.
     refused: Option<&'static str>,
+}
+impl Check {
+    fn start(&mut self, motion: mounting::Motion, pose: Quaternion) {
+        if self.source.is_none() || self.capturing.is_some() {
+            return;
+        }
+        self.calibration.clear_motion(motion);
+        self.results[motion.axis()] = None;
+        self.capturing = Some((motion, pose, Instant::now() + CAPTURE));
+        self.peak = None;
+        self.refused = None;
+    }
 }
 
 #[derive(Default, PartialEq, Eq)]
@@ -197,7 +250,7 @@ impl Panel {
         // Whatever tab is showing, and whether or not its section is expanded:
         // a capture left behind still has to end, or its motion holds every
         // other Start disabled.
-        self.advance_check(head, prefs.device.mounting);
+        self.advance_check(head, prefs, &view, enabled);
         egui::ScrollArea::vertical()
             .id_salt(match self.tab { Tab::Tracking => "pose-tracking", Tab::Device => "pose-device", Tab::Diagnostics => "pose-diagnostics" })
             .auto_shrink([false, false])
@@ -253,8 +306,8 @@ impl Panel {
                 ui.small(
                     "Which sensor axis points where cannot be read off the three combo boxes. Move, and each motion says which one it used.",
                 );
-                if !matches!(head.status, crate::head_tracking::HeadStatus::BridgeActive) {
-                    ui.label("Connect a sensor and track it to check its mounting.");
+                if self.check.source.is_none() {
+                    ui.label("Connect or reconnect the selected sensor with these settings to check its mounting.");
                     return;
                 }
                 for motion in mounting::Motion::ALL {
@@ -278,6 +331,7 @@ impl Panel {
             if let Some((_, _, until)) = capturing {
                 if ui.button("Stop").clicked() {
                     self.check.capturing = None;
+                    self.check.peak = None;
                 }
                 let left = until
                     .saturating_duration_since(Instant::now())
@@ -295,9 +349,7 @@ impl Panel {
                 .add_enabled(self.check.capturing.is_none(), egui::Button::new("Start"))
                 .clicked()
             {
-                self.check.capturing = Some((motion, head.pose, Instant::now() + CAPTURE));
-                self.check.peak = None;
-                self.check.refused = None;
+                self.check.start(motion, head.pose);
             }
         });
         if capturing.is_some() {
@@ -308,6 +360,10 @@ impl Panel {
             ui.small(motion.instruction());
             return;
         };
+        if !result.usable() {
+            ui.small("This motion was not counted. Repeat it.");
+            return;
+        }
         let angle = mounting::Motion::angle_of(result.axis);
         let correct = result.axis == motion.axis() && result.positive;
         ui.colored_label(
@@ -360,20 +416,32 @@ impl Panel {
 
     /// Advance a capture, and close it when its window is up.
     ///
-    /// `mounting` is the one the sensor is being read with: the axis combo
-    /// boxes are disabled while tracking, so it cannot change mid-check.
-    fn advance_check(&mut self, head: &HeadSnapshot, mounting: [i8; 3]) {
+    /// Validate the source even when no capture is running: completed results
+    /// must not survive a device change, reconnect or pending mounting edit.
+    fn advance_check(
+        &mut self,
+        head: &HeadSnapshot,
+        prefs: &Preferences,
+        view: &View,
+        enabled: bool,
+    ) {
+        let source = CheckSource::current(head, prefs, view, enabled);
+        if self.check.source != source {
+            let interrupted = self.check.capturing.is_some();
+            self.check = Check {
+                source,
+                refused: interrupted
+                    .then_some("Tracking or device settings changed. Repeat all three motions."),
+                ..Check::default()
+            };
+        }
+        let Some(source) = &self.check.source else {
+            return;
+        };
+        let mounting = source.device.mounting;
         let Some((motion, start, until)) = self.check.capturing else {
             return;
         };
-        // Losing the sensor mid-motion freezes the pose, and a frozen pose
-        // reads as a motion that stopped where it was.
-        if !matches!(head.status, crate::head_tracking::HeadStatus::BridgeActive) {
-            self.check.capturing = None;
-            self.check.peak = None;
-            self.check.refused = Some("Tracking stopped during that motion. Repeat it.");
-            return;
-        }
         let observation = mounting::observe(start, head.pose);
         if self
             .check
@@ -390,13 +458,13 @@ impl Panel {
             return;
         };
         self.check.results[motion.axis()] = Some(peak);
-        self.check.refused = (!self.check.calibration.record(mounting, motion, peak)).then(|| {
+        self.check.refused = (!self.check.calibration.record(mounting, motion, peak)).then_some(
             if peak.degrees < mounting::MINIMUM_DEGREES {
                 "That was too small to read. Move further and repeat it."
             } else {
                 "That turned about more than one axis. Move about one at a time and repeat it."
-            }
-        });
+            },
+        );
     }
 
     fn connection(
@@ -930,59 +998,6 @@ mod tests {
         assert!(service.view().snapshot.is_none());
         assert_eq!(prefs.device.mounting, [0; 3]);
     }
-    /// The capture closes on its own window and records the turn it peaked at,
-    /// so three clean motions under a correct mounting agree with it. The poses
-    /// are constructed: no device is reached.
-    #[test]
-    fn three_captured_motions_resolve_the_mounting_they_were_made_under() {
-        let mounting = [-2, 1, 3];
-        let mut panel = Panel::default();
-        for motion in mounting::Motion::ALL {
-            let pose = Quaternion::from_euler(match motion {
-                mounting::Motion::Nod => [0., 40., 0.],
-                mounting::Motion::Shake => [40., 0., 0.],
-                mounting::Motion::Tilt => [0., 0., 40.],
-            });
-            // An elapsed window: the peak is taken before the clock is read, so
-            // one call captures this pose and closes the motion.
-            panel.check.capturing = Some((motion, Quaternion::default(), Instant::now()));
-            panel.check.peak = None;
-            panel.advance_check(
-                &HeadSnapshot {
-                    pose,
-                    status: crate::head_tracking::HeadStatus::BridgeActive,
-                },
-                mounting,
-            );
-            assert!(panel.check.capturing.is_none(), "{motion:?} did not close");
-            assert!(panel.check.refused.is_none(), "{motion:?} was refused");
-            assert!(panel.check.results[motion.axis()].is_some_and(|r| r.axis == motion.axis()));
-        }
-        assert_eq!(panel.check.calibration.resolve(), Ok(mounting));
-    }
-
-    /// A pose that has stopped arriving is frozen, and a frozen pose reads as a
-    /// motion that ended wherever it was when the samples stopped.
-    #[test]
-    fn losing_the_sensor_mid_motion_discards_it() {
-        let mut panel = Panel::default();
-        panel.check.capturing =
-            Some((mounting::Motion::Nod, Quaternion::default(), Instant::now()));
-        panel.advance_check(
-            &HeadSnapshot {
-                pose: Quaternion::from_euler([0., 40., 0.]),
-                status: crate::head_tracking::HeadStatus::BridgeFrozen,
-            },
-            [1, 2, 3],
-        );
-        assert!(panel.check.capturing.is_none());
-        assert!(panel.check.refused.is_some());
-        assert_eq!(
-            panel.check.calibration.resolve(),
-            Err("Perform all three motions.")
-        );
-    }
-
     /// The audio settings keep one row, and a row that reaches a device would
     /// put hardware behind simply opening the settings window.
     #[test]
@@ -1020,3 +1035,7 @@ mod tests {
         assert!(service.view().snapshot.is_none());
     }
 }
+
+#[cfg(test)]
+#[path = "ui/mounting_tests.rs"]
+mod mounting_tests;

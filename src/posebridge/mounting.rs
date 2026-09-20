@@ -162,12 +162,12 @@ impl Calibration {
     /// Record what `motion` revealed, under the mounting that was in use while
     /// it was performed.
     ///
-    /// The mounting cannot change underneath this: the axis combo boxes are
-    /// disabled while the device is tracking, which is the only time a motion
-    /// can be observed at all.
+    /// The caller must use the active connection's mounting and discard the
+    /// calibration when its device or tracking session changes.
     ///
     /// Reports whether the observation was clean enough to be used.
     pub fn record(&mut self, mounting: [i8; 3], motion: Motion, observation: Observation) -> bool {
+        self.clear_motion(motion);
         if !observation.usable() {
             return false;
         }
@@ -180,8 +180,10 @@ impl Calibration {
         true
     }
 
-    pub fn clear(&mut self) {
-        *self = Self::default();
+    /// A retry replaces the previous observation, even if it is cancelled or
+    /// fails to produce a usable turn.
+    pub fn clear_motion(&mut self, motion: Motion) {
+        self.found[motion.axis()] = None;
     }
 
     /// The mounting the three motions describe, once they describe one.
@@ -303,6 +305,33 @@ mod tests {
         assert!(!still.usable());
     }
 
+    #[test]
+    fn a_rejected_retry_removes_its_previous_answer() {
+        for angles in [[0.0, 5.0, 0.0], [30.0, 30.0, 0.0]] {
+            let mut calibration = Calibration::default();
+            for motion in Motion::ALL {
+                assert!(calibration.record(
+                    IDENTITY,
+                    motion,
+                    observe(Quaternion::default(), turn(motion, 40.0)),
+                ));
+            }
+            assert_eq!(calibration.resolve(), Ok(IDENTITY));
+            assert!(!calibration.record(
+                IDENTITY,
+                Motion::Nod,
+                observe(Quaternion::default(), Quaternion::from_euler(angles)),
+            ));
+            assert_eq!(calibration.resolve(), Err("Perform all three motions."));
+            assert!(calibration.record(
+                IDENTITY,
+                Motion::Nod,
+                observe(Quaternion::default(), turn(Motion::Nod, 40.0)),
+            ));
+            assert_eq!(calibration.resolve(), Ok(IDENTITY));
+        }
+    }
+
     /// A mounting that is already right reports itself, so the check can say
     /// "nothing to change" rather than hand back a rearrangement of the same
     /// three axes.
@@ -384,7 +413,9 @@ mod tests {
             unset.resolve(),
             Err("A motion named an axis that is not X, Y or Z.")
         );
-        repeated.clear();
+        for motion in Motion::ALL {
+            repeated.clear_motion(motion);
+        }
         assert_eq!(repeated, Calibration::default());
     }
 

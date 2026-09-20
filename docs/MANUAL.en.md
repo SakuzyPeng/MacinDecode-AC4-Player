@@ -489,8 +489,13 @@ motions name all three entries.
 
 Three outcomes. All three agreeing with the current setting is reported as checked. A disagreement is
 reported as the mounting the motions describe, with **Use this mounting** to write it into the setting —
-the setting only, so Disconnect and Connect again for it to take effect. A motion under 20°, one that
-turned about more than one axis, one performed in the reverse direction (the three come out left-handed)
+the setting only, so Disconnect and Connect again for it to take effect. Checking pauses until that
+reconnection. Changing the device, connection session or sensor pose reference, or stopping tracking clears the
+check. Starting a motion again immediately discards its previous result; cancellation or failure does
+not restore it.
+
+A motion under 20°, one that turned about more than one axis, one performed in the reverse direction
+(the three come out left-handed)
 and two motions landing on the same axis are each refused with the reason and repeated rather than
 averaged in. The check never writes anything to the sensor.
 
