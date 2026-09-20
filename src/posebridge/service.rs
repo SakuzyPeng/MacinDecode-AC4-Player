@@ -25,6 +25,20 @@ impl Phase {
     pub fn busy(self) -> bool {
         !matches!(self, Self::Idle | Self::Failed)
     }
+    /// What the phase means to whoever is wearing the sensor. The panel prints
+    /// this rather than the variant name: `Inspecting` and `Stopping` name the
+    /// worker's state, not what the player is waiting for.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Idle => "Not connected",
+            Self::Scanning => "Looking for devices…",
+            Self::Inspecting => "Reading device configuration…",
+            Self::Tracking => "Connected · tracking",
+            Self::Operating => "Applying a device operation…",
+            Self::Stopping => "Finishing…",
+            Self::Failed => "Device worker unavailable",
+        }
+    }
 }
 #[derive(Clone, Default)]
 pub struct View {

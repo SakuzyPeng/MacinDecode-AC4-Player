@@ -14,6 +14,9 @@ enum Tab {
     Diagnostics,
 }
 pub struct Panel {
+    /// Whether the device window is showing. The audio settings keep one row;
+    /// everything else lives behind this.
+    open: bool,
     tab: Tab,
     rate: u32,
     format: u16,
@@ -27,6 +30,7 @@ pub struct Panel {
 impl Default for Panel {
     fn default() -> Self {
         Self {
+            open: false,
             tab: Tab::Tracking,
             rate: 100,
             format: 0x84,
@@ -43,7 +47,113 @@ impl Panel {
     fn send(&mut self, service: &Service, command: Command) {
         self.error = service.send(command).err();
     }
-    pub fn draw(
+    /// Whether the device window is showing, so the coordinator can skip the
+    /// settings clone a closed window would never read.
+    pub const fn is_open(&self) -> bool {
+        self.open
+    }
+    /// The one row the audio settings keep: what the sensor is doing, the way
+    /// into the rest, and the button worth reaching for without opening it.
+    ///
+    /// Reports whether the listening direction was asked to be recentred.
+    pub fn draw_summary(
+        &mut self,
+        ui: &mut egui::Ui,
+        head: &HeadSnapshot,
+        service: &Service,
+        enabled: bool,
+    ) -> bool {
+        let view = service.view();
+        if !enabled {
+            ui.label("Choose software binaural or Windows object output to track a sensor.");
+        }
+        ui.label(head.status.label());
+        // The head status already says what is being heard, so the phase earns
+        // a line only where it says something that one cannot: the rate it is
+        // arriving at, or work in progress.
+        match view.phase {
+            Phase::Tracking => {
+                if let Some(snapshot) = &view.snapshot {
+                    ui.colored_label(
+                        phase_tone(view.phase),
+                        format!("{:.0} Hz", snapshot.status.actual_rate_hz),
+                    );
+                }
+            }
+            Phase::Idle => {}
+            phase => {
+                ui.colored_label(phase_tone(phase), phase.label());
+            }
+        }
+        let mut recenter = false;
+        ui.horizontal(|ui| {
+            if ui.button("Device panel…").clicked() {
+                self.open = true;
+            }
+            recenter = ui
+                .add_enabled(
+                    matches!(head.status, crate::head_tracking::HeadStatus::BridgeActive),
+                    egui::Button::new("Recenter listening direction"),
+                )
+                .clicked();
+        });
+        if let Some(error) = self.error.as_ref().or(view.error.as_ref()) {
+            ui.colored_label(crate::theme::WARNING, error);
+        }
+        if view.phase.busy() {
+            ui.ctx().request_repaint_after(repaint_interval(view.phase));
+        }
+        recenter
+    }
+    /// The device panel, in a window of its own.
+    ///
+    /// Three tabs inside the audio settings' fixed 390 px had nowhere to go. A
+    /// viewport also lets the panel and the listener figure be watched at the
+    /// same time, which is what checking a mounting actually takes.
+    pub fn draw_window(
+        &mut self,
+        context: &egui::Context,
+        prefs: &mut Preferences,
+        head: &HeadSnapshot,
+        service: &Service,
+        enabled: bool,
+    ) -> bool {
+        if !self.open {
+            return false;
+        }
+        let mut recenter = false;
+        let remains_open = context.show_viewport_immediate(
+            egui::ViewportId::from_hash_of("posebridge-device"),
+            egui::ViewportBuilder::default()
+                .with_title("MacinDecode AC-4 PoseBridge")
+                .with_icon(crate::app_icon::load())
+                .with_inner_size([520.0, 580.0])
+                .with_min_inner_size([420.0, 380.0]),
+            |root, _class| {
+                let close_requested = root.ctx().input(|input| input.viewport().close_requested());
+                egui::CentralPanel::default()
+                    .frame(
+                        egui::Frame::NONE
+                            .fill(crate::theme::BACKGROUND)
+                            .inner_margin(egui::Margin::same(22)),
+                    )
+                    .show(root, |ui| {
+                        recenter = self.contents(ui, prefs, head, service, enabled);
+                    });
+                !close_requested
+            },
+        );
+        self.open = remains_open;
+        // The window is an immediate viewport, so it is only redrawn when the
+        // root is. Ask the root directly rather than rely on a child request
+        // reaching it.
+        let view = service.view();
+        if view.phase.busy() || view.magnetic.is_some() {
+            context.request_repaint_after(repaint_interval(view.phase));
+        }
+        recenter
+    }
+    fn contents(
         &mut self,
         ui: &mut egui::Ui,
         prefs: &mut Preferences,
@@ -60,8 +170,6 @@ impl Panel {
         let mut recenter = false;
         egui::ScrollArea::vertical()
             .id_salt(match self.tab { Tab::Tracking => "pose-tracking", Tab::Device => "pose-device", Tab::Diagnostics => "pose-diagnostics" })
-            .min_scrolled_height(320.0)
-            .max_height(430.0)
             .auto_shrink([false, false])
             .show(ui,|ui| {
             if !enabled { ui.label("Choose software binaural or Windows object output to track a sensor."); }
@@ -95,7 +203,7 @@ impl Panel {
             }
         });
         if view.phase.busy() || view.magnetic.is_some() {
-            ui.ctx().request_repaint_after(Duration::from_millis(100));
+            ui.ctx().request_repaint_after(repaint_interval(view.phase));
         }
         recenter
     }
@@ -114,7 +222,7 @@ impl Panel {
         } else {
             prefs.device.name.as_str()
         });
-        ui.label(format!("{:?}", view.phase));
+        ui.colored_label(phase_tone(view.phase), view.phase.label());
         if view.phase == Phase::Tracking {
             if ui.button("Disconnect").clicked() {
                 self.send(service, Command::Stop);
@@ -222,7 +330,32 @@ impl Panel {
             }
         }
         ui.separator();
-        ui.label("Device controls · disconnect tracking before changing configuration");
+        // Collapsed by default: everything below writes the sensor, and none of
+        // it is on the way to hearing anything. Choosing a device and
+        // connecting is what this page is for.
+        egui::CollapsingHeader::new("Device configuration")
+            .default_open(false)
+            .show(ui, |ui| {
+                self.device_configuration(ui, prefs, service, view);
+            });
+    }
+    /// The half of the device page that writes the sensor.
+    ///
+    /// Split out so the collapsed header above can hold it whole, and so
+    /// `device()` is about choosing a device again.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one block groups every explicit device write"
+    )]
+    fn device_configuration(
+        &mut self,
+        ui: &mut egui::Ui,
+        prefs: &mut Preferences,
+        service: &Service,
+        view: &View,
+    ) {
+        let editable = !view.phase.busy() && view.magnetic.is_none();
+        ui.label("Disconnect tracking before changing configuration");
         let device_valid = configuration(&prefs.device, false).is_ok();
         ui.add_enabled_ui(editable && device_valid,|ui| {
             if ui.button("Read device configuration").clicked() {self.send(service,Command::Inspect(prefs.device.clone()));}
@@ -254,9 +387,31 @@ impl Panel {
                 if ui.button("Apply algorithm").clicked() {self.confirmation=Some((prefs.device.clone(),pb::DeviceCommand::Algorithm{mode:
                     if self.six_axis {pb::AlgorithmMode::SixAxis}else{pb::AlgorithmMode::NineAxis}}));}
             });
-            for command in [pb::DeviceCommand::ZeroYaw,pb::DeviceCommand::AngleReference,pb::DeviceCommand::AccelCalibrate,
-                pb::DeviceCommand::MagStart,pb::DeviceCommand::Save,pb::DeviceCommand::ResetDefaults] {
-                if ui.button(command_label(&command)).clicked() {self.confirmation=Some((prefs.device.clone(),command));}
+            // Two groups rather than six equal buttons: "restore defaults and
+            // save" and "calibrate the accelerometer" were the same weight on
+            // screen, and only one of them is undoable by disconnecting.
+            ui.separator();
+            ui.label("Operations the sensor is not asked to save");
+            for command in [
+                pb::DeviceCommand::ZeroYaw,
+                pb::DeviceCommand::AccelCalibrate,
+                pb::DeviceCommand::MagStart,
+            ] {
+                if ui.button(command_label(&command)).clicked() {
+                    self.confirmation = Some((prefs.device.clone(), command));
+                }
+            }
+            ui.separator();
+            ui.label("Operations that write the sensor's saved settings");
+            for command in [
+                pb::DeviceCommand::AngleReference,
+                pb::DeviceCommand::Save,
+                pb::DeviceCommand::ResetDefaults,
+            ] {
+                let label = egui::RichText::new(command_label(&command)).color(crate::theme::WARNING);
+                if ui.button(label).clicked() {
+                    self.confirmation = Some((prefs.device.clone(), command));
+                }
             }
             ui.small("Listening Recenter only changes the player. Device operations can change the sensor's reference.");
         });
@@ -304,6 +459,23 @@ impl Panel {
             if let Some(error)=self.error.as_ref().or(view.error.as_ref()) {ui.label(error);}
             if ui.button("Return to player").clicked() {self.closing=false;}
         });
+    }
+}
+/// A tracking sensor is read as fast as the panel can draw it; a scan or a
+/// write only has to look alive.
+fn repaint_interval(phase: Phase) -> Duration {
+    if phase == Phase::Tracking {
+        Duration::from_millis(33)
+    } else {
+        Duration::from_millis(100)
+    }
+}
+fn phase_tone(phase: Phase) -> egui::Color32 {
+    match phase {
+        Phase::Failed => crate::theme::WARNING,
+        Phase::Tracking => crate::theme::SUCCESS,
+        Phase::Idle => crate::theme::MUTED,
+        _ => crate::theme::TEXT,
     }
 }
 fn axis_name(axis: i8) -> &'static str {
@@ -507,8 +679,10 @@ mod tests {
         assert!(output.viewport_commands.is_empty());
         assert!(!panel.closing);
     }
+    /// The window this panel now owns sizes itself, so what is worth pinning is
+    /// the module's own claim: drawing any tab, repeatedly, issues no command.
     #[test]
-    fn device_page_expands_a_short_window_without_accessing_hardware() {
+    fn drawing_the_device_page_never_accesses_hardware() {
         let context = egui::Context::default();
         let service = Service::new();
         let mut panel = Panel {
@@ -528,15 +702,14 @@ mod tests {
                     ..Default::default()
                 },
                 |root| {
-                    let window = egui::Window::new("Short audio window")
-                        .resizable(false)
-                        .default_height(160.)
-                        .default_width(390.)
+                    let window = egui::Window::new("Device panel")
+                        .default_height(560.)
+                        .default_width(520.)
                         .show(root.ctx(), |ui| {
                             if frame == 0 {
-                                ui.label("Previous short page");
+                                ui.label("Previous page");
                             } else {
-                                panel.draw(
+                                panel.contents(
                                     ui,
                                     &mut prefs,
                                     &HeadSnapshot::default(),
@@ -551,8 +724,44 @@ mod tests {
             );
             output.textures_delta.clear();
         }
-        assert!(height > 330., "device controls remained cramped: {height}");
+        assert!(height > 0., "the device page drew nothing");
         assert!(service.view().snapshot.is_none());
         assert_eq!(prefs.device.mounting, [0; 3]);
+    }
+    /// The audio settings keep one row, and a row that reaches a device would
+    /// put hardware behind simply opening the settings window.
+    #[test]
+    fn the_settings_summary_opens_nothing_on_its_own() {
+        let context = egui::Context::default();
+        let service = Service::new();
+        let mut panel = Panel::default();
+        assert!(!panel.open);
+        let mut recentred = None;
+        let mut output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1000., 760.),
+                )),
+                ..Default::default()
+            },
+            |root| {
+                let window = egui::Window::new("Audio settings").show(root.ctx(), |ui| {
+                    panel.draw_summary(ui, &HeadSnapshot::default(), &service, true)
+                });
+                recentred = window.and_then(|window| window.inner);
+            },
+        );
+        output.textures_delta.clear();
+        assert_eq!(
+            recentred,
+            Some(false),
+            "the row drew, and asked for nothing"
+        );
+        assert!(
+            !panel.open,
+            "the summary row opened the device window by itself"
+        );
+        assert!(service.view().snapshot.is_none());
     }
 }

@@ -467,10 +467,15 @@ separates chain latency from head-tracking response.
 Choose **Head → Head orientation → PoseBridge sensor**. The player embeds the device library;
 no separate bridge application is needed. BWT901BLECL5.0 BLE and USB inputs are supported on macOS and Windows.
 
-1. Open **Device**, select Bluetooth LE or USB serial, Scan and choose the device.
+The `Head` page then keeps one summary row: the orientation status, the rate samples are arriving at
+once connected, and Recenter listening direction. Everything else lives in the window **Device
+panel…** opens. That window resizes freely and can sit beside the 3D scene — which is what checking a
+mounting takes, since it means turning your head and watching whether the figure nods with you.
+
+1. In the device window, open **Device**, select Bluetooth LE or USB serial, Scan and choose the device.
 2. Choose the sensor axes pointing toward head Right, Forward and Up. They must form a right-handed basis; check all three directions while wearing it.
 3. Connect. The player reads the current format without changing device rate, output or calibration. Connection is manual on each application launch.
-4. Use **Tracking → Recenter listening direction**. Initial connection and reconnection preserve the presented heading.
+4. Use Recenter listening direction, on the `Head` summary row or on the window's **Tracking** page. Initial connection and reconnection preserve the presented heading.
 
 The **WT901BLE68 (BWT901BLECL5.0)** used here has the following recorded mounting, dated 2026-09-20:
 
@@ -495,7 +500,9 @@ Expired input freezes the presented orientation. Diagnostics distinguishes sampl
 Device clocks are unsynchronized; age excludes sensor, USB/BLE and audio delay. Faster polling does not remove BLE batching.
 
 Disconnect before configuring rate, timestamp output, six/nine-axis fusion, zeroing, calibration, saving or defaults;
-Connect again manually afterwards. Zero yaw requires six-axis mode. Device angle reference includes SAVE; restoring defaults also saves.
+Connect again manually afterwards. Those writes sit inside the **Device configuration** section of the
+**Device** page, collapsed by default and split into operations the sensor is not asked to save and
+operations that write its saved settings, the latter marked in the warning colour. Zero yaw requires six-axis mode. Device angle reference includes SAVE; restoring defaults also saves.
 Explicitly end magnetic calibration before quitting. The quit guard also runs while the window is minimized or covered and restores it to show the prompt.
 Sent/readback/completion results do not establish calibration accuracy or persistence.
 On macOS, run the packaged `.app` with its Bluetooth usage description and allow access on the first scan/connection.

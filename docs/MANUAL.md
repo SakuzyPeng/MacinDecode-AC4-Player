@@ -377,10 +377,15 @@ profile 之上还有两个旋钮：
 在 **Head → Head orientation → PoseBridge sensor** 选择内置设备来源，不需要安装或启动独立桥接程序。
 支持 BWT901BLECL5.0，macOS/Windows 均可使用 BLE 或 USB。
 
-1. 在 **Device** 页选择 Bluetooth LE／USB serial，点击 Scan，选择设备。
+选好来源后，`Head` 页只保留一行摘要：当前朝向状态、连接后的实际采样率，以及 Recenter listening
+direction。其余操作都在 **Device panel…** 打开的独立窗口里。该窗口可自由缩放，也可以和 3D 场景
+并排摆着——核对安装轴时正需要一边转头一边看小人有没有跟着点头。
+
+1. 在设备窗口的 **Device** 页选择 Bluetooth LE／USB serial，点击 Scan，选择设备。
 2. 选择传感器指向头部 Right／Forward／Up 的三个轴，必须组成右手基底；佩戴后检查三轴方向。
 3. 点击 Connect。播放器只读检查当前输出格式，不自动改变速率、格式或校准；下次启动仍需手动连接。
-4. 在 **Tracking** 页使用 Recenter listening direction 回正。首次连接和重连保持当前听音朝向。
+4. 用 Recenter listening direction 回正，`Head` 页的摘要行和设备窗口的 **Tracking** 页都有。
+   首次连接和重连保持当前听音朝向。
 
 本次使用的 **WT901BLE68（BWT901BLECL5.0）**，当前安装方向记录如下（2026-09-20）：
 
@@ -404,7 +409,9 @@ Smoothing 默认 10 ms，可在 0–50 ms 调整；Freeze after 默认 100 ms，
 数据过期时冻结当前朝向；Diagnostics 分开显示采样、主机交付与接收后年龄。
 设备时间未同步，年龄不包含传感器、USB/BLE 和音频延迟。BLE 批量交付不会因为增加轮询频率而消失。
 
-修改设备时先 Disconnect。支持回传率、时间戳输出、六/九轴、归零、校准、保存和恢复默认；
+修改设备时先 Disconnect。写入设备的操作收在 **Device** 页的 **Device configuration** 折叠区内，
+默认收起；区内分成"传感器不会保存的操作"和"会写入传感器保存设置的操作"两组，后者以警示色标出。
+支持回传率、时间戳输出、六/九轴、归零、校准、保存和恢复默认；
 操作结束后手动 Connect。设备归零要求六轴模式；角度参考命令包含 SAVE，恢复默认也保存。
 磁校准需要显式结束；未结束时退出会提示处理。窗口最小化或被遮挡时同样拦截退出，并恢复窗口显示提示。
 校准命令发送、回读和完成状态不代表精度或掉电保存已验证。

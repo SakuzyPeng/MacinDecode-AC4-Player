@@ -1831,9 +1831,8 @@ impl PlayerApp {
                                 if settings.head_source
                                     == crate::head_tracking::HeadSource::PoseBridge
                                 {
-                                    recenter |= self.bridge_ui.draw(
+                                    recenter |= self.bridge_ui.draw_summary(
                                         ui,
-                                        &mut settings.posebridge,
                                         &head,
                                         self.output.posebridge(),
                                         matches!(
@@ -1855,8 +1854,51 @@ impl PlayerApp {
             self.preferences.manual_head = angles;
         }
         if recenter {
-            self.output.recenter_head();
+            self.recenter_listener();
+        }
+    }
+
+    /// Recentre the listener, from wherever it was asked for.
+    ///
+    /// A manual recentre *is* a manual pose of zero, so the stored pose follows
+    /// it. A bridge recentre re-references the sensor and leaves the manual
+    /// pose alone: zeroing it here would quietly discard the angles someone
+    /// typed before a sensor was ever connected.
+    fn recenter_listener(&mut self) {
+        self.output.recenter_head();
+        if self.output.settings().head_source != crate::head_tracking::HeadSource::PoseBridge {
             self.preferences.manual_head = [0.0; 3];
+        }
+    }
+
+    /// The PoseBridge device panel, in a window of its own.
+    ///
+    /// It used to be a third tab bar inside the `Head` page of a fixed-width
+    /// settings window. Its own viewport gives the device list and the
+    /// diagnostics room, and lets the listener figure stay visible while a
+    /// mounting is being checked — which is the only way to see that nodding
+    /// reads as pitch rather than roll.
+    #[cfg(posebridge_input)]
+    fn draw_posebridge_window(&mut self, context: &egui::Context) {
+        if !self.bridge_ui.is_open() {
+            return;
+        }
+        let mut settings = self.output.settings().clone();
+        let head = self.output.head_snapshot();
+        let enabled = matches!(
+            settings.mode.resolved(),
+            SpatialBackendKind::SafBinaural | SpatialBackendKind::WindowsSpatialAudio
+        );
+        let recenter = self.bridge_ui.draw_window(
+            context,
+            &mut settings.posebridge,
+            &head,
+            self.output.posebridge(),
+            enabled,
+        );
+        self.change_output_settings(settings, context);
+        if recenter {
+            self.recenter_listener();
         }
     }
 
@@ -3676,6 +3718,8 @@ impl eframe::App for PlayerApp {
         self.draw_bitstream_details_window(&context);
         self.draw_diagnostics_window(&context);
         self.draw_output_settings(&context);
+        #[cfg(posebridge_input)]
+        self.draw_posebridge_window(&context);
         #[cfg(posebridge_input)]
         self.bridge_ui
             .draw_close_prompt(&context, self.output.posebridge());
