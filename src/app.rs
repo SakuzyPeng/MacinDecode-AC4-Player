@@ -3614,6 +3614,9 @@ impl eframe::App for PlayerApp {
     /// eframe calls this immediately before every `ui` as well, so the visible
     /// path keeps the order it always had.
     fn logic(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
+        #[cfg(posebridge_input)]
+        self.bridge_ui
+            .guard_close(context, &self.output.posebridge().view());
         // eframe calls `logic` immediately before every `ui`, and *only* `logic`
         // while the window is hidden, so what the flag carries into this call is
         // exactly "was anything drawn since the last one". Reading it beats
@@ -3675,7 +3678,7 @@ impl eframe::App for PlayerApp {
         self.draw_output_settings(&context);
         #[cfg(posebridge_input)]
         self.bridge_ui
-            .guard_close(&context, self.output.posebridge());
+            .draw_close_prompt(&context, self.output.posebridge());
         self.draw_visual_settings(&context);
         self.about.draw(&context);
         if let Some(smoke) = &mut self.smoke {

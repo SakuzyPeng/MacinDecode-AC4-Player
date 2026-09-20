@@ -496,7 +496,8 @@ Device clocks are unsynchronized; age excludes sensor, USB/BLE and audio delay. 
 
 Disconnect before configuring rate, timestamp output, six/nine-axis fusion, zeroing, calibration, saving or defaults;
 Connect again manually afterwards. Zero yaw requires six-axis mode. Device angle reference includes SAVE; restoring defaults also saves.
-Explicitly end magnetic calibration before quitting. Sent/readback/completion results do not establish calibration accuracy or persistence.
+Explicitly end magnetic calibration before quitting. The quit guard also runs while the window is minimized or covered and restores it to show the prompt.
+Sent/readback/completion results do not establish calibration accuracy or persistence.
 On macOS, run the packaged `.app` with its Bluetooth usage description and allow access on the first scan/connection.
 
 

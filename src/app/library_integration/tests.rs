@@ -34,6 +34,38 @@ fn settle(app: &mut PlayerApp, context: &egui::Context) {
     assert!(app.library.error.is_none(), "{:?}", app.library.error);
 }
 
+#[cfg(posebridge_input)]
+#[test]
+fn logic_only_updates_finish_a_deferred_device_quit() {
+    let directory = tempfile::tempdir().unwrap();
+    let (mut app, context) = open(directory.path());
+    let mut input = egui::RawInput::default();
+    let viewport = input.viewports.get_mut(&egui::ViewportId::ROOT).unwrap();
+    viewport.minimized = Some(true);
+    viewport.events.push(egui::ViewportEvent::Close);
+    let view = crate::posebridge::service::View {
+        phase: crate::posebridge::service::Phase::Operating,
+        ..Default::default()
+    };
+    let output = context.run_logic(&input, |ctx| app.bridge_ui.guard_close(ctx, &view));
+    assert!(
+        output.viewport_commands[&egui::ViewportId::ROOT]
+            .contains(&egui::ViewportCommand::CancelClose)
+    );
+
+    input
+        .viewports
+        .get_mut(&egui::ViewportId::ROOT)
+        .unwrap()
+        .events
+        .clear();
+    let mut frame = eframe::Frame::_new_kittest();
+    let output = context.run_logic(&input, |ctx| eframe::App::logic(&mut app, ctx, &mut frame));
+    assert!(
+        output.viewport_commands[&egui::ViewportId::ROOT].contains(&egui::ViewportCommand::Close)
+    );
+}
+
 fn painted_text(output: &egui::FullOutput) -> Vec<(String, egui::Rect, egui::Rect)> {
     fn visit(
         shape: &egui::Shape,

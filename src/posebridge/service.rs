@@ -240,6 +240,13 @@ fn observe_magnetic(view: &mut View, snapshot: &pb::Snapshot, device: Option<&De
         }
     }
 }
+fn start_acquisition(controller: &mut pb::Controller, config: pb::Config) -> pb::Result<()> {
+    // Complete is published before PoseBridge's task handle finishes. Retire the
+    // inspection on this device worker before set_config can reject it as Busy.
+    controller.stop()?;
+    controller.set_config(config)?;
+    controller.start()
+}
 #[allow(
     clippy::too_many_lines,
     reason = "One worker serializes the complete device lifecycle"
@@ -370,8 +377,7 @@ fn worker(
                     }
                     let mut config = configuration(&d, true)?;
                     config.pose_input = observed_input(&d, &snapshot.descriptor.device)?;
-                    c.set_config(config).map_err(|e| e.to_string())?;
-                    c.start().map_err(|e| e.to_string())
+                    start_acquisition(c, config).map_err(|e| e.to_string())
                 })();
                 pending_connect = None;
                 if let Err(error) = result {
@@ -545,6 +551,40 @@ mod lifecycle_tests {
             assert!(Instant::now() < deadline, "device worker timed out");
             thread::sleep(Duration::from_millis(5));
         }
+    }
+    #[test]
+    fn acquisition_handoff_retires_a_still_running_controller_task() {
+        let mut controller = pb::Controller::new().unwrap();
+        controller.start().unwrap();
+        until(|| controller.latest_pose().is_some_and(|p| p.fresh));
+        let previous = controller.latest_pose().unwrap().instance_id;
+        let config = pb::Config {
+            source: pb::Source::Simulate {
+                pattern: pb::Pattern::Fixed,
+                euler_deg: [45., 10., 20.],
+                rate_hz: 100,
+                sample_clock: false,
+            },
+            ..pb::Config::default()
+        };
+        // Keep the old task alive deterministically to exercise the lifecycle
+        // boundary that a completed inspection's snapshot alone cannot guarantee.
+        assert!(matches!(
+            controller.set_config(config.clone()),
+            Err(pb::Error::Busy)
+        ));
+        start_acquisition(&mut controller, config).unwrap();
+        until(|| {
+            controller
+                .latest_pose()
+                .is_some_and(|p| p.fresh && p.instance_id != previous)
+        });
+        let pose = controller.latest_pose().unwrap();
+        for (actual, expected) in pose.euler_deg.into_iter().zip([45., 10., 20.]) {
+            assert!((actual - expected).abs() < 1e-6);
+        }
+        controller.stop().unwrap();
+        assert!(!controller.latest_pose().unwrap().fresh);
     }
     #[test]
     fn simulator_worker_stops_clears_pose_and_requires_explicit_restart() {

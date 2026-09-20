@@ -262,12 +262,17 @@ impl Panel {
         });
         operation_result(ui, view);
     }
-    pub fn guard_close(&mut self, context: &egui::Context, service: &Service) {
-        let view = service.view();
+    /// Runs from [`eframe::App::logic`], including when eframe skips the entire UI pass.
+    pub fn guard_close(&mut self, context: &egui::Context, view: &View) {
         let guarded =
             view.magnetic.is_some() || matches!(view.phase, Phase::Operating | Phase::Stopping);
         if context.input(|i| i.viewport().close_requested()) && guarded && !self.allow_close {
             context.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            if !self.closing {
+                context.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                context.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                context.send_viewport_cmd(egui::ViewportCommand::Focus);
+            }
             self.closing = true;
         }
         if !self.closing {
@@ -279,6 +284,13 @@ impl Panel {
             context.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
+        context.request_repaint_after(Duration::from_millis(100));
+    }
+    pub fn draw_close_prompt(&mut self, context: &egui::Context, service: &Service) {
+        if !self.closing {
+            return;
+        }
+        let view = service.view();
         egui::Window::new("Finish device operation before quitting").collapsible(false).show(context,|ui| {
             if let Some(device)=&view.magnetic {
                 ui.label("Magnetic calibration may still be active. End it before quitting; this does not save calibration.");
@@ -292,7 +304,6 @@ impl Panel {
             if let Some(error)=self.error.as_ref().or(view.error.as_ref()) {ui.label(error);}
             if ui.button("Return to player").clicked() {self.closing=false;}
         });
-        context.request_repaint_after(Duration::from_millis(100));
     }
 }
 fn axis_name(axis: i8) -> &'static str {
@@ -433,6 +444,69 @@ fn diagnostics(ui: &mut egui::Ui, view: &View, service: &Service) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn hidden_close_is_guarded_until_device_work_and_magnetic_calibration_end() {
+        for (minimized, occluded) in [(true, false), (false, true)] {
+            let context = egui::Context::default();
+            let mut panel = Panel::default();
+            let mut input = egui::RawInput::default();
+            let viewport = input.viewports.get_mut(&egui::ViewportId::ROOT).unwrap();
+            viewport.minimized = Some(minimized);
+            viewport.occluded = Some(occluded);
+            viewport.events.push(egui::ViewportEvent::Close);
+            let mut view = View {
+                phase: Phase::Operating,
+                ..View::default()
+            };
+            // No UI pass runs: only viewport state is available to the close guard.
+            let output = context.run_logic(&input, |ctx| panel.guard_close(ctx, &view));
+            let commands = &output.viewport_commands[&egui::ViewportId::ROOT];
+            assert!(commands.contains(&egui::ViewportCommand::CancelClose));
+            assert!(commands.contains(&egui::ViewportCommand::Minimized(false)));
+            assert!(commands.contains(&egui::ViewportCommand::Visible(true)));
+            assert!(commands.contains(&egui::ViewportCommand::Focus));
+            assert!(panel.closing);
+
+            input
+                .viewports
+                .get_mut(&egui::ViewportId::ROOT)
+                .unwrap()
+                .events
+                .clear();
+            // Completing/cancelling a write is insufficient if magnetic calibration persists.
+            view.phase = Phase::Idle;
+            view.magnetic = Some(Device::default());
+            let output = context.run_logic(&input, |ctx| panel.guard_close(ctx, &view));
+            assert!(output.viewport_commands.is_empty());
+            assert!(panel.closing);
+
+            view.phase = Phase::Stopping;
+            view.magnetic = None;
+            let output = context.run_logic(&input, |ctx| panel.guard_close(ctx, &view));
+            assert!(output.viewport_commands.is_empty());
+            assert!(panel.closing);
+
+            view.phase = Phase::Idle;
+            let output = context.run_logic(&input, |ctx| panel.guard_close(ctx, &view));
+            assert!(
+                output.viewport_commands[&egui::ViewportId::ROOT]
+                    .contains(&egui::ViewportCommand::Close)
+            );
+            assert!(!panel.closing);
+        }
+    }
+    #[test]
+    fn idle_close_does_not_restore_or_block_a_hidden_window() {
+        let context = egui::Context::default();
+        let mut panel = Panel::default();
+        let mut input = egui::RawInput::default();
+        let viewport = input.viewports.get_mut(&egui::ViewportId::ROOT).unwrap();
+        viewport.minimized = Some(true);
+        viewport.events.push(egui::ViewportEvent::Close);
+        let output = context.run_logic(&input, |ctx| panel.guard_close(ctx, &View::default()));
+        assert!(output.viewport_commands.is_empty());
+        assert!(!panel.closing);
+    }
     #[test]
     fn device_page_expands_a_short_window_without_accessing_hardware() {
         let context = egui::Context::default();
