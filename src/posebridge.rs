@@ -104,6 +104,8 @@ impl Preferences {
 
 #[cfg(any(posebridge_input, test))]
 mod consumption;
+#[cfg(any(posebridge_input, test))]
+pub mod mounting;
 #[cfg(posebridge_input)]
 pub use consumption::{Consumer, Sample};
 

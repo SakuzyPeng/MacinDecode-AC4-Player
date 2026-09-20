@@ -1,10 +1,30 @@
 //! UI issues explicit commands; opening this panel never accesses hardware.
 use super::service::{Command, Phase, Service, View, configuration};
-use super::{Device, Input, Preferences, Transport};
-use crate::head_tracking::HeadSnapshot;
+use super::{Device, Input, Preferences, Transport, mounting};
+use crate::head_tracking::{HeadSnapshot, Quaternion};
 use eframe::egui;
 use posebridge_core as pb;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// How long one motion of the mounting check is watched for. Long enough to
+/// look up and come back without hurrying, short enough not to be a pose.
+const CAPTURE: Duration = Duration::from_secs(4);
+
+/// A mounting check in progress.
+#[derive(Default)]
+struct Check {
+    calibration: mounting::Calibration,
+    /// The motion being captured, the pose it began from, and when it ends.
+    capturing: Option<(mounting::Motion, Quaternion, Instant)>,
+    /// The largest turn seen so far in this capture. A motion returns to where
+    /// it started, so the end pose says nothing and the peak says everything.
+    peak: Option<mounting::Observation>,
+    /// What each motion came out as, so a wrong mounting can be shown as what
+    /// happened rather than only as a verdict.
+    results: [Option<mounting::Observation>; 3],
+    /// Why the last motion was not counted, until the next one starts.
+    refused: Option<&'static str>,
+}
 
 #[derive(Default, PartialEq, Eq)]
 enum Tab {
@@ -26,6 +46,7 @@ pub struct Panel {
     format: u16,
     six_axis: bool,
     confirmation: Option<(Device, pb::DeviceCommand)>,
+    check: Check,
     error: Option<String>,
     observation: Option<(String, Option<u64>)>,
     closing: bool,
@@ -40,6 +61,7 @@ impl Default for Panel {
             format: 0x84,
             six_axis: false,
             confirmation: None,
+            check: Check::default(),
             error: None,
             observation: None,
             closing: false,
@@ -172,6 +194,10 @@ impl Panel {
             ui.selectable_value(&mut self.tab, Tab::Diagnostics, "Diagnostics");
         });
         let mut recenter = false;
+        // Whatever tab is showing, and whether or not its section is expanded:
+        // a capture left behind still has to end, or its motion holds every
+        // other Start disabled.
+        self.advance_check(head, prefs.device.mounting);
         egui::ScrollArea::vertical()
             .id_salt(match self.tab { Tab::Tracking => "pose-tracking", Tab::Device => "pose-device", Tab::Diagnostics => "pose-diagnostics" })
             .auto_shrink([false, false])
@@ -189,6 +215,7 @@ impl Panel {
                     ui.add(egui::Slider::new(&mut prefs.smoothing_ms,0.0..=50.0).text("Smoothing · ms"));
                     ui.add(egui::Slider::new(&mut prefs.max_age_ms,50..=500).text("Freeze after · ms"));
                     ui.small("Age starts at host reception. BLE may deliver several samples together.");
+                    self.mounting_check(ui, prefs, head);
                 }
                 Tab::Device => self.device(ui,prefs,service,&view,enabled),
                 Tab::Diagnostics => diagnostics(ui,&view,service),
@@ -211,6 +238,167 @@ impl Panel {
         }
         recenter
     }
+    /// Check the mounting by moving, rather than by reading three combo boxes
+    /// back and hoping.
+    ///
+    /// Each motion turns about one head axis, so whichever canonical axis the
+    /// pose turns about names the entry holding the sensor axis that motion
+    /// really used. Three motions name all three entries; see
+    /// [`super::mounting`] for why that is the whole derivation.
+    fn mounting_check(&mut self, ui: &mut egui::Ui, prefs: &mut Preferences, head: &HeadSnapshot) {
+        ui.separator();
+        egui::CollapsingHeader::new("Check the mounting")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.small(
+                    "Which sensor axis points where cannot be read off the three combo boxes. Move, and each motion says which one it used.",
+                );
+                if !matches!(head.status, crate::head_tracking::HeadStatus::BridgeActive) {
+                    ui.label("Connect a sensor and track it to check its mounting.");
+                    return;
+                }
+                for motion in mounting::Motion::ALL {
+                    self.check_row(ui, motion, head);
+                }
+                if let Some(refused) = self.check.refused {
+                    ui.colored_label(crate::theme::WARNING, refused);
+                }
+                self.check_result(ui, prefs);
+            });
+    }
+
+    /// One motion: the button that starts it, and what it came out as.
+    fn check_row(&mut self, ui: &mut egui::Ui, motion: mounting::Motion, head: &HeadSnapshot) {
+        let capturing = self
+            .check
+            .capturing
+            .filter(|(current, ..)| *current == motion);
+        ui.horizontal(|ui| {
+            ui.label(motion.label());
+            if let Some((_, _, until)) = capturing {
+                if ui.button("Stop").clicked() {
+                    self.check.capturing = None;
+                }
+                let left = until
+                    .saturating_duration_since(Instant::now())
+                    .as_secs_f32();
+                ui.label(match self.check.peak {
+                    Some(peak) => format!(
+                        "{left:.1} s · {:.0}° about {} · {:.0}% clean",
+                        peak.degrees,
+                        mounting::Motion::angle_of(peak.axis),
+                        peak.purity * 100.0,
+                    ),
+                    None => format!("{left:.1} s"),
+                });
+            } else if ui
+                .add_enabled(self.check.capturing.is_none(), egui::Button::new("Start"))
+                .clicked()
+            {
+                self.check.capturing = Some((motion, head.pose, Instant::now() + CAPTURE));
+                self.check.peak = None;
+                self.check.refused = None;
+            }
+        });
+        if capturing.is_some() {
+            ui.small(motion.instruction());
+            return;
+        }
+        let Some(result) = self.check.results[motion.axis()] else {
+            ui.small(motion.instruction());
+            return;
+        };
+        let angle = mounting::Motion::angle_of(result.axis);
+        let correct = result.axis == motion.axis() && result.positive;
+        ui.colored_label(
+            if correct {
+                crate::theme::SUCCESS
+            } else {
+                crate::theme::WARNING
+            },
+            if correct {
+                format!("Turned {angle}, as it should")
+            } else if result.axis == motion.axis() {
+                format!("Turned {angle} the other way — was the motion reversed?")
+            } else {
+                format!("Turned {angle}, not {}", motion.reads_as())
+            },
+        );
+    }
+
+    /// What the motions add up to, and the one place a mounting is offered.
+    fn check_result(&mut self, ui: &mut egui::Ui, prefs: &mut Preferences) {
+        ui.separator();
+        match self.check.calibration.resolve() {
+            Ok(resolved) if resolved == prefs.device.mounting => {
+                ui.colored_label(
+                    crate::theme::SUCCESS,
+                    "All three motions agree with this mounting.",
+                );
+            }
+            Ok(resolved) => {
+                ui.colored_label(
+                    crate::theme::WARNING,
+                    format!(
+                        "These motions describe {}.",
+                        mounting_words(resolved).join(" · ")
+                    ),
+                );
+                if ui.button("Use this mounting").clicked() {
+                    prefs.device.mounting = resolved;
+                    self.check = Check::default();
+                }
+                ui.small(
+                    "This changes the setting only. Disconnect and connect again for the sensor to be read with it.",
+                );
+            }
+            Err(reason) => {
+                ui.small(reason);
+            }
+        }
+    }
+
+    /// Advance a capture, and close it when its window is up.
+    ///
+    /// `mounting` is the one the sensor is being read with: the axis combo
+    /// boxes are disabled while tracking, so it cannot change mid-check.
+    fn advance_check(&mut self, head: &HeadSnapshot, mounting: [i8; 3]) {
+        let Some((motion, start, until)) = self.check.capturing else {
+            return;
+        };
+        // Losing the sensor mid-motion freezes the pose, and a frozen pose
+        // reads as a motion that stopped where it was.
+        if !matches!(head.status, crate::head_tracking::HeadStatus::BridgeActive) {
+            self.check.capturing = None;
+            self.check.peak = None;
+            self.check.refused = Some("Tracking stopped during that motion. Repeat it.");
+            return;
+        }
+        let observation = mounting::observe(start, head.pose);
+        if self
+            .check
+            .peak
+            .is_none_or(|peak| observation.degrees > peak.degrees)
+        {
+            self.check.peak = Some(observation);
+        }
+        if Instant::now() < until {
+            return;
+        }
+        self.check.capturing = None;
+        let Some(peak) = self.check.peak.take() else {
+            return;
+        };
+        self.check.results[motion.axis()] = Some(peak);
+        self.check.refused = (!self.check.calibration.record(mounting, motion, peak)).then(|| {
+            if peak.degrees < mounting::MINIMUM_DEGREES {
+                "That was too small to read. Move further and repeat it."
+            } else {
+                "That turned about more than one axis. Move about one at a time and repeat it."
+            }
+        });
+    }
+
     fn connection(
         &mut self,
         ui: &mut egui::Ui,
@@ -307,7 +495,7 @@ impl Panel {
                 egui::ComboBox::from_id_salt(("mount",index)).selected_text(format!("{label}: {}",axis_name(prefs.device.mounting[index])))
                     .show_ui(ui,|ui| {for axis in [-3,-2,-1,1,2,3] { ui.selectable_value(&mut prefs.device.mounting[index],axis,axis_name(axis)); }});
             }
-            ui.small("Select a right-handed mounting. Check all three directions while wearing the sensor.");
+            ui.small("Select a right-handed mounting. Once connected, the Tracking page checks all three by motion.");
             egui::ComboBox::from_id_salt("posebridge-input").selected_text(if prefs.device.input==Input::Automatic{"Read current stream format"}else{"Poll quaternion registers"})
                 .show_ui(ui,|ui| {
                     ui.selectable_value(&mut prefs.device.input,Input::Automatic,"Read current stream format");
@@ -481,6 +669,16 @@ fn phase_tone(phase: Phase) -> egui::Color32 {
         Phase::Idle => crate::theme::MUTED,
         _ => crate::theme::TEXT,
     }
+}
+/// A resolved mounting in the words its three combo boxes use.
+fn mounting_words(mounting: [i8; 3]) -> [String; 3] {
+    std::array::from_fn(|index| {
+        format!(
+            "{} {}",
+            mounting::AXIS_ORDER[index],
+            axis_name(mounting[index])
+        )
+    })
 }
 fn axis_name(axis: i8) -> &'static str {
     match axis {
@@ -732,6 +930,59 @@ mod tests {
         assert!(service.view().snapshot.is_none());
         assert_eq!(prefs.device.mounting, [0; 3]);
     }
+    /// The capture closes on its own window and records the turn it peaked at,
+    /// so three clean motions under a correct mounting agree with it. The poses
+    /// are constructed: no device is reached.
+    #[test]
+    fn three_captured_motions_resolve_the_mounting_they_were_made_under() {
+        let mounting = [-2, 1, 3];
+        let mut panel = Panel::default();
+        for motion in mounting::Motion::ALL {
+            let pose = Quaternion::from_euler(match motion {
+                mounting::Motion::Nod => [0., 40., 0.],
+                mounting::Motion::Shake => [40., 0., 0.],
+                mounting::Motion::Tilt => [0., 0., 40.],
+            });
+            // An elapsed window: the peak is taken before the clock is read, so
+            // one call captures this pose and closes the motion.
+            panel.check.capturing = Some((motion, Quaternion::default(), Instant::now()));
+            panel.check.peak = None;
+            panel.advance_check(
+                &HeadSnapshot {
+                    pose,
+                    status: crate::head_tracking::HeadStatus::BridgeActive,
+                },
+                mounting,
+            );
+            assert!(panel.check.capturing.is_none(), "{motion:?} did not close");
+            assert!(panel.check.refused.is_none(), "{motion:?} was refused");
+            assert!(panel.check.results[motion.axis()].is_some_and(|r| r.axis == motion.axis()));
+        }
+        assert_eq!(panel.check.calibration.resolve(), Ok(mounting));
+    }
+
+    /// A pose that has stopped arriving is frozen, and a frozen pose reads as a
+    /// motion that ended wherever it was when the samples stopped.
+    #[test]
+    fn losing_the_sensor_mid_motion_discards_it() {
+        let mut panel = Panel::default();
+        panel.check.capturing =
+            Some((mounting::Motion::Nod, Quaternion::default(), Instant::now()));
+        panel.advance_check(
+            &HeadSnapshot {
+                pose: Quaternion::from_euler([0., 40., 0.]),
+                status: crate::head_tracking::HeadStatus::BridgeFrozen,
+            },
+            [1, 2, 3],
+        );
+        assert!(panel.check.capturing.is_none());
+        assert!(panel.check.refused.is_some());
+        assert_eq!(
+            panel.check.calibration.resolve(),
+            Err("Perform all three motions.")
+        );
+    }
+
     /// The audio settings keep one row, and a row that reaches a device would
     /// put hardware behind simply opening the settings window.
     #[test]

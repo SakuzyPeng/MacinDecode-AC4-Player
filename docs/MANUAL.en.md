@@ -480,6 +480,20 @@ mounting takes, since it means turning your head and watching whether the figure
 Switching to another head orientation source or system spatial audio stops tracking and disables **Connect**
 in the open device window. Choose PoseBridge sensor and a supported playback mode again to reconnect manually.
 
+**Check the mounting by moving.** Once connected and tracking, the **Check the mounting** section on the
+`Tracking` page verifies the three axes without listening for them. Press **Start** for Nod, Shake and
+Tilt in turn; each gives a four-second window for one deliberate motion and a return — look up, turn
+left, tip toward your right shoulder. Each motion physically turns about exactly one head axis, so the
+axis it turns the pose about names the entry holding the sensor axis that motion really used, and three
+motions name all three entries.
+
+Three outcomes. All three agreeing with the current setting is reported as checked. A disagreement is
+reported as the mounting the motions describe, with **Use this mounting** to write it into the setting —
+the setting only, so Disconnect and Connect again for it to take effect. A motion under 20°, one that
+turned about more than one axis, one performed in the reverse direction (the three come out left-handed)
+and two motions landing on the same axis are each refused with the reason and repeated rather than
+averaged in. The check never writes anything to the sensor.
+
 The **WT901BLE68 (BWT901BLECL5.0)** used here has the following recorded mounting, dated 2026-09-20:
 
 | Device field | Sensor axis |
@@ -491,6 +505,7 @@ The **WT901BLE68 (BWT901BLECL5.0)** used here has the following recorded mountin
 Both saved BLE and USB profiles have been checked against this mapping. The player's `mounting` value is `[-2, 1, 3]`;
 the equivalent standalone PoseBridge CLI argument is `--mount=-y,+x,+z`.
 The initial `+X / +Y / +Z` identity mapping made nodding appear as sideways tilt in this setup; use the recorded mapping for this mounting.
+That is exactly the case **Check the mounting** above now names directly.
 Disconnect before changing the axes, then Connect and Recenter. This record applies to the device's current physical mounting;
 after remounting, check that nodding changes Pitch, sideways tilt changes Roll, and all three signs are correct. BLE and USB profiles are saved separately.
 
