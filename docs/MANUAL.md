@@ -387,6 +387,9 @@ direction。其余操作都在 **Device panel…** 打开的独立窗口里。�
 4. 用 Recenter listening direction 回正，`Head` 页的摘要行和设备窗口的 **Tracking** 页都有。
    首次连接和重连保持当前听音朝向。
 
+切换到其他头部朝向来源或系统空间音频时，停止采集，并禁用仍打开的设备窗口中的 **Connect**。
+重新选择 PoseBridge sensor 和支持追踪的播放模式后，再手动连接。
+
 本次使用的 **WT901BLE68（BWT901BLECL5.0）**，当前安装方向记录如下（2026-09-20）：
 
 | Device 页字段 | 传感器轴 |

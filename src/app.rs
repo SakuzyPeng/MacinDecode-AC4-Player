@@ -1871,7 +1871,7 @@ impl PlayerApp {
         }
     }
 
-    /// The PoseBridge device panel, in a window of its own.
+    /// The `PoseBridge` device panel, in a window of its own.
     ///
     /// It used to be a third tab bar inside the `Head` page of a fixed-width
     /// settings window. Its own viewport gives the device list and the
@@ -1885,10 +1885,12 @@ impl PlayerApp {
         }
         let mut settings = self.output.settings().clone();
         let head = self.output.head_snapshot();
-        let enabled = matches!(
-            settings.mode.resolved(),
-            SpatialBackendKind::SafBinaural | SpatialBackendKind::WindowsSpatialAudio
-        );
+        // The device window can stay open after Head orientation changes.
+        let enabled = settings.head_source == crate::head_tracking::HeadSource::PoseBridge
+            && matches!(
+                settings.mode.resolved(),
+                SpatialBackendKind::SafBinaural | SpatialBackendKind::WindowsSpatialAudio
+            );
         let recenter = self.bridge_ui.draw_window(
             context,
             &mut settings.posebridge,

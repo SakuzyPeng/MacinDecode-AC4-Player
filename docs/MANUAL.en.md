@@ -477,6 +477,9 @@ mounting takes, since it means turning your head and watching whether the figure
 3. Connect. The player reads the current format without changing device rate, output or calibration. Connection is manual on each application launch.
 4. Use Recenter listening direction, on the `Head` summary row or on the window's **Tracking** page. Initial connection and reconnection preserve the presented heading.
 
+Switching to another head orientation source or system spatial audio stops tracking and disables **Connect**
+in the open device window. Choose PoseBridge sensor and a supported playback mode again to reconnect manually.
+
 The **WT901BLE68 (BWT901BLECL5.0)** used here has the following recorded mounting, dated 2026-09-20:
 
 | Device field | Sensor axis |

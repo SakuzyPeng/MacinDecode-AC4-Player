@@ -127,6 +127,8 @@ fn ui_frame(
             app.draw_transport(ui);
             app.draw_visual_settings(context);
             app.draw_output_settings(context);
+            #[cfg(posebridge_input)]
+            app.draw_posebridge_window(context);
             for action in crate::playlist_ui::management(
                 context,
                 &app.library.summaries,
@@ -197,6 +199,89 @@ fn drawing_a_fallback_audio_page_keeps_the_remembered_choice() {
     // Automatic has no Headphones page on any platform. Drawing its fallback
     // must not forget the choice to restore when returning to binaural.
     assert_eq!(app.output_page, OutputPage::Headphones);
+}
+
+#[cfg(all(posebridge_input, macinrender_output))]
+#[test]
+fn posebridge_device_window_requires_the_selected_head_source() {
+    use crate::app::OutputPage;
+    use crate::backend::{OutputSettings, SpatialBackendKind};
+    use crate::head_tracking::HeadSource;
+    use crate::posebridge::Transport;
+
+    let directory = tempfile::tempdir().unwrap();
+    let (mut app, context) = open(directory.path());
+    context.enable_accesskit();
+    let mut settings = OutputSettings {
+        null_output: true,
+        mode: SpatialBackendKind::SafBinaural,
+        head_source: HeadSource::PoseBridge,
+        ..Default::default()
+    };
+    // A valid selection enables Connect, but this test never accesses a device.
+    settings.posebridge.device.transport = Transport::Usb;
+    settings.posebridge.device.id = "unused-test-port".into();
+    settings.posebridge.device.mounting = [1, 2, 3];
+    app.output.install_settings(settings.clone());
+    app.output_settings_open = true;
+    app.output_page = OutputPage::Head;
+    let _ = ui_frame(&mut app, &context, 0.0, vec![]);
+    let output = ui_frame(&mut app, &context, 0.1, vec![]);
+    let panel_button = painted_text(&output)
+        .into_iter()
+        .find(|(text, _, _)| text == "Device panel…")
+        .expect("the Head page must open the device window")
+        .1
+        .center();
+    let _ = click_widget(&mut app, &context, panel_button, 0.2);
+    assert!(app.bridge_ui.is_open());
+    app.output_settings_open = false;
+
+    let connect_enabled = |output: &egui::FullOutput| {
+        !output
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .unwrap()
+            .nodes
+            .iter()
+            .find(|(_, node)| {
+                node.role() == egui::accesskit::Role::Button && node.label() == Some("Connect")
+            })
+            .expect("the device window must keep its Connect button")
+            .1
+            .is_disabled()
+    };
+    let output = ui_frame(&mut app, &context, 0.3, vec![]);
+    assert!(connect_enabled(&output));
+
+    for (index, source) in (1..).zip([
+        HeadSource::Manual,
+        HeadSource::AirPods,
+        HeadSource::Off,
+        HeadSource::Automatic,
+        HeadSource::PoseBridge,
+    ]) {
+        settings.head_source = source;
+        app.change_output_settings(settings.clone(), &context);
+        let output = ui_frame(&mut app, &context, f64::from(index), vec![]);
+        assert!(app.bridge_ui.is_open());
+        assert_eq!(
+            connect_enabled(&output),
+            source == HeadSource::PoseBridge,
+            "Connect must follow the selected source: {source:?}"
+        );
+        if source != HeadSource::PoseBridge {
+            assert!(painted_text(&output).iter().any(|(text, _, _)| {
+                text.contains("Choose PoseBridge sensor in Audio settings")
+            }));
+        }
+    }
+    settings.mode = SpatialBackendKind::SystemSpatial;
+    app.change_output_settings(settings, &context);
+    let output = ui_frame(&mut app, &context, 6.0, vec![]);
+    assert!(!connect_enabled(&output));
+    assert_eq!(app.output.posebridge().view().request, 0);
 }
 
 #[test]

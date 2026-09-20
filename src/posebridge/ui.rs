@@ -13,6 +13,10 @@ enum Tab {
     Device,
     Diagnostics,
 }
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "window visibility, sensor mode and quit guards are independent state"
+)]
 pub struct Panel {
     /// Whether the device window is showing. The audio settings keep one row;
     /// everything else lives behind this.
@@ -172,7 +176,7 @@ impl Panel {
             .id_salt(match self.tab { Tab::Tracking => "pose-tracking", Tab::Device => "pose-device", Tab::Diagnostics => "pose-diagnostics" })
             .auto_shrink([false, false])
             .show(ui,|ui| {
-            if !enabled { ui.label("Choose software binaural or Windows object output to track a sensor."); }
+            if !enabled { ui.label("Choose PoseBridge sensor in Audio settings → Head and use software binaural or Windows object output to track a sensor."); }
             if let Some(error)=self.error.as_ref().or(view.error.as_ref()) { ui.colored_label(crate::theme::WARNING,error); }
             match self.tab {
                 Tab::Tracking => {
