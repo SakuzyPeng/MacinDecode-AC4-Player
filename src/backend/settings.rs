@@ -66,6 +66,7 @@ pub struct OutputSettings {
     pub native_device: OutputDeviceSelection,
     pub stereo_device: OutputDeviceSelection,
     pub head_source: HeadSource,
+    pub posebridge: crate::posebridge::Preferences,
 }
 impl Default for OutputSettings {
     fn default() -> Self {
@@ -84,6 +85,7 @@ impl Default for OutputSettings {
             native_device: OutputDeviceSelection::SystemDefault,
             stereo_device: OutputDeviceSelection::SystemDefault,
             head_source: HeadSource::Automatic,
+            posebridge: crate::posebridge::Preferences::default(),
         }
     }
 }
@@ -142,6 +144,10 @@ impl OutputSettings {
         .clamped()
     }
     pub fn validated(mut self) -> Self {
+        self.posebridge.validate();
+        if self.head_source == HeadSource::PoseBridge && !cfg!(posebridge_input) {
+            self.head_source = HeadSource::Manual;
+        }
         if !self.mode.supported() {
             self.mode = SpatialBackendKind::Automatic;
         }

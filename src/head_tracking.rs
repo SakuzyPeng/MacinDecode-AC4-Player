@@ -14,15 +14,23 @@ pub enum HeadSource {
     Automatic,
     Manual,
     AirPods,
+    PoseBridge,
     Off,
 }
 impl HeadSource {
-    pub const ALL: [Self; 4] = [Self::Automatic, Self::Manual, Self::AirPods, Self::Off];
+    pub const ALL: [Self; 5] = [
+        Self::Automatic,
+        Self::Manual,
+        Self::AirPods,
+        Self::PoseBridge,
+        Self::Off,
+    ];
     pub const fn label(self) -> &'static str {
         match self {
             Self::Automatic => "Auto · AirPods / manual",
             Self::Manual => "Manual",
             Self::AirPods => "AirPods",
+            Self::PoseBridge => "PoseBridge sensor",
             Self::Off => "Fixed orientation",
         }
     }
@@ -132,10 +140,22 @@ pub enum HeadStatus {
     Denied,
     Disconnected,
     MissingBundle,
+    #[cfg(posebridge_input)]
+    BridgeActive,
+    #[cfg(posebridge_input)]
+    BridgeWaiting,
+    #[cfg(posebridge_input)]
+    BridgeFrozen,
 }
 impl HeadStatus {
     pub const fn label(self) -> &'static str {
         match self {
+            #[cfg(posebridge_input)]
+            Self::BridgeActive => "PoseBridge tracking",
+            #[cfg(posebridge_input)]
+            Self::BridgeWaiting => "Connect a PoseBridge sensor",
+            #[cfg(posebridge_input)]
+            Self::BridgeFrozen => "PoseBridge stale · orientation frozen",
             Self::Fixed => "Fixed orientation",
             Self::System => "Orientation controlled by the system",
             Self::Manual => "Manual orientation",
@@ -188,6 +208,10 @@ struct Desired {
     manual: Quaternion,
     revision: u64,
     recenter: u64,
+    #[cfg(posebridge_input)]
+    bridge_smoothing_ms: f32,
+    #[cfg(posebridge_input)]
+    bridge_max_age_ms: u32,
 }
 impl Default for Desired {
     fn default() -> Self {
@@ -198,6 +222,10 @@ impl Default for Desired {
             manual: Quaternion::default(),
             revision: 0,
             recenter: 0,
+            #[cfg(posebridge_input)]
+            bridge_smoothing_ms: 10.0,
+            #[cfg(posebridge_input)]
+            bridge_max_age_ms: 100,
         }
     }
 }
@@ -205,6 +233,8 @@ impl Default for Desired {
 #[cfg(macinrender_output)]
 pub type NativeTarget = Arc<Mutex<Option<macindecode_macinrender::Control>>>;
 pub struct HeadTracker {
+    #[cfg(posebridge_input)]
+    pub bridge: crate::posebridge::service::Service,
     desired: Arc<Mutex<Desired>>,
     mirror: Arc<PoseMirror>,
     stop: Arc<AtomicBool>,
@@ -220,6 +250,10 @@ impl HeadTracker {
         reason = "one control worker owns sensor lifecycle and pose continuity"
     )]
     pub fn new() -> Self {
+        #[cfg(posebridge_input)]
+        let bridge = crate::posebridge::service::Service::new();
+        #[cfg(posebridge_input)]
+        let bridge_samples = Arc::clone(&bridge.sample);
         let desired = Arc::new(Mutex::new(Desired::default()));
         let mirror = Arc::new(PoseMirror::default());
         let stop = Arc::new(AtomicBool::new(false));
@@ -250,6 +284,10 @@ impl HeadTracker {
                 let mut was_sensor = false;
                 #[cfg(macinrender_output)]
                 let mut last_sent = None::<(u64, [f32; 3])>;
+                #[cfg(posebridge_input)]
+                let mut consumer = crate::posebridge::Consumer::default();
+                #[cfg(posebridge_input)]
+                let mut was_bridge = false;
                 while !s.load(Ordering::Relaxed) {
                     let desired = d
                         .lock()
@@ -316,12 +354,57 @@ impl HeadTracker {
                             was_sensor = false;
                         }
                     }
+                    #[cfg(posebridge_input)]
+                    let using_bridge = desired.enabled && desired.source == HeadSource::PoseBridge;
+                    #[cfg(posebridge_input)]
+                    #[cfg_attr(not(macinrender_output), allow(unused_variables, unused_assignments, reason = "Windows object output consumes the pose mirror, not C ABI keepalive"))]
+                    let mut bridge_new_sample = false;
+                    #[cfg(posebridge_input)]
+                    if using_bridge {
+                        let sample = bridge_samples
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .clone();
+                        #[cfg_attr(not(macinrender_output), allow(unused_assignments, reason = "No native keepalive in this build"))]
+                        { bridge_new_sample = consumer.update(
+                            sample.as_ref(),
+                            Instant::now(),
+                            Duration::from_millis(u64::from(desired.bridge_max_age_ms)),
+                            resolved,
+                            recenter != desired.recenter,
+                        ); }
+                        goal = consumer.goal;
+                        status = if consumer.active {
+                            HeadStatus::BridgeActive
+                        } else if sample.is_some() || consumer.has_reference() {
+                            HeadStatus::BridgeFrozen
+                        } else {
+                            HeadStatus::BridgeWaiting
+                        };
+                        fallback = resolved;
+                        was_bridge = true;
+                    } else if was_bridge {
+                        consumer.reset();
+                        was_bridge = false;
+                    }
                     if recenter != desired.recenter {
                         recenter = desired.recenter;
-                        goal = Quaternion::default();
-                        fallback = goal;
+                        if desired.source != HeadSource::PoseBridge {
+                            goal = Quaternion::default();
+                            fallback = goal;
+                        }
                     }
-                    resolved = resolved.slerp(goal, 1.0 - (-elapsed / 0.024).exp());
+                    #[allow(unused_mut)]
+                    let mut smoothing = 0.024;
+                    #[cfg(posebridge_input)]
+                    if using_bridge {
+                        smoothing = f64::from(desired.bridge_smoothing_ms) / 1000.0;
+                    }
+                    resolved = if smoothing <= 0.0 {
+                        goal
+                    } else {
+                        resolved.slerp(goal, 1.0 - (-elapsed / smoothing).exp())
+                    };
                     if !desired.enabled {
                         resolved = goal;
                     }
@@ -349,22 +432,44 @@ impl HeadTracker {
                         } else {
                             [0.0; 3]
                         };
-                        if last_sent.is_none_or(|(previous_id, previous)| {
-                            previous_id != target_id
-                                || previous
-                                    .into_iter()
-                                    .zip(pose)
-                                    .any(|(a, b)| (a - b).abs() >= 0.05)
-                        }) && control.orientation(pose).is_ok()
+                        #[allow(unused_mut)]
+                        let mut send_fresh = false;
+                        #[allow(unused_mut)]
+                        let mut allow_send = true;
+                        #[cfg(posebridge_input)]
+                        if using_bridge {
+                            send_fresh = bridge_new_sample;
+                            allow_send =
+                                consumer.active || last_sent.is_none_or(|(id, _)| id != target_id);
+                        }
+                        if allow_send
+                            && (send_fresh
+                                || last_sent.is_none_or(|(previous_id, previous)| {
+                                    previous_id != target_id
+                                        || previous
+                                            .into_iter()
+                                            .zip(pose)
+                                            .any(|(a, b)| (a - b).abs() >= 0.05)
+                                }))
+                            && control.orientation(pose).is_ok()
                         {
                             last_sent = Some((target_id, pose));
                         }
                     }
-                    thread::sleep(Duration::from_millis(16));
+                    let fast = cfg!(posebridge_input)
+                        && desired.enabled
+                        && desired.source == HeadSource::PoseBridge;
+                    thread::park_timeout(Duration::from_millis(if fast { 5 } else { 16 }));
                 }
             })
             .ok();
+        #[cfg(posebridge_input)]
+        if let Some(join) = &join {
+            bridge.set_listener(join.thread().clone());
+        }
         Self {
+            #[cfg(posebridge_input)]
+            bridge,
             desired,
             mirror,
             stop,
@@ -382,6 +487,10 @@ impl HeadTracker {
         self.mirror.snapshot()
     }
     pub fn configure(&self, source: HeadSource, enabled: bool, system: bool) {
+        #[cfg(posebridge_input)]
+        if source != HeadSource::PoseBridge || !enabled {
+            self.bridge.stop_tracking();
+        }
         let mut desired = self
             .desired
             .lock()
@@ -389,6 +498,15 @@ impl HeadTracker {
         desired.source = source;
         desired.enabled = enabled;
         desired.system = system;
+    }
+    #[cfg(posebridge_input)]
+    pub fn configure_bridge(&self, preferences: &crate::posebridge::Preferences) {
+        let mut desired = self
+            .desired
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        desired.bridge_max_age_ms = preferences.max_age_ms;
+        desired.bridge_smoothing_ms = preferences.smoothing_ms;
     }
     pub fn manual(&self, euler: [f32; 3]) {
         let mut desired = self
@@ -421,6 +539,7 @@ impl Drop for HeadTracker {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(join) = self.join.take() {
+            join.thread().unpark();
             let _ = join.join();
         }
     }
@@ -462,5 +581,52 @@ mod tests {
             Quaternion::default().slerp(Quaternion([-1.0, 0.0, 0.0, 0.0]), 0.5),
             Quaternion::default()
         );
+    }
+}
+
+#[cfg(all(test, posebridge_input))]
+mod bridge_tests {
+    use super::*;
+    use crate::posebridge::Sample;
+    fn until(mut condition: impl FnMut() -> bool) {
+        let end = Instant::now() + Duration::from_secs(2);
+        while !condition() {
+            assert!(Instant::now() < end, "head control timed out");
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+    fn publish(tracker: &HeadTracker, sequence: u64, angles: [f32; 3], fresh: bool) {
+        *tracker.bridge.sample.lock().unwrap() = Some(Sample {
+            instance: 1,
+            session: 1,
+            reference: 1,
+            sequence,
+            angles,
+            fresh,
+            age: Duration::ZERO,
+            queried_at: Instant::now(),
+        });
+        tracker.join.as_ref().unwrap().thread().unpark();
+    }
+    #[test]
+    fn hidden_window_independent_control_freezes_presented_pose() {
+        let tracker = HeadTracker::new();
+        tracker.configure_bridge(&crate::posebridge::Preferences {
+            smoothing_ms: 0.0,
+            ..Default::default()
+        });
+        tracker.configure(HeadSource::PoseBridge, true, false);
+        publish(&tracker, 1, [0.; 3], true);
+        until(|| tracker.snapshot().status == HeadStatus::BridgeActive);
+        publish(&tracker, 2, [60., 20., 10.], true);
+        until(|| (tracker.snapshot().pose.euler()[0] - 60.).abs() < 0.01);
+        let presented = tracker.snapshot().pose;
+        publish(&tracker, 3, [-90., 0., 0.], false);
+        until(|| tracker.snapshot().status == HeadStatus::BridgeFrozen);
+        thread::sleep(Duration::from_millis(25));
+        assert_eq!(tracker.snapshot().pose, presented);
+        publish(&tracker, 4, [70., 20., 10.], true);
+        until(|| tracker.snapshot().status == HeadStatus::BridgeActive);
+        until(|| (tracker.snapshot().pose.euler()[0] - 70.).abs() < 0.01);
     }
 }

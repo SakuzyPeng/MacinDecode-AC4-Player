@@ -363,14 +363,52 @@ profile 之上还有两个旋钮：
 
 | 模式 | 朝向来源 |
 | --- | --- |
-| SAF binaural | AirPods 头部追踪（macOS，需要带运动权限声明的正式 `.app`）或手动 |
-| Windows object passthrough | 手动 |
+| SAF binaural | AirPods 头部追踪（macOS，需要带运动权限声明的正式 `.app`）、PoseBridge BLE/USB 或手动 |
+| Windows object passthrough | PoseBridge BLE/USB 或手动 |
 | System spatial audio | 由系统负责 |
 
 手动朝向在设置窗口里拖动方块或直接输入角度。
 
 **转头之后声音方向跟不上？** 先排除回放链路的延迟。虚拟声卡、虚拟混音软件和无线耳机都会引入额外缓冲。
 建议先用声卡直连有线耳机作为对照，再逐一接入其他设备，就能区分是链路延迟还是头部追踪本身的响应。
+
+### PoseBridge 传感器
+
+在 **Head → Head orientation → PoseBridge sensor** 选择内置设备来源，不需要安装或启动独立桥接程序。
+支持 BWT901BLECL5.0，macOS/Windows 均可使用 BLE 或 USB。
+
+1. 在 **Device** 页选择 Bluetooth LE／USB serial，点击 Scan，选择设备。
+2. 选择传感器指向头部 Right／Forward／Up 的三个轴，必须组成右手基底；佩戴后检查三轴方向。
+3. 点击 Connect。播放器只读检查当前输出格式，不自动改变速率、格式或校准；下次启动仍需手动连接。
+4. 在 **Tracking** 页使用 Recenter listening direction 回正。首次连接和重连保持当前听音朝向。
+
+本次使用的 **WT901BLE68（BWT901BLECL5.0）**，当前安装方向记录如下（2026-09-20）：
+
+| Device 页字段 | 传感器轴 |
+| --- | --- |
+| Right | **−Y** |
+| Forward | **+X** |
+| Up | **+Z** |
+
+已核对播放器保存的 BLE 和 USB 配置，两者均为这组映射。播放器配置中的 `mounting` 为 `[-2, 1, 3]`；
+独立 PoseBridge CLI 的等价参数为 `--mount=-y,+x,+z`。
+最初测试用的 `+X / +Y / +Z` 单位映射曾出现“点头表现为侧倾”的现象，后续按上表复用当前安装配置。
+修改时先 Disconnect，设置三轴后 Connect，再 Recenter。这是该设备当前安装方向的记录；
+更换安装位置后需重新核对点头对应 Pitch、侧倾对应 Roll，以及各轴正方向。BLE／USB 的配置分别保存。
+
+**使用反馈（2026-09-20）：** 当前这台 WT901BLE68 在 **20 Hz** 下主观上已足够灵敏，
+用户认为与 **AirPods Max 有线模式** 相比也足够。该反馈对应当前安装与回放链路，未包含毫秒级端到端延迟测量。
+
+Smoothing 默认 10 ms，可在 0–50 ms 调整；Freeze after 默认 100 ms，可在 50–500 ms 调整。
+设备若仍以 10 Hz 等低速输出，可显式提高回传率，或将冻结阈值设得长于采样间隔；播放器不会自动调率。
+数据过期时冻结当前朝向；Diagnostics 分开显示采样、主机交付与接收后年龄。
+设备时间未同步，年龄不包含传感器、USB/BLE 和音频延迟。BLE 批量交付不会因为增加轮询频率而消失。
+
+修改设备时先 Disconnect。支持回传率、时间戳输出、六/九轴、归零、校准、保存和恢复默认；
+操作结束后手动 Connect。设备归零要求六轴模式；角度参考命令包含 SAVE，恢复默认也保存。
+磁校准需要显式结束；未结束时退出会提示处理。校准命令发送、回读和完成状态不代表精度或掉电保存已验证。
+macOS BLE 请运行包含 Bluetooth 权限说明的 `.app`，并在首次扫描/连接时允许访问。
+
 
 ## 查看文件内部
 

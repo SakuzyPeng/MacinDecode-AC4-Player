@@ -36,6 +36,8 @@ use crate::theme;
     reason = "independent UI toggles and pointer interaction flags are not one state machine"
 )]
 pub struct PlayerApp {
+    #[cfg(posebridge_input)]
+    bridge_ui: crate::posebridge::ui::Panel,
     pub smoke: Option<crate::install_check::WindowSmoke>,
     about: crate::licenses::Window,
     sofa: crate::file_catalog::Catalog,
@@ -922,6 +924,8 @@ impl PlayerApp {
             pending_output_change: None,
             audio_settings_error: None,
             sofa_picker: None,
+            #[cfg(posebridge_input)]
+            bridge_ui: crate::posebridge::ui::Panel::default(),
             hptf_picker: None,
             hptf_drawing: None,
             hptf_ghost: None,
@@ -1823,6 +1827,22 @@ impl PlayerApp {
                             }
                             OutputPage::Head => {
                                 (manual, recenter) = draw_head_page(ui, &mut settings, mode, &head);
+                                #[cfg(posebridge_input)]
+                                if settings.head_source
+                                    == crate::head_tracking::HeadSource::PoseBridge
+                                {
+                                    recenter |= self.bridge_ui.draw(
+                                        ui,
+                                        &mut settings.posebridge,
+                                        &head,
+                                        self.output.posebridge(),
+                                        matches!(
+                                            mode,
+                                            SpatialBackendKind::SafBinaural
+                                                | SpatialBackendKind::WindowsSpatialAudio
+                                        ),
+                                    );
+                                }
                             }
                         }
                     },
@@ -3653,6 +3673,9 @@ impl eframe::App for PlayerApp {
         self.draw_bitstream_details_window(&context);
         self.draw_diagnostics_window(&context);
         self.draw_output_settings(&context);
+        #[cfg(posebridge_input)]
+        self.bridge_ui
+            .guard_close(&context, self.output.posebridge());
         self.draw_visual_settings(&context);
         self.about.draw(&context);
         if let Some(smoke) = &mut self.smoke {
@@ -4011,8 +4034,10 @@ fn draw_head_page(
                 .show_ui(ui, |ui| {
                     for source in crate::head_tracking::HeadSource::ALL {
                         ui.add_enabled_ui(
-                            source != crate::head_tracking::HeadSource::AirPods
-                                || cfg!(target_os = "macos"),
+                            (source != crate::head_tracking::HeadSource::AirPods
+                                || cfg!(target_os = "macos"))
+                                && (source != crate::head_tracking::HeadSource::PoseBridge
+                                    || cfg!(posebridge_input)),
                             |ui| {
                                 ui.selectable_value(
                                     &mut settings.head_source,
@@ -4024,6 +4049,9 @@ fn draw_head_page(
                     }
                 });
         });
+        if settings.head_source == crate::head_tracking::HeadSource::PoseBridge {
+            return (None, false);
+        }
         let mut angles = head.pose.euler();
         let mut changed = false;
         ui.horizontal(|ui| {

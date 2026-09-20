@@ -1,5 +1,7 @@
 #![cfg(target_os = "windows")]
 
+pub mod timing;
+
 use std::collections::{BTreeMap, HashSet};
 use std::mem::{ManuallyDrop, size_of};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};

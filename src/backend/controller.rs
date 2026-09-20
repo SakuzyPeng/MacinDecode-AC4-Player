@@ -393,6 +393,8 @@ impl SpatialOutputController {
         }
     }
     fn configure_head(&self) {
+        #[cfg(posebridge_input)]
+        self.head.configure_bridge(&self.settings.posebridge);
         let mode = self.settings.mode.resolved();
         self.head.configure(
             self.settings.head_source,
@@ -402,6 +404,10 @@ impl SpatialOutputController {
             ),
             mode == SpatialBackendKind::SystemSpatial,
         );
+    }
+    #[cfg(posebridge_input)]
+    pub fn posebridge(&self) -> &crate::posebridge::service::Service {
+        &self.head.bridge
     }
     pub fn head_snapshot(&self) -> HeadSnapshot {
         self.head.snapshot()

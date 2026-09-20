@@ -58,11 +58,15 @@ fn embed_windows_icon() {
 /// Scene arithmetic and preview remain gated only by `decode`.
 fn declare_spatial_output() {
     println!("cargo::rustc-check-cfg=cfg(spatial_output)");
+    println!("cargo::rustc-check-cfg=cfg(posebridge_input)");
     println!("cargo::rustc-check-cfg=cfg(windows_spatial_output)");
     println!("cargo::rustc-check-cfg=cfg(macinrender_output)");
     let windows = env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows");
     let macos = env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos");
     let decode = env::var_os("CARGO_FEATURE_DECODE").is_some();
+    if (windows || macos) && env::var_os("CARGO_FEATURE_POSEBRIDGE").is_some() {
+        println!("cargo::rustc-cfg=posebridge_input");
+    }
     let macinrender =
         decode && (windows || macos) && env::var_os("CARGO_FEATURE_MACINRENDER").is_some();
     if windows && decode {

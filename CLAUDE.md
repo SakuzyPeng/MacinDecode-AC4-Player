@@ -24,8 +24,8 @@ What a platform adds is *playback*, and there are two independent output paths:
 
 Linux gets inspection, decode and the silent scene preview — everything except audio out.
 
-Two default features: `decode` (the Core decoder) and `macinrender` (the native renderer, which
-implies `decode`). `--no-default-features` is the inspection-only shell, and the only configuration
+Three default features: `decode` (the Core decoder), `macinrender` (the native renderer, which
+implies `decode`), and `posebridge` (the public pinned Rust BLE/USB library on macOS/Windows). `--no-default-features` is the inspection-only shell, and the only configuration
 that builds without the ETSI spec tables.
 
 Design docs (Chinese) carry the authoritative contracts; keep them in sync when changing the boundary
@@ -387,7 +387,7 @@ Never migrate a database version without going through the SQLite backup API fir
 
 ### Platform gating
 
-Four inputs, all derived in `build.rs` (each with a matching `rustc-check-cfg`, so `unexpected_cfgs`
+Five inputs, all derived in `build.rs` (each with a matching `rustc-check-cfg`, so `unexpected_cfgs`
 stays quiet). Nothing in `src/` writes the conjunctions by hand.
 
 - **`feature = "decode"`** — there is a decoder. `decoder/worker.rs`, the parts of `decoder.rs` that
@@ -401,6 +401,7 @@ stays quiet). Nothing in `src/` writes the conjunctions by hand.
 - **`macinrender_output`** = (macOS or Windows) + `decode` + `macinrender`. The largest gate by far:
   `backend/macinrender.rs`, most of `backend/controller.rs`, the SOFA and layout settings.
   Pair it with `target_os = "macos"` for the Atmos label assist and AirPods motion.
+- **`posebridge_input`** = macOS/Windows + `posebridge`. Device worker and UI; saved preferences remain portable without this gate.
 - **`spatial_output`** = the union, i.e. *some* real output exists. Deliberately rare now (a repaint
   cadence and one test) — prefer the specific gate that matches the code you are writing.
 

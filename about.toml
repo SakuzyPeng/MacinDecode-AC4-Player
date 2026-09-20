@@ -8,3 +8,7 @@ ignore-dev-dependencies = true
 ignore-build-dependencies = true
 # Workspace notices are embedded separately together with native dependencies.
 private = { ignore = true }
+
+# PoseBridge uses unmodified serialport; the embedded notice includes its source URL.
+[serialport]
+accepted = ["MPL-2.0"]

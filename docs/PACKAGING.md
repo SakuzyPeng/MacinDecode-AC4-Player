@@ -56,3 +56,5 @@ Windows 打包回归还使用独立产品 GUID、注册表键和临时安装目�
 播放器直接使用固定版本的 C ABI，FFI 仍封装在独立 crate，主程序禁止 unsafe。CMake File API 提供有序的传递链接输入；构建脚本拒绝 DLL 导入库和第三方动态库，最终安装包再检查 PE 普通／延迟导入或 Mach-O 架构、依赖及签名。头追探针仅创建和销毁控制对象，不调用采样，也不请求运动权限。
 
 `python scripts/package-player.py` 保留独立程序载荷的打包入口，自动嵌入许可并执行相同的依赖和运行检查，构建清单放在载荷外侧。正式安装包仍使用 `scripts/package.py`，生成 MSI／PKG、SHA-256 和含静态构建信息的清单。
+
+默认功能从公开 HTTPS Git 地址获取锁定提交的 posebridge-core，无需新增凭据。传感器库静态编入播放器；macOS Info.plist 包含 NSBluetoothAlwaysUsageDescription，启动/安装检查不扫描设备。新依赖纳入 About 许可报告；不添加 PoseBridge CLI 或 DLL。

@@ -1,6 +1,6 @@
 # MacinRender 播放集成
 
-Player 将 AC-4 Core 的 Scene 转换为 renderer-native Scene，经 MacinRender C ABI v1.39
+Player 将 AC-4 Core 的 Scene 转换为 renderer-native Scene，经 MacinRender C ABI v1.42
 进行空间渲染及设备输出。Core 类型和平台指针均不进入 GUI；FFI 封装集中在独立 crate。
 
 ## 播放策略
@@ -330,3 +330,63 @@ macOS 包使用圆角像素图标，Windows 可执行文件嵌入直角方块图
 MSVC 构建会自动查找 `rc.exe`。
 裸 `cargo run` 缺少应用权限声明时，AirPods 采集明确显示不可用并使用手动朝向。软件双耳模式
 首次检测到支持设备时可能出现系统运动权限提示。实际三轴方向还应通过 AirPods 真机听验确认。
+
+
+## PoseBridge 内置设备头追
+
+默认 `posebridge` feature 在 macOS/Windows 直接静态编入公开仓库的 `posebridge-core` 0.4，
+锁定 Git 提交；不运行 CLI、不加载 PoseBridge DLL，也不开放 OSC 端口。
+`posebridge-device` 工作线程串行管理 Controller、只读检查和显式控制，GUI 只发命令。
+扫描/寄存器操作/取消不会进入音频回调；最新姿态经头追线程复用 Scene setter 与 Windows 对象输出。
+
+设备选择、安装轴、平滑与年龄阈值随设置保存；启动不访问传感器。Connect 先只读检查当前格式，
+再读取 Euler 或原生四元数；寄存器四元数为显式备用选项。首次安装轴必须由用户选择。
+采集期间禁用设备写入，先 Disconnect，操作结束后手动 Connect。切换来源或系统空间模式停止采集。
+
+PoseBridge 的 YXZ/XYZW 不是播放器的物理 ZXY/WXYZ。以其语义 Euler 进入现有四元数入口，
+沿用 ±85° 俯仰工作范围。首帧/新会话/参考变化建立相对偏移，保持当前呈现朝向；Recenter 只改播放器参考。
+5 ms 目标采集/控制周期、默认 10 ms 平滑（0–50 ms），诊断最多 10 Hz；Windows 定时请求限定在采集期间。
+消费先检查 fresh 和接收后年龄（默认 100 ms，50–500 ms），再去重，宿主排队时间也计入。
+失效后冻结已经呈现的朝向并停止平滑和渲染保活；同序号不能恢复。新鲜同角度采样仍提交，
+使 Scene 的 tracking-active 低预缓冲不因听者暂时静止而超时。
+设备时间、接收后年龄与运动到声音延迟不混用；没有时钟同步或预测。
+
+设备操作结果保留发送/回读/观察到完成/持久化状态。设备角度参考自带 SAVE，恢复默认也保存；
+其他操作不附加 SAVE。磁校准未明确结束时保留退出保护，取消写入不代表回滚。
+校准精度、物理重连、掉电持久化与最终佩戴/听音效果须单独实机验收。
+
+### WT901BLE68 安装映射记录（2026-09-20）
+
+当前这台 WT901BLE68（BWT901BLECL5.0）的安装配置为 **Right = −Y、Forward = +X、Up = +Z**。
+已核对播放器保存的 BLE／USB 配置，均采用同一映射，但仍按传输方式与设备标识分别保存。
+
+- Player `Device.mounting`：`[-2, 1, 3]`。
+- PoseBridge `Config.mounting`：`{"right": -2, "forward": 1, "up": 3}`。
+- PoseBridge CLI：`--mount=-y,+x,+z`。
+
+记录缘由是最初测试用单位映射下，点头表现为侧倾。此记录只对应当前安装方向，不作为该型号的通用默认值；
+重新安装后应核对各轴方向。界面操作见[手册的 PoseBridge 部分](MANUAL.md#posebridge-传感器)。
+
+### 主观使用反馈（2026-09-20）
+
+用户反馈：这台 WT901BLE68 在 **20 Hz** 下主观上已足够灵敏，**与 AirPods Max 有线模式相比也足够**。
+该记录对应当前设备安装与回放链路，是主观使用评价，未包含毫秒级端到端延迟测量。
+
+### 接入验证（2026-09-20）
+
+- macOS：完整 workspace 回归通过（331 项，硬件/媒体/GPU 等条件测试另列），三种 feature 组合的 Clippy 通过；随后新增的面板布局回归也通过。
+- Windows：完整 workspace 回归、完整/无默认功能/PoseBridge 独立组合的 Clippy 与 Release 构建通过。
+- macOS Release `.app`：签名、系统动态依赖、内嵌许可、实际 VBAP/双耳 Scene 提交以及图形窗口 smoke 通过。
+  界面检查覆盖来源选择、未连接禁用状态、可滚动设备页、USB 枚举和恢复原设置；没有请求新的蓝牙权限。
+- 当前 Mac USB 实物：通过播放器设备工作线程只读检查并采集，主机观察约 9.94 Hz、每次交付一帧，符合原 10 Hz motion 配置。
+  设备未输出时间字段，诊断保持缺失；没有写配置、校准、SAVE 或更改设备参考。停止后快照失效并释放连接。
+- 真实设备只读测试为 ignored：显式提供 `MACINDECODE_POSEBRIDGE_DEVICE`（与设置中的 Device 相同的 JSON，含传输方式、设备标识、安装轴），
+  再运行 `cargo test reads_a_selected_device_without_changing_its_configuration -- --ignored --nocapture`。
+  测试只证明读取和停止，不证明佩戴轴向、校准精度或听音延迟。
+- 仍待用户配合实机验收：播放器宿主的 BLE 权限/连接、Windows 当前 USB 实物、物理拔插/断电/超距/睡眠恢复、佩戴三轴方向、
+  校准/保存/默认恢复的实际效果以及运动到声音的整体延迟。模拟器与软件回归不替代这些结果。
+
+- 最终 Windows 带许可 Release：PE 仅导入系统库，原生安装检查通过；新构建与本机原安装版的窗口自检均为 ok、32 帧。
+  严格图形运行依赖审计仍未通过：本机环境会载入 Microsoft D3DMappingLayers 的 DXIL.dll，以及 WinSxS 的 MSVCP90.dll；
+  原安装版也触发相同的 MSVCP90 拒绝。保持既有依赖规则，未把窗口可运行等同于该主机已通过便携性审计。
+  Windows 验证补丁已撤回，既有主线 checkout 恢复干净；构建缓存及检查日志保留。

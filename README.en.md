@@ -30,6 +30,8 @@ telling you and what each setting does, see the [user manual](docs/MANUAL.en.md)
 - [Documentation](#documentation)
 - [License](#license)
 
+Default builds include embedded PoseBridge BLE/USB head tracking and device controls; see the [manual](docs/MANUAL.en.md#posebridge-sensors).
+
 ## What you can do with it
 
 - **Play immersive AC-4.** Windows uses spatial-audio object passthrough, macOS uses system spatial
@@ -135,7 +137,7 @@ tracking and listener orientation are all in the
 | Decode | ✅ | ✅ | ✅ |
 | Playback | passthrough / system spatial / binaural | system spatial / binaural | ❌ |
 | 3D scene | ✅ | ✅ | ✅ (silent preview on the real timeline) |
-| Head tracking | manual | AirPods (in a proper `.app`) or manual | — |
+| Head tracking | PoseBridge BLE/USB or manual | PoseBridge BLE/USB, AirPods (in a proper `.app`) or manual | — |
 
 Keep Windows 11 up to date for fuller spatial audio support. Windows 10's spatial audio limits are
 described in the next section.

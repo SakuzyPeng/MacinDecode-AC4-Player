@@ -22,6 +22,7 @@ mod media;
 mod model;
 mod playlist;
 mod playlist_ui;
+mod posebridge;
 mod preferences;
 mod scene3d;
 mod scene_view;

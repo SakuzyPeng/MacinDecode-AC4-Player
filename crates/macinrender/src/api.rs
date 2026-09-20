@@ -27,8 +27,8 @@ macro_rules! api {
                 }
                 let api = Self { $($name,)* };
                 // SAFETY: validated version entrypoints take no pointers.
-                if unsafe { (api.adm_api_version_major)() } != 1 || unsafe { (api.adm_api_version_minor)() } < 39 {
-                    return Err("MacinRender C ABI v1.39 or later is required".into());
+                if unsafe { (api.adm_api_version_major)() } != 1 || unsafe { (api.adm_api_version_minor)() } < 42 {
+                    return Err("MacinRender C ABI v1.42 or later is required".into());
                 }
                 let _ = CACHED.set(api.clone());
                 Ok(api)

@@ -451,8 +451,8 @@ One arc breathes and one is rigid — **the one that breathes is the change your
 
 | Mode | Orientation from |
 | --- | --- |
-| SAF binaural | AirPods head tracking (macOS, in a proper `.app` carrying the motion usage description) or manual |
-| Windows object passthrough | Manual |
+| SAF binaural | AirPods head tracking (macOS, in a proper `.app` carrying the motion usage description) or PoseBridge BLE/USB, or manual |
+| Windows object passthrough | PoseBridge BLE/USB or manual |
 | System spatial audio | The operating system |
 
 Manual orientation means dragging the pad in the settings window or typing the angles.
@@ -461,6 +461,44 @@ Manual orientation means dragging the pad in the settings window or typing the a
 sound cards, virtual mixers and wireless headphones all add buffering. Compare against a wired
 headset plugged straight into the sound card, then add the other devices back one at a time — that
 separates chain latency from head-tracking response.
+
+### PoseBridge sensors
+
+Choose **Head → Head orientation → PoseBridge sensor**. The player embeds the device library;
+no separate bridge application is needed. BWT901BLECL5.0 BLE and USB inputs are supported on macOS and Windows.
+
+1. Open **Device**, select Bluetooth LE or USB serial, Scan and choose the device.
+2. Choose the sensor axes pointing toward head Right, Forward and Up. They must form a right-handed basis; check all three directions while wearing it.
+3. Connect. The player reads the current format without changing device rate, output or calibration. Connection is manual on each application launch.
+4. Use **Tracking → Recenter listening direction**. Initial connection and reconnection preserve the presented heading.
+
+The **WT901BLE68 (BWT901BLECL5.0)** used here has the following recorded mounting, dated 2026-09-20:
+
+| Device field | Sensor axis |
+| --- | --- |
+| Right | **−Y** |
+| Forward | **+X** |
+| Up | **+Z** |
+
+Both saved BLE and USB profiles have been checked against this mapping. The player's `mounting` value is `[-2, 1, 3]`;
+the equivalent standalone PoseBridge CLI argument is `--mount=-y,+x,+z`.
+The initial `+X / +Y / +Z` identity mapping made nodding appear as sideways tilt in this setup; use the recorded mapping for this mounting.
+Disconnect before changing the axes, then Connect and Recenter. This record applies to the device's current physical mounting;
+after remounting, check that nodding changes Pitch, sideways tilt changes Roll, and all three signs are correct. BLE and USB profiles are saved separately.
+
+**User feedback (2026-09-20):** this WT901BLE68 was subjectively responsive enough at **20 Hz**, including in comparison
+with **AirPods Max in wired mode**. This feedback applies to the current mounting and playback chain; it does not include a measured end-to-end latency in milliseconds.
+
+Smoothing defaults to 10 ms (0–50 ms). Freeze after defaults to 100 ms (50–500 ms).
+For a slow device (for example 10 Hz), explicitly raise its rate or choose a freeze threshold longer than its sample interval; the player never changes the rate automatically.
+Expired input freezes the presented orientation. Diagnostics distinguishes samples, host deliveries and reception age.
+Device clocks are unsynchronized; age excludes sensor, USB/BLE and audio delay. Faster polling does not remove BLE batching.
+
+Disconnect before configuring rate, timestamp output, six/nine-axis fusion, zeroing, calibration, saving or defaults;
+Connect again manually afterwards. Zero yaw requires six-axis mode. Device angle reference includes SAVE; restoring defaults also saves.
+Explicitly end magnetic calibration before quitting. Sent/readback/completion results do not establish calibration accuracy or persistence.
+On macOS, run the packaged `.app` with its Bluetooth usage description and allow access on the first scan/connection.
+
 
 ## Looking inside a file
 

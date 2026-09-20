@@ -11,6 +11,7 @@ windows = { version = "=0.62.2", features = [
     "Win32_Foundation",
     "Win32_Devices_FunctionDiscovery",
     "Win32_Media_Audio",
+    "Win32_Media",
     "Win32_Media_Multimedia",
     "Win32_Security",
     "Win32_System_Com",

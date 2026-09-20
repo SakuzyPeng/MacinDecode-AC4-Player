@@ -3,8 +3,8 @@
 #include "adm/c_api.h"
 #include "mr_headmotion.h"
 
-#if ADM_API_VERSION < 13900
-#error MacinDecode requires MacinRender C ABI v1.39 or later
+#if ADM_API_VERSION < 14200
+#error MacinDecode requires MacinRender C ABI v1.42 or later
 #endif
 
 size_t macinrender_abi_size(uint32_t type) {

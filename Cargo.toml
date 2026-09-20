@@ -59,7 +59,8 @@ pollster = "0.4"
 ebur128 = "0.1.10"
 
 [features]
-default = ["decode", "macinrender"]
+default = ["decode", "macinrender", "posebridge"]
+posebridge = ["dep:posebridge-core"]
 macinrender = ["decode", "dep:macindecode-macinrender"]
 # Decoding is the point of the app, so it is on by default and a build without
 # it is the explicit opt-out rather than a silent downgrade. `--no-default-features`
@@ -75,6 +76,7 @@ macindecode-windows-spatial-audio = { path = "crates/windows-spatial-audio" }
 
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 macindecode-macinrender = { path = "crates/macinrender", optional = true }
+posebridge-core = { git = "https://github.com/SakuzyPeng/PoseBridge.git", rev = "7ea9616274b269d60d12eb43121937abce7119d2", optional = true }
 
 [lints.rust]
 unsafe_code = "forbid"
