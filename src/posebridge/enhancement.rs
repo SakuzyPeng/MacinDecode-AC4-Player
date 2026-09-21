@@ -53,6 +53,7 @@ pub enum State {
     Stale,
     Held,
 }
+#[cfg(posebridge_input)]
 impl State {
     pub const fn label(self) -> &'static str {
         match self {
