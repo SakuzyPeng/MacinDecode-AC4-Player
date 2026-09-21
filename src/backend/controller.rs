@@ -398,10 +398,7 @@ impl SpatialOutputController {
         let mode = self.settings.mode.resolved();
         self.head.configure(
             self.settings.head_source,
-            matches!(
-                mode,
-                SpatialBackendKind::SafBinaural | SpatialBackendKind::WindowsSpatialAudio
-            ),
+            mode.carries_head_orientation(),
             mode == SpatialBackendKind::SystemSpatial,
         );
     }

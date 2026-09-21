@@ -176,7 +176,13 @@ each frame.
   `Kind`: `sofa/` for HRIRs and `hptf/` for AutoEq headphone profiles. The `slug` derives the
   worker thread, the staged import prefix and the `<slug>-index-v1` key in SQLite `metadata`,
   so those three cannot drift apart.
-- `head_tracking::HeadTracker` — its own clock, independent of egui repainting.
+- `head_tracking::HeadTracker` — its own clock, independent of egui repainting. Whether its pose means
+  anything is `SpatialBackendKind::carries_head_orientation()`; the tracker's own enable, the Head
+  page, the sensor window and the scene header puck all ask that one function, because under every
+  other mode it publishes an identity pose that a control surface must not draw as an orientation.
+  The window-wide listener keys in `app/head_puck.rs` are the program's only keyboard shortcuts:
+  read before the panels and only while `egui_wants_keyboard_input()` is false, so a bare letter
+  never reaches a shortcut and a text field at once.
 
 ### Worker threads
 

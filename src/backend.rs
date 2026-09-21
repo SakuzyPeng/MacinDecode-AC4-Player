@@ -131,6 +131,20 @@ impl SpatialBackendKind {
             Self::SystemSpatial | Self::SafBinaural => cfg!(macinrender_output),
         }
     }
+
+    /// Whether the listener's orientation is this program's to hold.
+    ///
+    /// Under system spatial audio the system spatializer holds it and never
+    /// says where it put it; with no output at all there is nothing to orient.
+    /// Either way the tracker is left disabled and publishes an identity pose,
+    /// so everything that offers or draws an orientation has to agree about
+    /// when that pose means anything — the tracker's own enable, the Head page,
+    /// the sensor window and the scene header puck all ask here.
+    ///
+    /// Ask a [`Self::resolved`] mode: `Automatic` is not an answer.
+    pub const fn carries_head_orientation(self) -> bool {
+        matches!(self, Self::SafBinaural | Self::WindowsSpatialAudio)
+    }
 }
 
 impl fmt::Display for SpatialBackendKind {

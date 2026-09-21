@@ -34,6 +34,18 @@ impl HeadSource {
             Self::Off => "Fixed orientation",
         }
     }
+    /// Whether this build can drive the pose from this source at all.
+    ///
+    /// The Head page and the scene header offer the same five, and a build that
+    /// cannot reach one has to say so in both places. Keeping the conjunction
+    /// here is what stops the two lists from drifting apart.
+    pub const fn available(self) -> bool {
+        match self {
+            Self::AirPods => cfg!(target_os = "macos"),
+            Self::PoseBridge => cfg!(posebridge_input),
+            Self::Automatic | Self::Manual | Self::Off => true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -166,6 +178,36 @@ impl HeadStatus {
             Self::MissingBundle => "AirPods motion requires the packaged app · manual active",
         }
     }
+    pub const fn confidence(self) -> Confidence {
+        match self {
+            #[cfg(posebridge_input)]
+            Self::BridgeActive => Confidence::Tracking,
+            #[cfg(posebridge_input)]
+            Self::BridgeWaiting | Self::BridgeFrozen => Confidence::Degraded,
+            Self::AirPods => Confidence::Tracking,
+            Self::Fixed | Self::System | Self::Manual => Confidence::Held,
+            Self::Waiting | Self::Denied | Self::Disconnected | Self::MissingBundle => {
+                Confidence::Degraded
+            }
+        }
+    }
+}
+
+/// What a status says about the pose that came with it.
+///
+/// The label already says which source and what went wrong; this is the part a
+/// drawing needs — one colour, and whether the pose moves without anyone here
+/// touching anything, which is what decides the repaint cadence while nothing
+/// is playing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Confidence {
+    /// A sensor is arriving and the pose changes on its own.
+    Tracking,
+    /// The pose is exactly what was last asked for and will not move by itself.
+    Held,
+    /// A sensor was asked for and is not arriving. The pose is whatever it was
+    /// left at, which is not the same as being wrong — only unattended.
+    Degraded,
 }
 #[derive(Debug, Clone, Copy)]
 pub struct HeadSnapshot {

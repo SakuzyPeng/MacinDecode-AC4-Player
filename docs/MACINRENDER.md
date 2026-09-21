@@ -214,6 +214,28 @@ Player 调用 `semantic_complete(SemanticScope::Spatial)` 保留非耳机语义�
 系统空间音频的固定床不能保留逐对象跟头语义；出现相关内容时提供能力提示及软件双耳切换按钮，
 用户选择的输出保持不变。没有专门的“3DOF 文件”识别或额外开关。
 
+### 朝向控制面与全局按键
+
+朝向是否归播放器持有，只由 `SpatialBackendKind::carries_head_orientation()` 回答（对 `resolved()`
+之后的模式提问，`Automatic` 不是答案）：头追线程的 enable、`Head` 页是否给控件、PoseBridge 设备窗
+的 enable，以及场景标题旁的朝向盘是否绘制，四处同问一处。其余模式下头追线程把 goal 归零并直接落位，
+呈现的是恒等姿态；朝向盘因此不画，否则就是拿一个笃定的零覆盖本程序并不知道的朝向。
+
+朝向盘取从后上方看听者的单一参照系：环上的点在 `(-sin yaw, -cos yaw)` 方向，正前为上；中间的视线
+是内盘的一条弦，法向偏移随 pitch 取负（抬头上移），方向随 roll 顺时针（从后看右耳下沉）。人工地平仪
+会把这条线画在头自身的参照系里、与运动反向，但 yaw 在随头旋转的参照系里没有意义，所以两半统一取世界
+参照系，线跟着头走而不是与之相反。颜色取 `HeadStatus::confidence()` 三档：Tracking 绿、Held 灰、
+Degraded 红。Tracking 期间 `sync_output` 额外请求 33 ms 重绘——传感器在不播放时照样转，否则听者小人
+和朝向盘都落在 2 秒心跳上。
+
+全局按键（`R` 回正、`H` 暂停跟随、方向键转头，`Shift` 为细步长）在面板之前读取，且仅当
+`egui_wants_keyboard_input()` 为假，即无任何控件持有键盘焦点时；`consume_key` 取走该次按下，
+使同一帧后绘的控件收不到。`consume_key` 对多出的 `Shift`/`Alt` 也匹配，因此细步长必须先判。
+方向键与拖动都走 `manual_head`，其本身即切换到 Manual——这正是从 AirPods 接管的方式；选中 PoseBridge
+时拒绝转动（下一采样即覆盖），但接受回正，那是重建传感器参考。roll 不在任何按键或拖动轴上。
+
+几何与角度算术在 `src/app/head_puck.rs`，不受输出门控，测试随 `cargo test` 在所有平台运行。
+
 ## macOS 控制中心 Atmos 标识辅助
 
 `atmos_label_assist` 默认开启并随音频设置持久化。**控制中心的「杜比全景声」标签仅在

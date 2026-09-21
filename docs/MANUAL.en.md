@@ -455,7 +455,32 @@ One arc breathes and one is rigid — **the one that breathes is the change your
 | Windows object passthrough | PoseBridge BLE/USB or manual |
 | System spatial audio | The operating system |
 
-Manual orientation means dragging the pad in the settings window or typing the angles.
+**The orientation puck** sits beside the `Object scene` heading, and only where the orientation is
+this program's to hold — the first two rows above. Under system spatial audio the system holds it and
+never says where it put it, so a puck there would draw a confident zero. It is the listener seen from
+behind and above: the dot on the ring is the direction they face, front up, which is yaw and nothing
+else; the **eye line** across the middle rises when they look up and tips the way the head tips, which
+is pitch and roll. Three colours — green while a sensor is arriving, grey when the orientation is
+exactly what you last set, red when a sensor was asked for and is not arriving, leaving the
+orientation wherever it was last seen. Hover for the three angles and the status, drag to turn,
+double-click to recentre, right-click to change the source. The settings window's `Head` page draws
+the same puck larger, where it is also the drag target — it replaced a grey box labelled *Drag here to
+turn your head* — with the angle fields beside it.
+
+**Keys**, window-wide whenever nothing holds keyboard focus, and again only where the orientation is
+this program's:
+
+| Key | Does |
+| --- | --- |
+| `R` | Recentre, the same as the button |
+| `H` | Hold, and release. Switches to Fixed orientation, and back to the source that was selected |
+| `←` `→` | Turn 5°, or 1° with `Shift` |
+| `↑` `↓` | Look up or down 5°, or 1° with `Shift`, bounded at ±85° |
+
+Arrow keys and dragging both select Manual, which is how you take the orientation back from AirPods.
+With a PoseBridge sensor selected they do nothing, because its next sample would overwrite the pose —
+but `R` and double-click still work, since that re-references the sensor. Roll is on no key: only a
+sensor reports it.
 
 **Sound direction lags when you turn your head?** Rule out playback-chain latency first. Virtual
 sound cards, virtual mixers and wireless headphones all add buffering. Compare against a wired

@@ -26,6 +26,7 @@ use crate::playlist::{
 };
 use crate::playlist_ui;
 use crate::preferences::{AppPreferences, DataDirectory};
+mod head_puck;
 mod library_integration;
 mod visual_settings;
 use crate::scene3d;
@@ -141,6 +142,10 @@ pub struct PlayerApp {
     /// Listener pose. Head tracking will drive the two angles; until then the
     /// listener faces the room's front.
     figure: scene3d::figure::Figure,
+    /// What `H` will put back. Session state, not a preference: the stored
+    /// source is whatever is selected, and holding is a choice about this
+    /// sitting rather than one worth reopening the player with.
+    held_source: Option<crate::head_tracking::HeadSource>,
     /// Reused across frames so rebuilding the scene does not reallocate.
     scene_mesh: scene3d::mesh::MeshBuilder,
     /// False when eframe is not on the wgpu backend. The stage then draws
@@ -942,6 +947,7 @@ impl PlayerApp {
             meter_readout: MeterReadout::default(),
             object_meters: ObjectMeters::default(),
             figure: scene3d::figure::Figure::default(),
+            held_source: None,
             scene_mesh: scene3d::mesh::MeshBuilder::default(),
             scene_renderer_ready,
             // Assume the window is showing until a `logic` without a preceding
@@ -1043,10 +1049,18 @@ impl PlayerApp {
             return;
         }
         self.backend = self.output.settings().mode;
-        let [yaw, pitch, roll] = self.output.head_snapshot().pose.euler();
+        let head = self.output.head_snapshot();
+        let [yaw, pitch, roll] = head.pose.euler();
         self.figure.head_yaw = yaw;
         self.figure.head_pitch = pitch;
         self.figure.head_roll = roll;
+        // A sensor turns whether or not anything is playing, and both the
+        // listener figure and the header puck are drawn from it. Without this
+        // a paused player redraws them on the two-second heartbeat below, so
+        // the head lags the person wearing the sensor by whole seconds.
+        if head.status.confidence() == crate::head_tracking::Confidence::Tracking {
+            context.request_repaint_after(Duration::from_millis(33));
+        }
         if let Some(result) = self.output.take_settings_result() {
             self.audio_settings_error = result.as_ref().err().cloned();
             self.status = match result {
@@ -1835,11 +1849,7 @@ impl PlayerApp {
                                         ui,
                                         &head,
                                         self.output.posebridge(),
-                                        matches!(
-                                            mode,
-                                            SpatialBackendKind::SafBinaural
-                                                | SpatialBackendKind::WindowsSpatialAudio
-                                        ),
+                                        mode.carries_head_orientation(),
                                     );
                                 }
                             }
@@ -1887,10 +1897,7 @@ impl PlayerApp {
         let head = self.output.head_snapshot();
         // The device window can stay open after Head orientation changes.
         let enabled = settings.head_source == crate::head_tracking::HeadSource::PoseBridge
-            && matches!(
-                settings.mode.resolved(),
-                SpatialBackendKind::SafBinaural | SpatialBackendKind::WindowsSpatialAudio
-            );
+            && settings.mode.resolved().carries_head_orientation();
         let recenter = self.bridge_ui.draw_window(
             context,
             &mut settings.posebridge,
@@ -2544,6 +2551,8 @@ impl PlayerApp {
         mirror_frame: Option<&crate::scene_view::SceneViewFrame>,
     ) {
         let decoder = self.decoder.snapshot().clone();
+        let context = root.ctx().clone();
+        let mut head_command = None;
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::NONE
@@ -2553,6 +2562,11 @@ impl PlayerApp {
             .show(root, |ui| {
                 ui.horizontal(|ui| {
                     ui.heading(RichText::new("Object scene").color(theme::TEXT));
+                    // Beside the title rather than in the status group on the
+                    // right: it says which way this picture is turned, and it
+                    // should not move when the format text changes width.
+                    ui.add_space(10.0);
+                    head_command = self.draw_head_puck(ui);
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         let warning = mirror_frame.is_some_and(|frame| {
                             let tracking = frame.tracking();
@@ -2600,6 +2614,9 @@ impl PlayerApp {
                 ui.add_space(16.0);
                 self.draw_stage(ui, &decoder, mirror_frame);
             });
+        if let Some(command) = head_command {
+            self.apply_head_command(command, &context);
+        }
     }
 
     fn draw_tracking_status(
@@ -3689,6 +3706,13 @@ impl eframe::App for PlayerApp {
         // frozen at the last shown pass, so re-reading the drop list there would
         // append the same files again on every tick.
         self.accept_dropped_files(&context);
+        // Before the panels, so a key that belongs to the listener is consumed
+        // rather than left for whichever widget happens to be drawn under the
+        // pointer. Focus is resolved at the end of a pass, so the guard inside
+        // reads the focus this key was typed against.
+        if let Some(command) = self.head_shortcut(&context) {
+            self.apply_head_command(command, &context);
+        }
         // Read once for the whole pass. The bank, the counts and the geometry
         // then describe the same presentation-clock instant instead of racing
         // the audio side for three separate snapshots — and the ballistics
@@ -4072,29 +4096,16 @@ fn draw_head_page(
 ) -> (Option<[f32; 3]>, bool) {
     let mut manual = None;
     let mut recenter = false;
-    if matches!(
-        mode,
-        SpatialBackendKind::SafBinaural | SpatialBackendKind::WindowsSpatialAudio
-    ) {
+    if mode.carries_head_orientation() {
         ui.horizontal(|ui| {
             ui.label("Head orientation");
             egui::ComboBox::from_id_salt("head-source")
                 .selected_text(settings.head_source.label())
                 .show_ui(ui, |ui| {
                     for source in crate::head_tracking::HeadSource::ALL {
-                        ui.add_enabled_ui(
-                            (source != crate::head_tracking::HeadSource::AirPods
-                                || cfg!(target_os = "macos"))
-                                && (source != crate::head_tracking::HeadSource::PoseBridge
-                                    || cfg!(posebridge_input)),
-                            |ui| {
-                                ui.selectable_value(
-                                    &mut settings.head_source,
-                                    source,
-                                    source.label(),
-                                );
-                            },
-                        );
+                        ui.add_enabled_ui(source.available(), |ui| {
+                            ui.selectable_value(&mut settings.head_source, source, source.label());
+                        });
                     }
                 });
         });
@@ -4104,40 +4115,48 @@ fn draw_head_page(
         let mut angles = head.pose.euler();
         let mut changed = false;
         ui.horizontal(|ui| {
-            for (index, label) in ["Yaw", "Pitch", "Roll"].into_iter().enumerate() {
-                ui.label(label);
-                let limit = if index == 1 { 85.0 } else { 180.0 };
-                changed |= ui
-                    .add(
-                        egui::DragValue::new(&mut angles[index])
-                            .speed(0.5)
-                            .range(-limit..=limit)
-                            .suffix("°"),
-                    )
-                    .changed();
+            // The same glyph the scene header carries, at the size that also
+            // makes it the drag target. It replaced a grey box labelled "Drag
+            // here to turn your head", which had to be labelled because it
+            // showed nothing: this one is the readout as well as the handle,
+            // and one drawing of the pose cannot disagree with another.
+            match head_puck::draw(ui, head, settings.head_source, head_puck::PAGE_SIZE) {
+                Some(head_puck::Command::Turn(turned)) => {
+                    angles = turned;
+                    changed = true;
+                }
+                Some(head_puck::Command::Recenter) => recenter = true,
+                Some(head_puck::Command::Source(source)) => settings.head_source = source,
+                // `Hold` is a key; this page has the whole source list already.
+                Some(head_puck::Command::Hold) | None => {}
             }
+            ui.add_space(10.0);
+            ui.vertical(|ui| {
+                for (index, label) in ["Yaw", "Pitch", "Roll"].into_iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        let limit = if index == 1 { 85.0 } else { 180.0 };
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut angles[index])
+                                    .speed(0.5)
+                                    .range(-limit..=limit)
+                                    .suffix("°"),
+                            )
+                            .changed();
+                        ui.label(label);
+                    });
+                }
+            });
         });
-        let (rect, response) = ui.allocate_exact_size(egui::vec2(370.0, 54.0), egui::Sense::drag());
-        ui.painter().rect_filled(rect, 4.0, theme::SURFACE);
-        ui.painter().text(
-            rect.center(),
-            Align2::CENTER_CENTER,
-            "Drag here to turn your head",
-            egui::FontId::proportional(12.0),
-            theme::MUTED,
-        );
-        if response.dragged() {
-            let delta = ui.input(|input| input.pointer.delta());
-            angles[0] -= delta.x * 0.35;
-            angles[1] = (angles[1] - delta.y * 0.35).clamp(-85.0, 85.0);
-            changed = true;
-        }
         if changed {
             manual = Some(angles);
             settings.head_source = crate::head_tracking::HeadSource::Manual;
         }
-        recenter = ui.button("Recenter").clicked();
-        ui.label(head.status.label());
+        ui.horizontal(|ui| {
+            recenter |= ui.button("Recenter").clicked();
+            ui.add_space(4.0);
+            ui.label(head.status.label());
+        });
     } else {
         ui.label("Head orientation is controlled by the system spatializer.");
     }
