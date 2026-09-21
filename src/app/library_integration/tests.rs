@@ -2,6 +2,8 @@ use super::*;
 use crate::preferences::DataDirectory;
 
 mod demo;
+#[cfg(macinrender_output)]
+mod head_hold;
 
 fn open(path: &Path) -> (PlayerApp, egui::Context) {
     let context = egui::Context::default();

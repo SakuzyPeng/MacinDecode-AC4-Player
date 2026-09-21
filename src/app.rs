@@ -142,10 +142,6 @@ pub struct PlayerApp {
     /// Listener pose. Head tracking will drive the two angles; until then the
     /// listener faces the room's front.
     figure: scene3d::figure::Figure,
-    /// What `H` will put back. Session state, not a preference: the stored
-    /// source is whatever is selected, and holding is a choice about this
-    /// sitting rather than one worth reopening the player with.
-    held_source: Option<crate::head_tracking::HeadSource>,
     /// Reused across frames so rebuilding the scene does not reallocate.
     scene_mesh: scene3d::mesh::MeshBuilder,
     /// False when eframe is not on the wgpu backend. The stage then draws
@@ -947,7 +943,6 @@ impl PlayerApp {
             meter_readout: MeterReadout::default(),
             object_meters: ObjectMeters::default(),
             figure: scene3d::figure::Figure::default(),
-            held_source: None,
             scene_mesh: scene3d::mesh::MeshBuilder::default(),
             scene_renderer_ready,
             // Assume the window is showing until a `logic` without a preceding

@@ -473,7 +473,7 @@ this program's:
 | Key | Does |
 | --- | --- |
 | `R` | Recentre, the same as the button |
-| `H` | Hold, and release. Switches to Fixed orientation, and back to the source that was selected |
+| `H` | Hold the current orientation; press again to resume. The source and sensor connection stay unchanged |
 | `←` `→` | Turn 5°, or 1° with `Shift` |
 | `↑` `↓` | Look up or down 5°, or 1° with `Shift`, bounded at ±85° |
 
@@ -481,6 +481,11 @@ Arrow keys and dragging both select Manual, which is how you take the orientatio
 With a PoseBridge sensor selected they do nothing, because its next sample would overwrite the pose —
 but `R` and double-click still work, since that re-references the sensor. Roll is on no key: only a
 sensor reports it.
+
+Hold lasts only for the current session and does not change the saved orientation source. The status
+reads `Orientation held · H to resume`; the sensor keeps sampling, and resuming uses the same recenter
+reference. Manual adjustment, recentering, changing the source, or switching to system spatial audio
+releases the hold.
 
 **Sound direction lags when you turn your head?** Rule out playback-chain latency first. Virtual
 sound cards, virtual mixers and wireless headphones all add buffering. Compare against a wired

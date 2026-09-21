@@ -234,6 +234,11 @@ Degraded 红。Tracking 期间 `sync_output` 额外请求 33 ms 重绘——传�
 方向键与拖动都走 `manual_head`，其本身即切换到 Manual——这正是从 AirPods 接管的方式；选中 PoseBridge
 时拒绝转动（下一采样即覆盖），但接受回正，那是重建传感器参考。roll 不在任何按键或拖动轴上。
 
+`H` 只在头追线程的 `Desired::held_pose` 中保存当前呈现姿态，不改 `HeadSource` 或持久设置。
+暂停期间 AirPods/PoseBridge 继续采样并保持参考，线程向场景及音频输出发布同一个冻结姿态，状态为
+`HeadStatus::Held`。再次按下后恢复当前采样；手动调整、回正、改变来源或停用播放器头控会清除暂停。
+固定朝向来源下 `H` 不改变任何状态。
+
 几何与角度算术在 `src/app/head_puck.rs`，不受输出门控，测试随 `cargo test` 在所有平台运行。
 
 ## macOS 控制中心 Atmos 标识辅助

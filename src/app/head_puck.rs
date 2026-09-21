@@ -299,14 +299,8 @@ impl PlayerApp {
             }
             Command::Source(source) => self.change_head_source(source, context),
             Command::Hold => {
-                let current = self.output.settings().head_source;
-                let source = if current == HeadSource::Off {
-                    self.held_source.take().unwrap_or(HeadSource::Automatic)
-                } else {
-                    self.held_source = Some(current);
-                    HeadSource::Off
-                };
-                self.change_head_source(source, context);
+                self.output.toggle_head_hold();
+                context.request_repaint_after(std::time::Duration::from_millis(20));
             }
         }
     }

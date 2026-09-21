@@ -145,6 +145,7 @@ impl Quaternion {
 )]
 pub enum HeadStatus {
     Fixed,
+    Held,
     System,
     Manual,
     AirPods,
@@ -169,6 +170,7 @@ impl HeadStatus {
             #[cfg(posebridge_input)]
             Self::BridgeFrozen => "PoseBridge stale · orientation frozen",
             Self::Fixed => "Fixed orientation",
+            Self::Held => "Orientation held · H to resume",
             Self::System => "Orientation controlled by the system",
             Self::Manual => "Manual orientation",
             Self::AirPods => "AirPods tracking",
@@ -185,7 +187,7 @@ impl HeadStatus {
             #[cfg(posebridge_input)]
             Self::BridgeWaiting | Self::BridgeFrozen => Confidence::Degraded,
             Self::AirPods => Confidence::Tracking,
-            Self::Fixed | Self::System | Self::Manual => Confidence::Held,
+            Self::Fixed | Self::Held | Self::System | Self::Manual => Confidence::Held,
             Self::Waiting | Self::Denied | Self::Disconnected | Self::MissingBundle => {
                 Confidence::Degraded
             }
@@ -248,6 +250,9 @@ struct Desired {
     enabled: bool,
     system: bool,
     manual: Quaternion,
+    /// Session-only presentation override. The selected source keeps sampling
+    /// with its existing reference while the listener stays at this pose.
+    held_pose: Option<Quaternion>,
     revision: u64,
     recenter: u64,
     #[cfg(posebridge_input)]
@@ -262,6 +267,7 @@ impl Default for Desired {
             enabled: false,
             system: false,
             manual: Quaternion::default(),
+            held_pose: None,
             revision: 0,
             recenter: 0,
             #[cfg(posebridge_input)]
@@ -442,14 +448,14 @@ impl HeadTracker {
                     if using_bridge {
                         smoothing = f64::from(desired.bridge_smoothing_ms) / 1000.0;
                     }
-                    resolved = if smoothing <= 0.0 {
+                    resolved = if let Some(held) = desired.held_pose {
+                        status = HeadStatus::Held;
+                        held
+                    } else if !desired.enabled || smoothing <= 0.0 {
                         goal
                     } else {
                         resolved.slerp(goal, 1.0 - (-elapsed / smoothing).exp())
                     };
-                    if !desired.enabled {
-                        resolved = goal;
-                    }
                     *m.0.lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner) = HeadSnapshot {
                         pose: resolved,
@@ -537,6 +543,9 @@ impl HeadTracker {
             .desired
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if source != desired.source || !enabled {
+            desired.held_pose = None;
+        }
         desired.source = source;
         desired.enabled = enabled;
         desired.system = system;
@@ -556,14 +565,36 @@ impl HeadTracker {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         desired.manual = Quaternion::from_euler(euler);
+        desired.held_pose = None;
         desired.revision += 1;
         desired.source = HeadSource::Manual;
     }
     pub fn recenter(&self) {
-        self.desired
+        let mut desired = self
+            .desired
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .recenter += 1;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        desired.held_pose = None;
+        desired.recenter += 1;
+    }
+    /// Freeze the presented pose without changing the source or disconnecting
+    /// its sensor. Releasing resumes samples in the same reference frame.
+    pub fn toggle_hold(&self) {
+        let mut desired = self
+            .desired
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if desired.enabled && desired.source != HeadSource::Off {
+            desired.held_pose = if desired.held_pose.is_some() {
+                None
+            } else {
+                Some(self.snapshot().pose)
+            };
+        }
+        drop(desired);
+        if let Some(join) = &self.join {
+            join.thread().unpark();
+        }
     }
     #[cfg(macinrender_output)]
     pub fn set_target(&self, target: Option<NativeTarget>) {
@@ -590,6 +621,73 @@ impl Drop for HeadTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn until(mut condition: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !condition() {
+            assert!(Instant::now() < deadline, "head control timed out");
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    #[test]
+    fn holding_preserves_the_presented_pose_and_source() {
+        let tracker = HeadTracker::new();
+        tracker.configure(HeadSource::Manual, true, false);
+        tracker.manual([45.0, 20.0, -10.0]);
+        until(|| (tracker.snapshot().pose.euler()[0] - 45.0).abs() < 0.01);
+        tracker.toggle_hold();
+        until(|| tracker.snapshot().status == HeadStatus::Held);
+        let held = tracker.snapshot().pose;
+        assert!((held.euler()[0] - 45.0).abs() < 0.01);
+        // Unrelated output settings may configure the same source again.
+        tracker.configure(HeadSource::Manual, true, false);
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(tracker.snapshot().pose, held);
+        assert_eq!(tracker.snapshot().status, HeadStatus::Held);
+        tracker.toggle_hold();
+        until(|| tracker.snapshot().status == HeadStatus::Manual);
+        assert!((tracker.snapshot().pose.euler()[0] - 45.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn explicit_head_controls_release_a_hold() {
+        let tracker = HeadTracker::new();
+        for action in 0..4 {
+            tracker.configure(HeadSource::Manual, true, false);
+            tracker.manual([45.0, 0.0, 0.0]);
+            until(|| (tracker.snapshot().pose.euler()[0] - 45.0).abs() < 0.01);
+            tracker.toggle_hold();
+            until(|| tracker.snapshot().status == HeadStatus::Held);
+            let (status, yaw) = match action {
+                0 => {
+                    tracker.manual([-30.0, 0.0, 0.0]);
+                    (HeadStatus::Manual, -30.0)
+                }
+                1 => {
+                    tracker.recenter();
+                    (HeadStatus::Manual, 0.0)
+                }
+                2 => {
+                    tracker.configure(HeadSource::Off, true, false);
+                    (HeadStatus::Fixed, 0.0)
+                }
+                _ => {
+                    tracker.configure(HeadSource::Manual, false, true);
+                    (HeadStatus::System, 0.0)
+                }
+            };
+            until(|| {
+                let head = tracker.snapshot();
+                head.status == status && (head.pose.euler()[0] - yaw).abs() < 0.01
+            });
+        }
+        // A system-owned pose cannot acquire a hidden hold to apply later.
+        tracker.toggle_hold();
+        tracker.configure(HeadSource::Manual, true, false);
+        until(|| tracker.snapshot().status == HeadStatus::Manual);
+    }
+
     #[test]
     fn canonical_pose_round_trips_all_three_axes() {
         for angles in [
@@ -670,5 +768,32 @@ mod bridge_tests {
         publish(&tracker, 4, [70., 20., 10.], true);
         until(|| tracker.snapshot().status == HeadStatus::BridgeActive);
         until(|| (tracker.snapshot().pose.euler()[0] - 70.).abs() < 0.01);
+    }
+
+    #[test]
+    fn releasing_hold_uses_the_current_sample_in_the_original_reference() {
+        let tracker = HeadTracker::new();
+        tracker.configure_bridge(&crate::posebridge::Preferences {
+            smoothing_ms: 0.0,
+            max_age_ms: 500,
+            ..Default::default()
+        });
+        tracker.configure(HeadSource::PoseBridge, true, false);
+        publish(&tracker, 1, [0.0; 3], true);
+        until(|| tracker.snapshot().status == HeadStatus::BridgeActive);
+        publish(&tracker, 2, [40.0, 20.0, 10.0], true);
+        until(|| (tracker.snapshot().pose.euler()[0] - 40.0).abs() < 0.01);
+        tracker.toggle_hold();
+        until(|| tracker.snapshot().status == HeadStatus::Held);
+        let held = tracker.snapshot().pose;
+        publish(&tracker, 3, [70.0, 20.0, 10.0], true);
+        thread::sleep(Duration::from_millis(25));
+        assert_eq!(tracker.snapshot().pose, held);
+        tracker.toggle_hold();
+        until(|| {
+            let snapshot = tracker.snapshot();
+            snapshot.status == HeadStatus::BridgeActive
+                && (snapshot.pose.euler()[0] - 70.0).abs() < 0.01
+        });
     }
 }

@@ -417,6 +417,9 @@ impl SpatialOutputController {
     pub fn recenter_head(&self) {
         self.head.recenter();
     }
+    pub fn toggle_head_hold(&self) {
+        self.head.toggle_hold();
+    }
     pub fn ensure_configured(&mut self, config: &OutputStreamConfig, reader: SceneQueueReader) {
         #[cfg(macinrender_output)]
         if self.uses_macinrender() {
