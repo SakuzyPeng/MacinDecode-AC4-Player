@@ -2,6 +2,8 @@
 use serde::{Deserialize, Serialize};
 
 #[cfg(posebridge_input)]
+mod configuration;
+#[cfg(posebridge_input)]
 pub mod service;
 #[cfg(posebridge_input)]
 pub mod ui;

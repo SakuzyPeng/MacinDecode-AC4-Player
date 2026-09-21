@@ -501,16 +501,18 @@ The `Head` page then keeps one summary row: the orientation status, the rate sam
 once connected, and Recenter listening direction. Everything else lives in the window **Device
 panel…** opens. That window resizes freely and can sit beside the 3D scene — which is what checking a
 mounting takes, since it means turning your head and watching whether the figure nods with you.
+The default wide layout places sensor selection, mounting and acquisition on the left, with rate, format and fusion on
+the right. Narrow windows stack these sections. Connection and recenter controls remain at the top; Device actions stay at the bottom.
 
 1. In the device window, open **Device**, select Bluetooth LE or USB serial, Scan and choose the device.
 2. Choose the sensor axes pointing toward head Right, Forward and Up. They must form a right-handed basis; check all three directions while wearing it.
 3. Connect. The player reads the current format without changing device rate, output or calibration. Connection is manual on each application launch.
-4. Use Recenter listening direction, on the `Head` summary row or on the window's **Tracking** page. Initial connection and reconnection preserve the presented heading.
+4. Use Recenter listening direction, on the `Head` summary row or in the window's top bar. Initial connection and reconnection preserve the presented heading.
 
 Switching to another head orientation source or system spatial audio stops tracking and disables **Connect**
 in the open device window. Choose PoseBridge sensor and a supported playback mode again to reconnect manually.
 
-**Check the mounting by moving.** Once connected and tracking, the **Check the mounting** section on the
+**Check the mounting by moving.** Once connected and tracking, the **Mounting check** section on the
 `Tracking` page verifies the three axes without listening for them. Press **Start** for Nod, Shake and
 Tilt in turn; each gives a four-second window for one deliberate motion and a return — look up, turn
 left, tip toward your right shoulder. Each motion physically turns about exactly one head axis, so the
@@ -540,7 +542,7 @@ The **WT901BLE68 (BWT901BLECL5.0)** used here has the following recorded mountin
 Both saved BLE and USB profiles have been checked against this mapping. The player's `mounting` value is `[-2, 1, 3]`;
 the equivalent standalone PoseBridge CLI argument is `--mount=-y,+x,+z`.
 The initial `+X / +Y / +Z` identity mapping made nodding appear as sideways tilt in this setup; use the recorded mapping for this mounting.
-That is exactly the case **Check the mounting** above now names directly.
+That is exactly the case **Mounting check** above now names directly.
 Disconnect before changing the axes, then Connect and Recenter. This record applies to the device's current physical mounting;
 after remounting, check that nodding changes Pitch, sideways tilt changes Roll, and all three signs are correct. BLE and USB profiles are saved separately.
 
@@ -558,11 +560,18 @@ The switch changes only player settings. It never reconnects or writes the senso
 followed by the existing smoothing. Mode changes blend for 50 ms. Recenter and mounting checks use measured poses;
 audio and the scene consume the same final orientation.
 
-Use **Device → Prepare enhanced data** while disconnected: **Read preparation options**, review the format and
-unchanged rate, **Apply enhanced data format**, then connect manually. The current choice is verified **0xA4**
-(timestamp, gyro, quaternion). The 30-byte **0xE4** full inertial format is experimental at 20 Hz and excluded from
-presets until USB/BLE static and three-axis hardware acceptance passes. Existing Motion acceleration still supports
-diagnostics; missing device timestamps keep prediction disabled.
+On **Device**, use the bottom **Read settings** action, then edit rate, format and fusion on the right.
+**Green ✓** identifies the device's readback value inside each control; **orange •** marks the selected pending value.
+There is no separate duplicate current-value panel. These drafts can be edited while tracking. Disconnect using the top
+bar before pressing the single **Apply changes** button at the bottom. The player rereads the device, writes only the
+submitted changes, checks each write, then verifies the complete configuration. Stale settings, cancellation and partial
+failure are reported explicitly. **Discard edits** changes the draft only; it does not undo device writes.
+
+**Prepare enhanced data** stages the appropriate format without changing the selected rate, using that same Apply action.
+The current choice is verified **0xA4** (timestamp, gyro, quaternion). The 30-byte **0xE4** full inertial format remains an
+experimental 20 Hz option, excluded from presets pending USB/BLE hardware acceptance. Existing Motion acceleration still
+supports diagnostics; missing timestamps keep prediction disabled. Connect manually afterwards. Applying ordinary settings
+does not calibrate, zero or save to Flash.
 
 Diagnostics reports the actual sensor attitude source, head-axis gyro/acceleration, clock readiness/drift, estimated
 excess holding, prediction, residual and history counts. Timing uses a 10-second lower envelope with one-second bins;
@@ -573,10 +582,10 @@ including smoothing. Missing fields, clock anomalies, a gyro/pose residual above
 fall back to ordinary tracking. Low gyro and pose-change rates lasting 500 ms stop extrapolation; available acceleration
 must also be near 1 g.
 
-Disconnect before configuring rate, timestamp output, six/nine-axis fusion, zeroing, calibration, saving or defaults;
-Connect again manually afterwards. Those writes sit inside the **Device configuration** section of the
-**Device** page, collapsed by default and split into operations the sensor is not asked to save and
-operations that write its saved settings, the latter marked in the warning colour. Zero yaw requires six-axis mode. Device angle reference includes SAVE; restoring defaults also saves.
+Calibration, zeroing, Flash saving and defaults have their own **Maintenance** page, in separate calibration/reference
+and saved-settings columns. These actions retain a confirmation dialog and never join the ordinary **Apply changes** batch.
+Saved-setting operations use the warning colour. Zero yaw requires six-axis mode; angle reference includes SAVE, and
+restoring defaults also saves. Connect manually after a device operation.
 Explicitly end magnetic calibration before quitting. The quit guard also runs while the window is minimized or covered and restores it to show the prompt.
 Sent/readback/completion results do not establish calibration accuracy or persistence.
 On macOS, run the packaged `.app` with its Bluetooth usage description and allow access on the first scan/connection.

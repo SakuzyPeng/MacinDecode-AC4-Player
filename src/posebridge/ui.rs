@@ -1,6 +1,7 @@
 //! UI issues explicit commands; opening this panel never accesses hardware.
+use super::configuration::Settings;
 use super::service::{Command, Phase, Service, View, configuration};
-use super::{Device, Input, Preferences, Transport, mounting};
+use super::{Device, Preferences, Transport, mounting};
 use crate::head_tracking::{HeadSnapshot, Quaternion};
 use eframe::egui;
 use posebridge_core as pb;
@@ -9,6 +10,23 @@ use std::time::{Duration, Instant};
 /// How long one motion of the mounting check is watched for. Long enough to
 /// look up and come back without hurrying, short enough not to be a pose.
 const CAPTURE: Duration = Duration::from_secs(4);
+
+fn wide(ui: &egui::Ui) -> bool {
+    ui.available_width() >= 800.
+}
+fn section<R>(ui: &mut egui::Ui, title: &str, contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    egui::Frame::new()
+        .fill(crate::theme::SURFACE)
+        .stroke(egui::Stroke::new(1., crate::theme::BORDER))
+        .inner_margin(12)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.strong(title);
+            ui.add_space(6.);
+            contents(ui)
+        })
+        .inner
+}
 
 /// Calibration belongs to one device configuration and acquisition/reference
 /// epoch. A connection can change while this window is closed.
@@ -84,6 +102,7 @@ enum Tab {
     #[default]
     Tracking,
     Device,
+    Maintenance,
     Diagnostics,
 }
 #[allow(
@@ -95,14 +114,15 @@ pub struct Panel {
     /// everything else lives behind this.
     open: bool,
     tab: Tab,
-    rate: u32,
-    format: u16,
-    six_axis: bool,
+    draft: Settings,
+    baseline: Option<Settings>,
+    settings_device: Option<(Transport, String)>,
+    prepare_stream: bool,
+    prepare_request: Option<u64>,
     confirmation: Option<(Device, pb::DeviceCommand)>,
     check: Check,
     error: Option<String>,
     observation: Option<(String, Option<u64>)>,
-    preparation: Option<(Device, u64)>,
     closing: bool,
     allow_close: bool,
 }
@@ -111,14 +131,15 @@ impl Default for Panel {
         Self {
             open: false,
             tab: Tab::Tracking,
-            rate: 100,
-            format: 0x84,
-            six_axis: false,
+            draft: Settings::default(),
+            baseline: None,
+            settings_device: None,
+            prepare_stream: false,
+            prepare_request: None,
             confirmation: None,
             check: Check::default(),
             error: None,
             observation: None,
-            preparation: None,
             closing: false,
             allow_close: false,
         }
@@ -170,6 +191,16 @@ impl Panel {
         ui.horizontal(|ui| {
             if ui.button("Device panel…").clicked() {
                 self.open = true;
+                // The panel can already exist behind the player or minimized.
+                // Restore it only on an explicit click, never on every repaint.
+                let viewport = egui::ViewportId::from_hash_of("posebridge-device");
+                for command in [
+                    egui::ViewportCommand::Minimized(false),
+                    egui::ViewportCommand::Visible(true),
+                    egui::ViewportCommand::Focus,
+                ] {
+                    ui.ctx().send_viewport_cmd_to(viewport, command);
+                }
             }
             recenter = ui
                 .add_enabled(
@@ -208,15 +239,15 @@ impl Panel {
             egui::ViewportBuilder::default()
                 .with_title("MacinDecode AC-4 PoseBridge")
                 .with_icon(crate::app_icon::load())
-                .with_inner_size([520.0, 580.0])
-                .with_min_inner_size([420.0, 380.0]),
+                .with_inner_size([1000.0, 700.0])
+                .with_min_inner_size([580.0, 440.0]),
             |root, _class| {
                 let close_requested = root.ctx().input(|input| input.viewport().close_requested());
                 egui::CentralPanel::default()
                     .frame(
                         egui::Frame::NONE
                             .fill(crate::theme::BACKGROUND)
-                            .inner_margin(egui::Margin::same(22)),
+                            .inner_margin(egui::Margin::same(16)),
                     )
                     .show(root, |ui| {
                         recenter = self.contents(ui, prefs, head, service, enabled);
@@ -243,58 +274,122 @@ impl Panel {
         enabled: bool,
     ) -> bool {
         let view = service.view();
+        self.sync_settings(prefs, &view);
+        let recenter = self.connection_bar(ui, prefs, head, service, &view, enabled);
+        ui.separator();
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.tab, Tab::Tracking, "Tracking");
             ui.selectable_value(&mut self.tab, Tab::Device, "Device");
+            ui.selectable_value(&mut self.tab, Tab::Maintenance, "Maintenance");
             ui.selectable_value(&mut self.tab, Tab::Diagnostics, "Diagnostics");
         });
-        let mut recenter = false;
-        // Whatever tab is showing, and whether or not its section is expanded:
-        // a capture left behind still has to end, or its motion holds every
-        // other Start disabled.
         self.advance_check(head, prefs, &view, enabled);
+        ui.add_space(8.);
+        let footer = if self.tab == Tab::Device {
+            if view.apply.as_ref().is_some_and(|a| !a.complete) {
+                144.
+            } else {
+                104.
+            }
+        } else {
+            0.
+        };
+        let height = (ui.available_height() - footer).max(80.);
         egui::ScrollArea::vertical()
-            .id_salt(match self.tab { Tab::Tracking => "pose-tracking", Tab::Device => "pose-device", Tab::Diagnostics => "pose-diagnostics" })
+            .id_salt(match self.tab {
+                Tab::Tracking => "pose-tracking",
+                Tab::Device => "pose-device",
+                Tab::Maintenance => "pose-maintenance",
+                Tab::Diagnostics => "pose-diagnostics",
+            })
+            .max_height(height)
             .auto_shrink([false, false])
-            .show(ui,|ui| {
-            if !enabled { ui.label("Choose PoseBridge sensor in Audio settings → Head and use software binaural or Windows object output to track a sensor."); }
-            if let Some(error)=self.error.as_ref().or(view.error.as_ref()) { ui.colored_label(crate::theme::WARNING,error); }
-            match self.tab {
+            .show(ui, |ui| match self.tab {
                 Tab::Tracking => {
-                    let angles=head.pose.euler();
-                    ui.label(format!("Yaw {:.1}°   Pitch {:.1}°   Roll {:.1}°",angles[0],angles[1],angles[2]));
-                    ui.label(head.status.label());
-                    self.connection(ui,prefs,service,&view,enabled);
-                    ui.checkbox(&mut prefs.enhanced_tracking,"Sensor-side enhancement");
-                    ui.label(service.enhancement.lock().unwrap_or_else(std::sync::PoisonError::into_inner).state.label());
-                    ui.small("Uses matched timestamps and gyro when reliable. Ordinary tracking remains the fallback.");
-                    recenter=ui.add_enabled(matches!(head.status,crate::head_tracking::HeadStatus::BridgeActive),
-                        egui::Button::new("Recenter listening direction")).clicked();
-                    ui.add(egui::Slider::new(&mut prefs.smoothing_ms,0.0..=50.0).text("Smoothing · ms"));
-                    ui.add(egui::Slider::new(&mut prefs.max_age_ms,50..=500).text("Freeze after · ms"));
-                    ui.small(if prefs.enhanced_tracking { "Freeze uses the larger of host age and trusted mapped age. Fixed link and audio delay remain unknown." } else { "Age starts at host reception. BLE may deliver several samples together." });
-                    self.mounting_check(ui, prefs, head);
-                }
-                Tab::Device => self.device(ui,prefs,service,&view,enabled),
-                Tab::Diagnostics => diagnostics(ui,&view,service),
-            }
-            if let Some((device,command))=self.confirmation.clone() {
-                ui.separator();
-                ui.strong(command_label(&command));
-                ui.label(format!("Device: {}",device.id));
-                ui.label(command_effect(&command));
-                ui.horizontal(|ui| {
-                    if ui.add_enabled(!view.phase.busy(),egui::Button::new("Confirm operation")).clicked() {
-                        self.send(service,Command::Write(device,command)); self.confirmation=None;
+                    if wide(ui) {
+                        ui.columns(2, |columns| {
+                            section(&mut columns[0], "Listening direction", |ui| {
+                                Self::tracking(ui, prefs, head, service);
+                            });
+                            section(&mut columns[1], "Mounting check", |ui| {
+                                self.mounting_check(ui, prefs, head);
+                            });
+                        });
+                    } else {
+                        section(ui, "Listening direction", |ui| {
+                            Self::tracking(ui, prefs, head, service);
+                        });
+                        ui.add_space(12.);
+                        section(ui, "Mounting check", |ui| {
+                            self.mounting_check(ui, prefs, head);
+                        });
                     }
-                    if ui.button("Cancel").clicked() { self.confirmation=None; }
-                });
-            }
-        });
+                }
+                Tab::Device => self.device(ui, prefs, service, &view),
+                Tab::Maintenance => self.maintenance(ui, prefs, &view),
+                Tab::Diagnostics => {
+                    if wide(ui) {
+                        ui.columns(2, |columns| {
+                            section(&mut columns[0], "Sensor processing", |ui| {
+                                motion_diagnostics(ui, service);
+                            });
+                            section(&mut columns[1], "Connection details", |ui| {
+                                diagnostics(ui, &view, service);
+                            });
+                        });
+                    } else {
+                        section(ui, "Sensor processing", |ui| {
+                            motion_diagnostics(ui, service);
+                        });
+                        ui.add_space(12.);
+                        section(ui, "Connection details", |ui| {
+                            diagnostics(ui, &view, service);
+                        });
+                    }
+                }
+            });
+        if self.tab == Tab::Device {
+            self.settings_actions(ui, prefs, service, &view);
+        }
+        self.confirm_operation(ui.ctx(), service, &view);
         if view.phase.busy() || view.magnetic.is_some() {
             ui.ctx().request_repaint_after(repaint_interval(view.phase));
         }
         recenter
+    }
+    fn tracking(
+        ui: &mut egui::Ui,
+        prefs: &mut Preferences,
+        head: &HeadSnapshot,
+        service: &Service,
+    ) {
+        let [yaw, pitch, roll] = head.pose.euler();
+        ui.horizontal_wrapped(|ui| {
+            for text in [
+                format!("Yaw {yaw:.1}°"),
+                format!("Pitch {pitch:.1}°"),
+                format!("Roll {roll:.1}°"),
+            ] {
+                ui.label(text);
+            }
+        });
+        ui.label(head.status.label());
+        ui.add_space(8.);
+        ui.checkbox(&mut prefs.enhanced_tracking, "Sensor-side enhancement");
+        ui.label(
+            service
+                .enhancement
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .state
+                .label(),
+        );
+        ui.small("Uses matched timestamps and gyro when reliable.");
+        ui.add_space(8.);
+        ui.add(egui::Slider::new(&mut prefs.smoothing_ms, 0.0..=50.0).text("Smoothing · ms"));
+        ui.add(egui::Slider::new(&mut prefs.max_age_ms, 50..=500).text("Freeze after · ms"));
+        ui.small(if prefs.enhanced_tracking { "Expiry uses host age and trusted mapped age. Fixed link and audio delay remain unknown." }
+            else { "Age starts at host reception. BLE may deliver samples in batches." });
     }
     /// Check the mounting by moving, rather than by reading three combo boxes
     /// back and hoping.
@@ -304,25 +399,20 @@ impl Panel {
     /// really used. Three motions name all three entries; see
     /// [`super::mounting`] for why that is the whole derivation.
     fn mounting_check(&mut self, ui: &mut egui::Ui, prefs: &mut Preferences, head: &HeadSnapshot) {
-        ui.separator();
-        egui::CollapsingHeader::new("Check the mounting")
-            .default_open(false)
-            .show(ui, |ui| {
-                ui.small(
+        ui.small(
                     "Which sensor axis points where cannot be read off the three combo boxes. Move, and each motion says which one it used.",
                 );
-                if self.check.source.is_none() {
-                    ui.label("Connect or reconnect the selected sensor with these settings to check its mounting.");
-                    return;
-                }
-                for motion in mounting::Motion::ALL {
-                    self.check_row(ui, motion, head);
-                }
-                if let Some(refused) = self.check.refused {
-                    ui.colored_label(crate::theme::WARNING, refused);
-                }
-                self.check_result(ui, prefs);
-            });
+        if self.check.source.is_none() {
+            ui.label("Connect or reconnect the selected sensor with these settings to check its mounting.");
+            return;
+        }
+        for motion in mounting::Motion::ALL {
+            self.check_row(ui, motion, head);
+        }
+        if let Some(refused) = self.check.refused {
+            ui.colored_label(crate::theme::WARNING, refused);
+        }
+        self.check_result(ui, prefs);
     }
 
     /// One motion: the button that starts it, and what it came out as.
@@ -475,278 +565,6 @@ impl Panel {
         );
     }
 
-    fn connection(
-        &mut self,
-        ui: &mut egui::Ui,
-        prefs: &mut Preferences,
-        service: &Service,
-        view: &View,
-        enabled: bool,
-    ) {
-        ui.label(if prefs.device.id.is_empty() {
-            "No device selected"
-        } else if prefs.device.name.is_empty() {
-            prefs.device.id.as_str()
-        } else {
-            prefs.device.name.as_str()
-        });
-        ui.colored_label(phase_tone(view.phase), view.phase.label());
-        if view.phase == Phase::Tracking {
-            if ui.button("Disconnect").clicked() {
-                self.send(service, Command::Stop);
-            }
-        } else if view.phase.busy() {
-            if ui
-                .add_enabled(
-                    view.phase != Phase::Stopping,
-                    egui::Button::new("Cancel current operation"),
-                )
-                .clicked()
-            {
-                self.send(service, Command::Stop);
-            }
-        } else {
-            let valid = configuration(&prefs.device, true);
-            if ui
-                .add_enabled(
-                    enabled && view.magnetic.is_none() && valid.is_ok(),
-                    egui::Button::new("Connect"),
-                )
-                .clicked()
-            {
-                prefs.remember();
-                self.send(service, Command::Connect(prefs.device.clone()));
-            }
-            if let Err(error) = valid {
-                ui.small(if prefs.device.id.is_empty() {
-                    "Choose a device and its mounting axes on the Device tab."
-                } else {
-                    error.strip_prefix("invalid argument: ").unwrap_or(&error)
-                });
-            }
-        }
-    }
-    #[allow(
-        clippy::too_many_lines,
-        reason = "One device panel groups explicit device actions"
-    )]
-    fn device(
-        &mut self,
-        ui: &mut egui::Ui,
-        prefs: &mut Preferences,
-        service: &Service,
-        view: &View,
-        enabled: bool,
-    ) {
-        let editable = !view.phase.busy() && view.magnetic.is_none();
-        ui.add_enabled_ui(editable,|ui| {
-            let mut transport=prefs.device.transport;
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut transport,Transport::Ble,"Bluetooth LE");
-                ui.selectable_value(&mut transport,Transport::Usb,"USB serial");
-                if transport!=prefs.device.transport { prefs.select(transport,String::new(),String::new()); self.confirmation=None; }
-                if ui.button("Scan").clicked() { self.send(service,Command::Scan(transport)); }
-            });
-            egui::ComboBox::from_id_salt("posebridge-device").selected_text(
-                if prefs.device.id.is_empty(){"Choose device"}else{&prefs.device.id}).show_ui(ui,|ui| {
-                for d in &view.devices {
-                    let kind=if d.transport==pb::TransportKind::Ble{Transport::Ble}else{Transport::Usb};
-                    if kind==transport && ui.selectable_label(prefs.device.id==d.id,format!("{} · {}",d.name,d.id)).clicked() {
-                        prefs.select(kind,d.id.clone(),d.name.clone()); self.confirmation=None;
-                    }
-                }
-                for d in prefs.remembered.clone().into_iter().filter(|d|d.transport==transport) {
-                    if ui.selectable_label(prefs.device.id==d.id,format!("Remembered: {}",d.id)).clicked() {
-                        prefs.select(d.transport,d.id,d.name); self.confirmation=None;
-                    }
-                }
-            });
-            if transport==Transport::Usb {
-                ui.horizontal(|ui| {ui.label("Baud");ui.add(egui::DragValue::new(&mut prefs.device.baud).range(1..=921_600));});
-            }
-            #[cfg(target_os="windows")]
-            if transport==Transport::Ble { ui.checkbox(&mut prefs.device.throughput,"Request higher BLE throughput (Windows 11+)"); }
-            ui.label("Sensor axes pointing toward your head's:");
-            for (index,label) in ["Right","Forward","Up"].into_iter().enumerate() {
-                egui::ComboBox::from_id_salt(("mount",index)).selected_text(format!("{label}: {}",axis_name(prefs.device.mounting[index])))
-                    .show_ui(ui,|ui| {for axis in [-3,-2,-1,1,2,3] { ui.selectable_value(&mut prefs.device.mounting[index],axis,axis_name(axis)); }});
-            }
-            ui.small("Select a right-handed mounting. Once connected, the Tracking page checks all three by motion.");
-            egui::ComboBox::from_id_salt("posebridge-input").selected_text(if prefs.device.input==Input::Automatic{"Read current stream format"}else{"Poll quaternion registers"})
-                .show_ui(ui,|ui| {
-                    ui.selectable_value(&mut prefs.device.input,Input::Automatic,"Read current stream format");
-                    ui.selectable_value(&mut prefs.device.input,Input::RegisterQuaternion,"Poll quaternion registers (up to 50 requests/s)");
-                });
-        });
-        self.connection(ui, prefs, service, view, enabled);
-        self.prepare_enhancement(ui, prefs, service, view);
-        if let Some(device) = &view.magnetic {
-            ui.colored_label(
-                crate::theme::WARNING,
-                format!("Magnetic calibration may be active on {}", device.id),
-            );
-            if ui
-                .add_enabled(
-                    !view.phase.busy(),
-                    egui::Button::new("End magnetic calibration"),
-                )
-                .clicked()
-            {
-                self.send(
-                    service,
-                    Command::Write(device.clone(), pb::DeviceCommand::MagStop),
-                );
-            }
-        }
-        ui.separator();
-        // Collapsed by default: everything below writes the sensor, and none of
-        // it is on the way to hearing anything. Choosing a device and
-        // connecting is what this page is for.
-        egui::CollapsingHeader::new("Device configuration")
-            .default_open(false)
-            .show(ui, |ui| {
-                self.device_configuration(ui, prefs, service, view);
-            });
-    }
-    fn prepare_enhancement(
-        &mut self,
-        ui: &mut egui::Ui,
-        prefs: &mut Preferences,
-        service: &Service,
-        view: &View,
-    ) {
-        ui.separator();
-        ui.label("Prepare enhanced data");
-        ui.small("Disconnect first. Read the current configuration, apply the proposed format, then connect manually.");
-        let editable = !view.phase.busy()
-            && view.magnetic.is_none()
-            && configuration(&prefs.device, false).is_ok();
-        if ui
-            .add_enabled(editable, egui::Button::new("Read preparation options"))
-            .clicked()
-        {
-            self.send(service, Command::Inspect(prefs.device.clone()));
-            if self.error.is_none() {
-                self.preparation = Some((prefs.device.clone(), service.view().request));
-            }
-        }
-        let prepared = self.preparation.as_ref().is_some_and(|(device, request)| {
-            device == &prefs.device
-                && *request == view.request
-                && view.device.as_ref() == Some(device)
-        });
-        if prepared
-            && let Some(snapshot) = &view.snapshot
-            && snapshot.descriptor.device.valid
-        {
-            let observed = &snapshot.descriptor.device;
-            let profile = enhanced_profile(observed.rate_register);
-            ui.label(format!("Proposed: {}", format_label(profile as u16)));
-            ui.label(format!(
-                "Keep current rate: {} Hz",
-                observed
-                    .rate_hz
-                    .map_or_else(|| "unknown".into(), |hz| format!("{hz}"))
-            ));
-            if !pb::FULL_INERTIAL_20HZ_VALIDATED {
-                ui.small("Full inertial output is awaiting hardware validation. The verified short format provides timestamps, gyro and quaternion.");
-            }
-            if ui
-                .add_enabled(editable, egui::Button::new("Apply enhanced data format"))
-                .clicked()
-            {
-                self.send(
-                    service,
-                    Command::Write(
-                        prefs.device.clone(),
-                        pb::DeviceCommand::Output { format: profile },
-                    ),
-                );
-                if self.error.is_none() {
-                    prefs.device.input = Input::Automatic;
-                    self.preparation = None;
-                }
-            }
-        }
-    }
-    /// The half of the device page that writes the sensor.
-    ///
-    /// Split out so the collapsed header above can hold it whole, and so
-    /// `device()` is about choosing a device again.
-    #[allow(
-        clippy::too_many_lines,
-        reason = "one block groups every explicit device write"
-    )]
-    fn device_configuration(
-        &mut self,
-        ui: &mut egui::Ui,
-        prefs: &mut Preferences,
-        service: &Service,
-        view: &View,
-    ) {
-        let editable = !view.phase.busy() && view.magnetic.is_none();
-        ui.label("Disconnect tracking before changing configuration");
-        let device_valid = configuration(&prefs.device, false).is_ok();
-        ui.add_enabled_ui(editable && device_valid,|ui| {
-            if ui.button("Read device configuration").clicked() {self.send(service,Command::Inspect(prefs.device.clone()));}
-            if let Some(snapshot)=&view.snapshot && view.device.as_ref().is_some_and(|d| d.id==prefs.device.id && d.transport==prefs.device.transport) {
-                let d=&snapshot.descriptor.device;
-                if d.valid && self.observation.as_ref()!=Some(&(prefs.device.id.clone(),d.observed_unix_ms)) {
-                    self.observation=Some((prefs.device.id.clone(),d.observed_unix_ms));
-                    if let Some(rate)=d.rate_register {self.rate=match rate {3=>1,4=>2,5=>5,6=>10,7=>20,8=>50,11=>200,_=>100};}
-                    if let Some(format)=d.output_register {self.format=format;}
-                    self.six_axis=d.algorithm==Some(pb::AlgorithmMode::SixAxis);
-                }
-            }
-            ui.horizontal(|ui| {
-                egui::ComboBox::from_id_salt("sensor-rate").selected_text(format!("{} Hz",self.rate)).show_ui(ui,|ui| {
-                    for rate in [1,2,5,10,20,50,100,200] {ui.selectable_value(&mut self.rate,rate,format!("{rate} Hz"));}
-                });
-                if ui.button("Apply rate").clicked() {self.send(service,Command::Write(prefs.device.clone(),pb::DeviceCommand::Rate{hz:self.rate}));}
-            });
-            egui::ComboBox::from_id_salt("sensor-format").selected_text(format_label(self.format)).show_ui(ui,|ui| {
-                for format in [0x61,0x81,0x84,0xa4].into_iter().chain(pb::FULL_INERTIAL_20HZ_VALIDATED.then_some(0xe4)) {ui.selectable_value(&mut self.format,format,format_label(format));}
-            });
-            if ui.add_enabled(self.format != 0xe4 || pb::FULL_INERTIAL_20HZ_VALIDATED, egui::Button::new("Apply output format")).clicked() {
-                let format=match self.format {0x81=>pb::OutputProfile::TimestampEuler,0x84=>pb::OutputProfile::TimestampQuaternion,
-                    0xa4=>pb::OutputProfile::TimestampGyroQuaternion,0xe4=>pb::OutputProfile::ExperimentalFullInertial20Hz,_=>pb::OutputProfile::Motion};
-                self.send(service,Command::Write(prefs.device.clone(),pb::DeviceCommand::Output{format}));
-            }
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.six_axis,false,"Nine-axis");ui.selectable_value(&mut self.six_axis,true,"Six-axis");
-                if ui.button("Apply algorithm").clicked() {self.confirmation=Some((prefs.device.clone(),pb::DeviceCommand::Algorithm{mode:
-                    if self.six_axis {pb::AlgorithmMode::SixAxis}else{pb::AlgorithmMode::NineAxis}}));}
-            });
-            // Two groups rather than six equal buttons: "restore defaults and
-            // save" and "calibrate the accelerometer" were the same weight on
-            // screen, and only one of them is undoable by disconnecting.
-            ui.separator();
-            ui.label("Operations the sensor is not asked to save");
-            for command in [
-                pb::DeviceCommand::ZeroYaw,
-                pb::DeviceCommand::AccelCalibrate,
-                pb::DeviceCommand::MagStart,
-            ] {
-                if ui.button(command_label(&command)).clicked() {
-                    self.confirmation = Some((prefs.device.clone(), command));
-                }
-            }
-            ui.separator();
-            ui.label("Operations that write the sensor's saved settings");
-            for command in [
-                pb::DeviceCommand::AngleReference,
-                pb::DeviceCommand::Save,
-                pb::DeviceCommand::ResetDefaults,
-            ] {
-                let label = egui::RichText::new(command_label(&command)).color(crate::theme::WARNING);
-                if ui.button(label).clicked() {
-                    self.confirmation = Some((prefs.device.clone(), command));
-                }
-            }
-            ui.small("Listening Recenter only changes the player. Device operations can change the sensor's reference.");
-        });
-        operation_result(ui, view);
-    }
     /// Runs from [`eframe::App::logic`], including when eframe skips the entire UI pass.
     pub fn guard_close(&mut self, context: &egui::Context, view: &View) {
         let guarded =
@@ -960,8 +778,6 @@ fn motion_diagnostics(ui: &mut egui::Ui, service: &Service) {
     );
 }
 fn diagnostics(ui: &mut egui::Ui, view: &View, service: &Service) {
-    motion_diagnostics(ui, service);
-    ui.separator();
     if let Some(warning) = &view.timing_warning {
         ui.colored_label(crate::theme::WARNING, warning);
     }
@@ -1184,3 +1000,7 @@ mod tests {
 #[cfg(test)]
 #[path = "ui/mounting_tests.rs"]
 mod mounting_tests;
+
+mod device;
+#[cfg(test)]
+mod layout_tests;

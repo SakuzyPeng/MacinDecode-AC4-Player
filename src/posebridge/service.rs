@@ -1,4 +1,5 @@
 //! Own all blocking lifecycle calls on one device worker, never on egui/audio.
+use super::configuration::{Action as ApplyAction, Apply, Progress as ApplyProgress, Settings};
 use super::enhancement::{Diagnostics, Inbox, Motion};
 use super::{Device, Input, Sample, Transport};
 use crate::head_tracking::Quaternion;
@@ -49,7 +50,7 @@ impl Phase {
             Self::Tracking => "Connected · tracking",
             Self::Operating => "Applying a device operation…",
             Self::Stopping => "Finishing…",
-            Self::Failed => "Device worker unavailable",
+            Self::Failed => "Device operation failed",
         }
     }
 }
@@ -65,6 +66,7 @@ pub struct View {
     pub delivery_hz: f64,
     /// Retained until a verified stop, including uncertain/cancelled start writes.
     pub magnetic: Option<Device>,
+    pub apply: Option<ApplyProgress>,
 }
 pub enum Command {
     Scan(Transport),
@@ -75,6 +77,7 @@ pub enum Command {
     Connect(Device),
     Inspect(Device),
     Write(Device, pb::DeviceCommand),
+    Apply(Device, Settings, Settings),
     Stop,
     Shutdown,
 }
@@ -134,6 +137,9 @@ impl Service {
         lock(&self.view).clone()
     }
     pub fn send(&self, command: Command) -> Result<(), String> {
+        if let Command::Apply(_, _, settings) = &command {
+            settings.validate()?;
+        }
         #[cfg(target_os = "macos")]
         if needs_bluetooth(&command) && !packaged_host() {
             return Err("Bluetooth access requires the packaged MacinDecode .app with its Bluetooth usage description. USB remains available.".into());
@@ -160,14 +166,18 @@ impl Service {
             Command::Simulate { .. } => Phase::Tracking,
             Command::Connect(_) => Phase::Tracking,
             Command::Inspect(_) => Phase::Inspecting,
-            Command::Write(_, _) => Phase::Operating,
+            Command::Write(_, _) | Command::Apply(_, _, _) => Phase::Operating,
             Command::Stop | Command::Shutdown => Phase::Stopping,
         };
         let id = v.request.wrapping_add(1);
         let device = match &command {
-            Command::Connect(d) | Command::Inspect(d) | Command::Write(d, _) => Some(d.clone()),
+            Command::Connect(d)
+            | Command::Inspect(d)
+            | Command::Write(d, _)
+            | Command::Apply(d, _, _) => Some(d.clone()),
             _ => v.device.clone(),
         };
+        let stopping = matches!(command, Command::Stop | Command::Shutdown);
         self.sender
             .try_send(Request { id, command })
             .map_err(|e| format!("Device worker: {e}"))?;
@@ -175,6 +185,9 @@ impl Service {
         v.phase = phase;
         v.error = None;
         v.device = device;
+        if !stopping {
+            v.apply = None;
+        }
         drop(v);
         clear_acquisition(&self.sample, &self.motion);
         wake(&self.listener);
@@ -304,6 +317,7 @@ fn worker(
     let mut phase = Phase::Idle;
     let mut device = None::<Device>;
     let mut pending_connect = None::<Device>;
+    let mut pending_apply = None::<Apply>;
     let mut last_view = Instant::now();
     let mut next_poll = Instant::now();
     let mut delivery_mark = None::<(Instant, u64, u64)>;
@@ -320,6 +334,10 @@ fn worker(
         match receiver.recv_timeout(delay) {
             Ok(request) => {
                 current = request.id;
+                if let Some(mut apply) = pending_apply.take() {
+                    apply.fail("Cancelled. Read settings to check any writes already sent.".into());
+                    lock(view).apply = Some(apply.progress);
+                }
                 if matches!(request.command, Command::Shutdown) {
                     break;
                 }
@@ -387,6 +405,17 @@ fn worker(
                             device = Some(d);
                             phase = Phase::Operating;
                         }
+                        Command::Apply(d, before, settings) => {
+                            let apply = Apply::new(before, settings)?;
+                            c.stop().map_err(|e| e.to_string())?;
+                            c.set_config(configuration(&d, false)?)
+                                .map_err(|e| e.to_string())?;
+                            c.inspect_start().map_err(|e| e.to_string())?;
+                            lock(view).apply = Some(apply.progress.clone());
+                            pending_apply = Some(apply);
+                            device = Some(d);
+                            phase = Phase::Operating;
+                        }
                         Command::Shutdown => unreachable!(),
                     }
                     Ok(())
@@ -410,7 +439,54 @@ fn worker(
             continue;
         };
         let mut snapshot = c.snapshot();
-        if let Some(d) = pending_connect.clone() {
+        if let Some(apply) = pending_apply.as_mut() {
+            if snapshot.status.state == pb::ConnectionState::Complete {
+                let result = (|| -> Result<bool, String> {
+                    let action = apply.advance(&snapshot)?;
+                    c.stop().map_err(|e| e.to_string())?;
+                    match action {
+                        ApplyAction::Write(command) => {
+                            c.configure_device(command).map_err(|e| e.to_string())?;
+                        }
+                        ApplyAction::Inspect => c.inspect_start().map_err(|e| e.to_string())?,
+                        ApplyAction::Done => return Ok(true),
+                    }
+                    Ok(false)
+                })();
+                let done = match result {
+                    Ok(done) => {
+                        if done {
+                            phase = Phase::Idle;
+                        }
+                        done
+                    }
+                    Err(error) => {
+                        apply.fail(error.clone());
+                        lock(view).error = Some(error);
+                        phase = Phase::Failed;
+                        true
+                    }
+                };
+                lock(view).apply = Some(apply.progress.clone());
+                if done {
+                    pending_apply = None;
+                }
+                snapshot = c.snapshot();
+            } else if matches!(
+                snapshot.status.state,
+                pb::ConnectionState::Failed | pb::ConnectionState::Stopped
+            ) {
+                let error = snapshot.status.last_error.clone().unwrap_or_else(|| {
+                    "Device operation stopped; remaining changes were not applied".into()
+                });
+                apply.fail(error.clone());
+                let mut v = lock(view);
+                v.apply = Some(apply.progress.clone());
+                v.error = Some(error);
+                phase = Phase::Failed;
+                pending_apply = None;
+            }
+        } else if let Some(d) = pending_connect.clone() {
             if snapshot.status.state == pb::ConnectionState::Complete {
                 let result = (|| -> Result<(), String> {
                     if snapshot.descriptor.device.calsw == Some(7) {
@@ -785,9 +861,10 @@ mod hardware_tests {
 fn needs_bluetooth(command: &Command) -> bool {
     match command {
         Command::Scan(Transport::Ble) => true,
-        Command::Connect(device) | Command::Inspect(device) | Command::Write(device, _) => {
-            device.transport == Transport::Ble
-        }
+        Command::Connect(device)
+        | Command::Inspect(device)
+        | Command::Write(device, _)
+        | Command::Apply(device, _, _) => device.transport == Transport::Ble,
         _ => false,
     }
 }
