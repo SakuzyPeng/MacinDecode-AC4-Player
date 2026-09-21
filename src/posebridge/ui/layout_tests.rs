@@ -94,7 +94,7 @@ fn wide_settings_use_both_columns_and_actions_stay_visible_when_scrolled() {
         };
         let mut positions = None;
         for frame in 0..5 {
-            let output = context.run_ui(
+            let mut output = context.run_ui(
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(
                         egui::Pos2::ZERO,
@@ -130,6 +130,8 @@ fn wide_settings_use_both_columns_and_actions_stay_visible_when_scrolled() {
                         });
                 },
             );
+            // This headless test inspects shapes without a renderer to upload textures.
+            output.textures_delta.clear();
             if frame < 2 {
                 continue;
             }
