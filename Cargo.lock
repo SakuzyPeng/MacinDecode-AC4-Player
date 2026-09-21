@@ -2837,8 +2837,8 @@ dependencies = [
 
 [[package]]
 name = "posebridge-core"
-version = "0.4.0"
-source = "git+https://github.com/SakuzyPeng/PoseBridge.git?rev=7ea9616274b269d60d12eb43121937abce7119d2#7ea9616274b269d60d12eb43121937abce7119d2"
+version = "0.5.0"
+source = "git+https://github.com/SakuzyPeng/PoseBridge.git?rev=b8b6a415ecdff8a0e1f2fdd0979798d80f84ad21#b8b6a415ecdff8a0e1f2fdd0979798d80f84ad21"
 dependencies = [
  "btleplug",
  "futures-util",

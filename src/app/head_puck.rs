@@ -330,6 +330,7 @@ mod tests {
         HeadSnapshot {
             pose: Quaternion::from_euler(angles),
             status: HeadStatus::Manual,
+            measurement: None,
         }
     }
 

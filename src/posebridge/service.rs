@@ -1,5 +1,7 @@
 //! Own all blocking lifecycle calls on one device worker, never on egui/audio.
+use super::enhancement::{Diagnostics, Inbox, Motion};
 use super::{Device, Input, Sample, Transport};
+use crate::head_tracking::Quaternion;
 use posebridge_core as pb;
 use std::sync::{Arc, Mutex, MutexGuard, mpsc};
 use std::thread::{self, JoinHandle, Thread};
@@ -9,6 +11,17 @@ fn lock<T>(value: &Mutex<T>) -> MutexGuard<'_, T> {
     value
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+// Ordinary and enhanced consumers observe the same publication. Always lock
+// sample before motion, including cancellation and the control thread.
+fn clear_acquisition(sample: &Mutex<Option<Sample>>, motion: &Mutex<Inbox>) {
+    let mut sample = lock(sample);
+    let mut motion = lock(motion);
+    *sample = None;
+    *motion = Inbox {
+        reset: true,
+        ..Inbox::default()
+    };
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Phase {
@@ -73,6 +86,8 @@ pub struct Service {
     sender: mpsc::SyncSender<Request>,
     view: Arc<Mutex<View>>,
     pub sample: Arc<Mutex<Option<Sample>>>,
+    pub motion: Arc<Mutex<Inbox>>,
+    pub enhancement: Arc<Mutex<Diagnostics>>,
     listener: Arc<Mutex<Option<Thread>>>,
     join: Option<JoinHandle<()>>,
 }
@@ -82,6 +97,9 @@ impl Service {
         let view = Arc::new(Mutex::new(View::default()));
         let sample = Arc::new(Mutex::new(None));
         let listener = Arc::new(Mutex::new(None::<Thread>));
+        let motion = Arc::new(Mutex::new(Inbox::default()));
+        let motion_worker = Arc::clone(&motion);
+        let enhancement = Arc::new(Mutex::new(Diagnostics::default()));
         let (v, s, l) = (
             Arc::clone(&view),
             Arc::clone(&sample),
@@ -89,7 +107,7 @@ impl Service {
         );
         let join = thread::Builder::new()
             .name("posebridge-device".into())
-            .spawn(move || worker(&receiver, &v, &s, &l));
+            .spawn(move || worker(&receiver, &v, &s, &motion_worker, &l));
         let join = match join {
             Ok(join) => Some(join),
             Err(error) => {
@@ -103,6 +121,8 @@ impl Service {
             sender,
             view,
             sample,
+            motion,
+            enhancement,
             listener,
             join,
         }
@@ -156,7 +176,7 @@ impl Service {
         v.error = None;
         v.device = device;
         drop(v);
-        *lock(&self.sample) = None;
+        clear_acquisition(&self.sample, &self.motion);
         wake(&self.listener);
         Ok(())
     }
@@ -226,6 +246,11 @@ fn observed_input(
     if !observation.valid {
         return Err("Device configuration could not be verified".into());
     }
+    if observation.output_register == Some(0xe4) && observation.rate_register != Some(7) {
+        return Err(
+            "Full inertial output requires 20 Hz. Change the format while disconnected.".into(),
+        );
+    }
     let fields = observation.output_fields.as_deref().unwrap_or_default();
     if fields.iter().any(|f| f == "quaternion") {
         Ok(pb::PoseInput::StreamQuaternion)
@@ -269,10 +294,13 @@ fn worker(
     receiver: &mpsc::Receiver<Request>,
     view: &Mutex<View>,
     sample: &Mutex<Option<Sample>>,
+    motion: &Mutex<Inbox>,
     listener: &Mutex<Option<Thread>>,
 ) {
     let mut controller = None::<pb::Controller>;
     let mut current = 0;
+    let mut cursor = None;
+    let mut latest = None::<Sample>;
     let mut phase = Phase::Idle;
     let mut device = None::<Device>;
     let mut pending_connect = None::<Device>;
@@ -295,7 +323,9 @@ fn worker(
                 if matches!(request.command, Command::Shutdown) {
                     break;
                 }
-                *lock(sample) = None;
+                clear_acquisition(sample, motion);
+                cursor = None;
+                latest = None;
                 wake(listener);
                 pending_connect = None;
                 let result = (|| -> Result<(), String> {
@@ -379,7 +409,6 @@ fn worker(
         let Some(c) = controller.as_mut() else {
             continue;
         };
-        let mut queried_at = Instant::now();
         let mut snapshot = c.snapshot();
         if let Some(d) = pending_connect.clone() {
             if snapshot.status.state == pb::ConnectionState::Complete {
@@ -401,7 +430,6 @@ fn worker(
                         v.error = Some(error);
                     }
                 }
-                queried_at = Instant::now();
                 snapshot = c.snapshot();
             }
         } else if matches!(
@@ -438,16 +466,27 @@ fn worker(
                 timer_attempted = false;
             }
         }
-        let next = if phase == Phase::Tracking && pending_connect.is_none() {
-            snapshot.pose.as_ref().map(|p| Sample {
-                instance: p.instance_id,
-                session: p.session_id,
+        let batch = c.motion_since(cursor);
+        cursor = batch.cursor;
+        if batch.reset {
+            latest = None;
+        }
+        if let Some(p) = batch.samples.last() {
+            latest = Some(Sample {
+                instance: p.cursor.instance_id,
+                session: p.cursor.session_id,
                 reference: p.reference_epoch,
-                sequence: p.sequence,
+                sequence: p.cursor.sequence,
                 angles: p.euler_deg.map(bounded_angle),
                 fresh: p.fresh,
                 age: Duration::from_nanos(p.age_ns),
-                queried_at,
+                queried_at: batch.queried_at,
+            });
+        }
+        let next = if phase == Phase::Tracking && pending_connect.is_none() {
+            latest.clone().map(|mut p| {
+                p.fresh = batch.active;
+                p
             })
         } else {
             None
@@ -463,6 +502,43 @@ fn worker(
             continue;
         }
         let mut old = lock(sample);
+        {
+            let mut inbox = lock(motion);
+            if batch.reset {
+                inbox.samples.clear();
+                inbox.reset = true;
+            }
+            inbox.overrun = inbox.overrun.saturating_add(batch.history_overrun);
+            if phase == Phase::Tracking && pending_connect.is_none() {
+                for p in batch.samples {
+                    let [qx, qy, qz, qw] = p.orientation_xyzw;
+                    inbox.push(Motion {
+                        instance: p.cursor.instance_id,
+                        session: p.cursor.session_id,
+                        reference: p.reference_epoch,
+                        sequence: p.cursor.sequence,
+                        delivery: p.delivery_id,
+                        device_ms: p.sample_time.map(|t| t.time_ms),
+                        clock_epoch: p.sample_time.map_or(0, |t| t.clock_epoch),
+                        clock_kind: p.sample_time.map_or(0, |t| t.kind as u32),
+                        received_at: batch
+                            .queried_at
+                            .checked_sub(Duration::from_nanos(p.age_ns))
+                            .unwrap_or(batch.queried_at),
+                        physical: Quaternion([qw, qx, qy, qz]),
+                        gyro: p.angular_velocity_rad_s,
+                        acceleration: p.acceleration_g,
+                        profile: p.profile,
+                        orientation_source: match p.orientation_source {
+                            pb::OrientationSource::NativeQuaternion => "Native quaternion",
+                            pb::OrientationSource::ConvertedEuler => "Converted device Euler",
+                            pb::OrientationSource::RegisterQuaternion => "Register quaternion",
+                            pb::OrientationSource::Simulator => "Simulator",
+                        },
+                    });
+                }
+            }
+        }
         let changed = old
             .as_ref()
             .map(|p| (p.instance, p.session, p.reference, p.sequence, p.fresh))
@@ -499,7 +575,7 @@ fn worker(
             last_view = Instant::now();
         }
     }
-    *lock(sample) = None;
+    clear_acquisition(sample, motion);
     wake(listener);
     if let Some(c) = controller.as_mut() {
         let _ = c.stop();

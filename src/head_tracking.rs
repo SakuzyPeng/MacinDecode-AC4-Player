@@ -92,17 +92,26 @@ impl Quaternion {
     )]
     pub fn euler(self) -> [f32; 3] {
         let [w, x, y, z] = self.normalized().0;
+        let sin_pitch = (2.0 * (y * z + w * x)).clamp(-1.0, 1.0);
+        let (yaw, roll) = if sin_pitch.abs() >= 1.0 - 1e-12 {
+            // ZXY poles couple yaw and roll; choose roll=0 and preserve rotation.
+            (
+                (2.0 * (x * y + w * z)).atan2(1.0 - 2.0 * (y * y + z * z)),
+                0.0,
+            )
+        } else {
+            (
+                (-(2.0 * (x * y - w * z))).atan2(1.0 - 2.0 * (x * x + z * z)),
+                (-(2.0 * (x * z - w * y))).atan2(1.0 - 2.0 * (x * x + y * y)),
+            )
+        };
         [
-            (-(2.0 * (x * y - w * z)))
-                .atan2(1.0 - 2.0 * (x * x + z * z))
-                .to_degrees() as f32,
-            (2.0 * (y * z + w * x)).clamp(-1.0, 1.0).asin().to_degrees() as f32,
-            (-(2.0 * (x * z - w * y)))
-                .atan2(1.0 - 2.0 * (x * x + y * y))
-                .to_degrees() as f32,
+            yaw.to_degrees() as f32,
+            sin_pitch.asin().to_degrees() as f32,
+            roll.to_degrees() as f32,
         ]
     }
-    fn slerp(self, mut rhs: Self, amount: f64) -> Self {
+    pub(crate) fn slerp(self, mut rhs: Self, amount: f64) -> Self {
         let mut dot = self.0.iter().zip(rhs.0).map(|(a, b)| a * b).sum::<f64>();
         if dot < 0.0 {
             rhs.0 = rhs.0.map(|v| -v);
@@ -215,12 +224,21 @@ pub enum Confidence {
 pub struct HeadSnapshot {
     pub pose: Quaternion,
     pub status: HeadStatus,
+    #[cfg_attr(
+        not(posebridge_input),
+        allow(
+            dead_code,
+            reason = "Optional sensor mounting checks consume the measured pose"
+        )
+    )]
+    pub measurement: Option<Quaternion>,
 }
 impl Default for HeadSnapshot {
     fn default() -> Self {
         Self {
             pose: Quaternion::default(),
             status: HeadStatus::Fixed,
+            measurement: None,
         }
     }
 }
@@ -259,6 +277,8 @@ struct Desired {
     bridge_smoothing_ms: f32,
     #[cfg(posebridge_input)]
     bridge_max_age_ms: u32,
+    #[cfg(posebridge_input)]
+    bridge_enhanced: bool,
 }
 impl Default for Desired {
     fn default() -> Self {
@@ -274,6 +294,8 @@ impl Default for Desired {
             bridge_smoothing_ms: 10.0,
             #[cfg(posebridge_input)]
             bridge_max_age_ms: 100,
+            #[cfg(posebridge_input)]
+            bridge_enhanced: false,
         }
     }
 }
@@ -302,6 +324,10 @@ impl HeadTracker {
         let bridge = crate::posebridge::service::Service::new();
         #[cfg(posebridge_input)]
         let bridge_samples = Arc::clone(&bridge.sample);
+        #[cfg(posebridge_input)]
+        let bridge_motion = Arc::clone(&bridge.motion);
+        #[cfg(posebridge_input)]
+        let bridge_diagnostics = Arc::clone(&bridge.enhancement);
         let desired = Arc::new(Mutex::new(Desired::default()));
         let mirror = Arc::new(PoseMirror::default());
         let stop = Arc::new(AtomicBool::new(false));
@@ -336,6 +362,8 @@ impl HeadTracker {
                 let mut consumer = crate::posebridge::Consumer::default();
                 #[cfg(posebridge_input)]
                 let mut was_bridge = false;
+                #[cfg(posebridge_input)]
+                let mut enhancement=crate::posebridge::enhancement::Enhancement::default();
                 while !s.load(Ordering::Relaxed) {
                     let desired = d
                         .lock()
@@ -349,6 +377,10 @@ impl HeadTracker {
                     }
                     let mut goal = fallback;
                     let mut status = HeadStatus::Manual;
+                    #[allow(unused_mut)]
+                    let mut measurement=None;
+                    #[allow(unused_mut)]
+                    let mut bridge_frozen=false;
                     if !desired.enabled || desired.source == HeadSource::Off {
                         goal = Quaternion::default();
                         status = if desired.system {
@@ -409,19 +441,28 @@ impl HeadTracker {
                     let mut bridge_new_sample = false;
                     #[cfg(posebridge_input)]
                     if using_bridge {
-                        let sample = bridge_samples
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .clone();
+                        let (sample, inbox) = {
+                            let sample = bridge_samples.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                            let mut motion = bridge_motion.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                            (sample.clone(), std::mem::take(&mut *motion))
+                        };
+                        enhancement.ingest(inbox, resolved);
+                        let now = Instant::now();
+                        let max_age = Duration::from_millis(u64::from(desired.bridge_max_age_ms));
+                        let valid = !desired.bridge_enhanced || !enhancement.expired(now, max_age);
                         #[cfg_attr(not(macinrender_output), allow(unused_assignments, reason = "No native keepalive in this build"))]
                         { bridge_new_sample = consumer.update(
-                            sample.as_ref(),
-                            Instant::now(),
-                            Duration::from_millis(u64::from(desired.bridge_max_age_ms)),
-                            resolved,
+                            sample.as_ref().filter(|_| valid), now, max_age, resolved,
                             recenter != desired.recenter,
                         ); }
-                        goal = consumer.goal;
+                        if recenter != desired.recenter && consumer.active {
+                            enhancement.recenter(now, max_age);
+                        }
+                        measurement = enhancement.measured();
+                        (goal, bridge_frozen) = enhancement.apply(consumer.goal, resolved, consumer.active,
+                            desired.bridge_enhanced, desired.held_pose.is_some(), now, max_age);
+                        if bridge_frozen {consumer.active=false;}
+                        *bridge_diagnostics.lock().unwrap_or_else(std::sync::PoisonError::into_inner)=enhancement.diagnostics();
                         status = if consumer.active {
                             HeadStatus::BridgeActive
                         } else if sample.is_some() || consumer.has_reference() {
@@ -433,6 +474,8 @@ impl HeadTracker {
                         was_bridge = true;
                     } else if was_bridge {
                         consumer.reset();
+                        enhancement.reset();
+                        *bridge_diagnostics.lock().unwrap_or_else(std::sync::PoisonError::into_inner)=enhancement.diagnostics();
                         was_bridge = false;
                     }
                     if recenter != desired.recenter {
@@ -451,7 +494,7 @@ impl HeadTracker {
                     resolved = if let Some(held) = desired.held_pose {
                         status = HeadStatus::Held;
                         held
-                    } else if !desired.enabled || smoothing <= 0.0 {
+                    } else if bridge_frozen || !desired.enabled || smoothing <= 0.0 {
                         goal
                     } else {
                         resolved.slerp(goal, 1.0 - (-elapsed / smoothing).exp())
@@ -460,6 +503,7 @@ impl HeadTracker {
                         .unwrap_or_else(std::sync::PoisonError::into_inner) = HeadSnapshot {
                         pose: resolved,
                         status,
+                        measurement,
                     };
                     #[cfg(macinrender_output)]
                     let active_target = {
@@ -558,6 +602,7 @@ impl HeadTracker {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         desired.bridge_max_age_ms = preferences.max_age_ms;
         desired.bridge_smoothing_ms = preferences.smoothing_ms;
+        desired.bridge_enhanced = preferences.enhanced_tracking;
     }
     pub fn manual(&self, euler: [f32; 3]) {
         let mut desired = self
@@ -621,6 +666,41 @@ impl Drop for HeadTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn physical_zxy_output_preserves_compound_rotations_wrap_and_pitch_poles() {
+        // Construct without the manual UI's 85-degree pitch clamp.
+        let physical = |[yaw, pitch, roll]: [f64; 3]| {
+            let axis = |index, degrees: f64| {
+                let half = degrees.to_radians() / 2.;
+                let mut q = [half.cos(), 0., 0., 0.];
+                q[index] = half.sin();
+                Quaternion(q)
+            };
+            axis(3, yaw)
+                .multiply(axis(1, pitch))
+                .multiply(axis(2, roll))
+        };
+        for yaw in [-180., -179.9, 30., 179.9, 180.] {
+            for pitch in [-90., -89.99, 20., 89.99, 90.] {
+                for roll in [-40., 0., 35.] {
+                    let input = physical([yaw, pitch, roll]);
+                    let output = physical(input.euler().map(f64::from));
+                    let dot = input
+                        .0
+                        .iter()
+                        .zip(output.0)
+                        .map(|(a, b)| a * b)
+                        .sum::<f64>();
+                    assert!(
+                        (dot.abs() - 1.).abs() < 1e-10,
+                        "{yaw} {pitch} {roll}: {:?}",
+                        input.euler()
+                    );
+                }
+            }
+        }
+    }
 
     fn until(mut condition: impl FnMut() -> bool) {
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -747,6 +827,46 @@ mod bridge_tests {
             queried_at: Instant::now(),
         });
         tracker.join.as_ref().unwrap().thread().unpark();
+    }
+    #[test]
+    fn twenty_hz_worker_supports_live_toggle_hold_and_stop_without_reconnection() {
+        use crate::posebridge::{Preferences, enhancement::State, service::Command};
+        let tracker = HeadTracker::new();
+        let mut prefs = Preferences {
+            smoothing_ms: 0.,
+            max_age_ms: 500,
+            ..Preferences::default()
+        };
+        tracker.configure_bridge(&prefs);
+        tracker.configure(HeadSource::PoseBridge, true, false);
+        tracker.bridge.send(Command::Simulate { rate: 20 }).unwrap();
+        until(|| tracker.bridge.enhancement.lock().unwrap().samples >= 10);
+        assert_eq!(
+            tracker.bridge.enhancement.lock().unwrap().state,
+            State::Normal
+        );
+        let request = tracker.bridge.view().request;
+        prefs.enhanced_tracking = true;
+        tracker.configure_bridge(&prefs);
+        until(|| tracker.bridge.enhancement.lock().unwrap().state == State::Predicting);
+        assert_eq!(tracker.bridge.view().request, request);
+        assert!(tracker.snapshot().measurement.is_some());
+        tracker.toggle_hold();
+        until(|| tracker.snapshot().status == HeadStatus::Held);
+        let held = tracker.snapshot().pose;
+        thread::sleep(Duration::from_millis(75));
+        assert_eq!(tracker.snapshot().pose, held);
+        tracker.toggle_hold();
+        until(|| tracker.snapshot().status == HeadStatus::BridgeActive);
+        prefs.enhanced_tracking = false;
+        tracker.configure_bridge(&prefs);
+        until(|| tracker.bridge.enhancement.lock().unwrap().state == State::Normal);
+        assert_eq!(tracker.bridge.view().request, request);
+        tracker.bridge.send(Command::Stop).unwrap();
+        until(|| tracker.snapshot().status == HeadStatus::BridgeFrozen);
+        let frozen = tracker.snapshot().pose;
+        thread::sleep(Duration::from_millis(25));
+        assert_eq!(tracker.snapshot().pose, frozen);
     }
     #[test]
     fn hidden_window_independent_control_freezes_presented_pose() {

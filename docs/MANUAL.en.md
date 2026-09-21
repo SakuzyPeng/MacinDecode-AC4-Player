@@ -552,6 +552,27 @@ For a slow device (for example 10 Hz), explicitly raise its rate or choose a fre
 Expired input freezes the presented orientation. Diagnostics distinguishes samples, host deliveries and reception age.
 Device clocks are unsynchronized; age excludes sensor, USB/BLE and audio delay. Faster polling does not remove BLE batching.
 
+**Sensor-side enhancement is off by default.** Toggle it during playback to compare using the same device format and rate.
+The switch changes only player settings. It never reconnects or writes the sensor. After at least 8 samples spanning
+300 ms, trusted timing and same-frame body gyro can predict up to 25 ms / 5° from each new measured quaternion,
+followed by the existing smoothing. Mode changes blend for 50 ms. Recenter and mounting checks use measured poses;
+audio and the scene consume the same final orientation.
+
+Use **Device → Prepare enhanced data** while disconnected: **Read preparation options**, review the format and
+unchanged rate, **Apply enhanced data format**, then connect manually. The current choice is verified **0xA4**
+(timestamp, gyro, quaternion). The 30-byte **0xE4** full inertial format is experimental at 20 Hz and excluded from
+presets until USB/BLE static and three-axis hardware acceptance passes. Existing Motion acceleration still supports
+diagnostics; missing device timestamps keep prediction disabled.
+
+Diagnostics reports the actual sensor attitude source, head-axis gyro/acceleration, clock readiness/drift, estimated
+excess holding, prediction, residual and history counts. Timing uses a 10-second lower envelope with one-second bins;
+drift is fitted after five bins and limited to ±5000 ppm. **Excess holding is not end-to-end listening latency.**
+Fixed transport/fusion and audio delay remain unknown; queued audio frames do not substitute for that measurement.
+Enhanced expiry uses the larger of host age and trusted mapped age. Expiry freezes the presented pose immediately,
+including smoothing. Missing fields, clock anomalies, a gyro/pose residual above 5° or acceleration outside 0.5–1.5 g
+fall back to ordinary tracking. Low gyro and pose-change rates lasting 500 ms stop extrapolation; available acceleration
+must also be near 1 g.
+
 Disconnect before configuring rate, timestamp output, six/nine-axis fusion, zeroing, calibration, saving or defaults;
 Connect again manually afterwards. Those writes sit inside the **Device configuration** section of the
 **Device** page, collapsed by default and split into operations the sensor is not asked to save and

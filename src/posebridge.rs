@@ -49,6 +49,7 @@ pub struct Preferences {
     pub remembered: Vec<Device>,
     pub smoothing_ms: f32,
     pub max_age_ms: u32,
+    pub enhanced_tracking: bool,
 }
 impl Default for Preferences {
     fn default() -> Self {
@@ -57,6 +58,7 @@ impl Default for Preferences {
             remembered: Vec::new(),
             smoothing_ms: 10.0,
             max_age_ms: 100,
+            enhanced_tracking: false,
         }
     }
 }
@@ -105,6 +107,8 @@ impl Preferences {
 #[cfg(any(posebridge_input, test))]
 mod consumption;
 #[cfg(any(posebridge_input, test))]
+pub mod enhancement;
+#[cfg(any(posebridge_input, test))]
 pub mod mounting;
 #[cfg(posebridge_input)]
 pub use consumption::{Consumer, Sample};
@@ -116,6 +120,7 @@ mod tests {
     fn missing_preferences_and_invalid_latency_have_safe_defaults() {
         let mut p: Preferences = serde_json::from_str("{}").unwrap();
         assert_eq!(p.max_age_ms, 100);
+        assert!(!p.enhanced_tracking);
         assert_eq!(p.device.mounting, [0; 3]);
         p.smoothing_ms = f32::NAN;
         p.max_age_ms = 0;

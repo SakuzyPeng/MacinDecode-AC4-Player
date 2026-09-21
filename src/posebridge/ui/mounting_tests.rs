@@ -10,6 +10,7 @@ fn active(pose: Quaternion) -> HeadSnapshot {
     HeadSnapshot {
         pose,
         status: HeadStatus::BridgeActive,
+        measurement: Some(pose),
     }
 }
 
@@ -160,6 +161,20 @@ fn ordinary_status_updates_preserve_the_checks() {
     snapshot.descriptor.metadata_revision += 1;
     panel.advance_check(&active(Quaternion::default()), &prefs, &view, true);
     assert_eq!(panel.check.calibration.resolve(), Ok(IDENTITY));
+}
+
+#[test]
+fn mounting_uses_measurement_even_when_the_presented_pose_differs() {
+    let (prefs, view) = connected(IDENTITY);
+    let mut panel = Panel::default();
+    panel.advance_check(&active(Quaternion::default()), &prefs, &view, true);
+    panel.check.start(Motion::Nod, Quaternion::default());
+    let mut head = active(Quaternion::from_euler([0., 40., 0.]));
+    head.pose = Quaternion::from_euler([50., 0., 0.]);
+    panel.advance_check(&head, &prefs, &view, true);
+    let observation = panel.check.peak.unwrap();
+    assert_eq!(observation.axis, Motion::Nod.axis());
+    assert!((observation.degrees - 40.).abs() < 0.01);
 }
 
 fn render_result(

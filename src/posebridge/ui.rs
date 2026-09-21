@@ -102,6 +102,7 @@ pub struct Panel {
     check: Check,
     error: Option<String>,
     observation: Option<(String, Option<u64>)>,
+    preparation: Option<(Device, u64)>,
     closing: bool,
     allow_close: bool,
 }
@@ -117,6 +118,7 @@ impl Default for Panel {
             check: Check::default(),
             error: None,
             observation: None,
+            preparation: None,
             closing: false,
             allow_close: false,
         }
@@ -263,11 +265,14 @@ impl Panel {
                     ui.label(format!("Yaw {:.1}°   Pitch {:.1}°   Roll {:.1}°",angles[0],angles[1],angles[2]));
                     ui.label(head.status.label());
                     self.connection(ui,prefs,service,&view,enabled);
+                    ui.checkbox(&mut prefs.enhanced_tracking,"Sensor-side enhancement");
+                    ui.label(service.enhancement.lock().unwrap_or_else(std::sync::PoisonError::into_inner).state.label());
+                    ui.small("Uses matched timestamps and gyro when reliable. Ordinary tracking remains the fallback.");
                     recenter=ui.add_enabled(matches!(head.status,crate::head_tracking::HeadStatus::BridgeActive),
                         egui::Button::new("Recenter listening direction")).clicked();
                     ui.add(egui::Slider::new(&mut prefs.smoothing_ms,0.0..=50.0).text("Smoothing · ms"));
                     ui.add(egui::Slider::new(&mut prefs.max_age_ms,50..=500).text("Freeze after · ms"));
-                    ui.small("Age starts at host reception. BLE may deliver several samples together.");
+                    ui.small(if prefs.enhanced_tracking { "Freeze uses the larger of host age and trusted mapped age. Fixed link and audio delay remain unknown." } else { "Age starts at host reception. BLE may deliver several samples together." });
                     self.mounting_check(ui, prefs, head);
                 }
                 Tab::Device => self.device(ui,prefs,service,&view,enabled),
@@ -348,8 +353,9 @@ impl Panel {
             } else if ui
                 .add_enabled(self.check.capturing.is_none(), egui::Button::new("Start"))
                 .clicked()
+                && let Some(measured) = head.measurement
             {
-                self.check.start(motion, head.pose);
+                self.check.start(motion, measured);
             }
         });
         if capturing.is_some() {
@@ -425,7 +431,9 @@ impl Panel {
         view: &View,
         enabled: bool,
     ) {
-        let source = CheckSource::current(head, prefs, view, enabled);
+        let source = head
+            .measurement
+            .and_then(|_| CheckSource::current(head, prefs, view, enabled));
         if self.check.source != source {
             let interrupted = self.check.capturing.is_some();
             self.check = Check {
@@ -442,7 +450,7 @@ impl Panel {
         let Some((motion, start, until)) = self.check.capturing else {
             return;
         };
-        let observation = mounting::observe(start, head.pose);
+        let observation = mounting::observe(start, head.measurement.unwrap_or(start));
         if self
             .check
             .peak
@@ -571,6 +579,7 @@ impl Panel {
                 });
         });
         self.connection(ui, prefs, service, view, enabled);
+        self.prepare_enhancement(ui, prefs, service, view);
         if let Some(device) = &view.magnetic {
             ui.colored_label(
                 crate::theme::WARNING,
@@ -598,6 +607,67 @@ impl Panel {
             .show(ui, |ui| {
                 self.device_configuration(ui, prefs, service, view);
             });
+    }
+    fn prepare_enhancement(
+        &mut self,
+        ui: &mut egui::Ui,
+        prefs: &mut Preferences,
+        service: &Service,
+        view: &View,
+    ) {
+        ui.separator();
+        ui.label("Prepare enhanced data");
+        ui.small("Disconnect first. Read the current configuration, apply the proposed format, then connect manually.");
+        let editable = !view.phase.busy()
+            && view.magnetic.is_none()
+            && configuration(&prefs.device, false).is_ok();
+        if ui
+            .add_enabled(editable, egui::Button::new("Read preparation options"))
+            .clicked()
+        {
+            self.send(service, Command::Inspect(prefs.device.clone()));
+            if self.error.is_none() {
+                self.preparation = Some((prefs.device.clone(), service.view().request));
+            }
+        }
+        let prepared = self.preparation.as_ref().is_some_and(|(device, request)| {
+            device == &prefs.device
+                && *request == view.request
+                && view.device.as_ref() == Some(device)
+        });
+        if prepared
+            && let Some(snapshot) = &view.snapshot
+            && snapshot.descriptor.device.valid
+        {
+            let observed = &snapshot.descriptor.device;
+            let profile = enhanced_profile(observed.rate_register);
+            ui.label(format!("Proposed: {}", format_label(profile as u16)));
+            ui.label(format!(
+                "Keep current rate: {} Hz",
+                observed
+                    .rate_hz
+                    .map_or_else(|| "unknown".into(), |hz| format!("{hz}"))
+            ));
+            if !pb::FULL_INERTIAL_20HZ_VALIDATED {
+                ui.small("Full inertial output is awaiting hardware validation. The verified short format provides timestamps, gyro and quaternion.");
+            }
+            if ui
+                .add_enabled(editable, egui::Button::new("Apply enhanced data format"))
+                .clicked()
+            {
+                self.send(
+                    service,
+                    Command::Write(
+                        prefs.device.clone(),
+                        pb::DeviceCommand::Output { format: profile },
+                    ),
+                );
+                if self.error.is_none() {
+                    prefs.device.input = Input::Automatic;
+                    self.preparation = None;
+                }
+            }
+        }
     }
     /// The half of the device page that writes the sensor.
     ///
@@ -635,11 +705,11 @@ impl Panel {
                 if ui.button("Apply rate").clicked() {self.send(service,Command::Write(prefs.device.clone(),pb::DeviceCommand::Rate{hz:self.rate}));}
             });
             egui::ComboBox::from_id_salt("sensor-format").selected_text(format_label(self.format)).show_ui(ui,|ui| {
-                for format in [0x61,0x81,0x84,0xa4] {ui.selectable_value(&mut self.format,format,format_label(format));}
+                for format in [0x61,0x81,0x84,0xa4].into_iter().chain(pb::FULL_INERTIAL_20HZ_VALIDATED.then_some(0xe4)) {ui.selectable_value(&mut self.format,format,format_label(format));}
             });
-            if ui.button("Apply output format").clicked() {
+            if ui.add_enabled(self.format != 0xe4 || pb::FULL_INERTIAL_20HZ_VALIDATED, egui::Button::new("Apply output format")).clicked() {
                 let format=match self.format {0x81=>pb::OutputProfile::TimestampEuler,0x84=>pb::OutputProfile::TimestampQuaternion,
-                    0xa4=>pb::OutputProfile::TimestampGyroQuaternion,_=>pb::OutputProfile::Motion};
+                    0xa4=>pb::OutputProfile::TimestampGyroQuaternion,0xe4=>pb::OutputProfile::ExperimentalFullInertial20Hz,_=>pb::OutputProfile::Motion};
                 self.send(service,Command::Write(prefs.device.clone(),pb::DeviceCommand::Output{format}));
             }
             ui.horizontal(|ui| {
@@ -759,12 +829,20 @@ fn axis_name(axis: i8) -> &'static str {
         _ => "Choose axis",
     }
 }
+fn enhanced_profile(rate_register: Option<u16>) -> pb::OutputProfile {
+    if pb::FULL_INERTIAL_20HZ_VALIDATED && rate_register == Some(7) {
+        pb::OutputProfile::ExperimentalFullInertial20Hz
+    } else {
+        pb::OutputProfile::TimestampGyroQuaternion
+    }
+}
 fn format_label(format: u16) -> &'static str {
     match format {
         0x61 => "Motion / Euler",
         0x81 => "Timestamp + Euler",
         0x84 => "Timestamp + quaternion",
         0xa4 => "Timestamp + gyro + quaternion",
+        0xe4 => "Timestamp + acceleration + gyro + quaternion · 20 Hz",
         _ => "Unknown current format",
     }
 }
@@ -828,7 +906,62 @@ fn operation_result(ui: &mut egui::Ui, view: &View) {
         }
     }
 }
+fn motion_diagnostics(ui: &mut egui::Ui, service: &Service) {
+    let d = *service
+        .enhancement
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    ui.label(d.state.label());
+    ui.label(format!(
+        "Sensor attitude: {}",
+        if d.orientation_source.is_empty() {
+            "Unavailable"
+        } else {
+            d.orientation_source
+        }
+    ));
+    if let Some(w) = d.gyro {
+        ui.label(format!(
+            "Head X/Y/Z gyro: {:.2}, {:.2}, {:.2} °/s",
+            w[0].to_degrees(),
+            w[1].to_degrees(),
+            w[2].to_degrees()
+        ));
+    }
+    if let Some([ax, ay, az]) = d.acceleration {
+        ui.label(format!(
+            "Head X/Y/Z acceleration: {ax:.3}, {ay:.3}, {az:.3} g"
+        ));
+    }
+    ui.label(format!(
+        "Clock ready: {} · drift {} ppm",
+        d.clock_ready,
+        d.drift_ppm
+            .map_or_else(|| "—".into(), |v| format!("{v:.0}"))
+    ));
+    ui.label(format!(
+        "Estimated excess holding: {} ms",
+        d.excess_age_ms
+            .map_or_else(|| "—".into(), |v| format!("{v:.1}"))
+    ));
+    ui.label(format!(
+        "Prediction: {:.1} ms / {:.2}° · gyro residual {}°",
+        d.prediction_ms,
+        d.prediction_degrees,
+        d.residual_degrees
+            .map_or_else(|| "—".into(), |v| format!("{v:.2}"))
+    ));
+    ui.label(format!(
+        "Motion samples: {} · combined for presentation: {} · history overruns: {}",
+        d.samples, d.coalesced, d.overruns
+    ));
+    ui.small(
+        "Clock mapping cannot measure the unknown minimum link/fusion delay or audio output delay.",
+    );
+}
 fn diagnostics(ui: &mut egui::Ui, view: &View, service: &Service) {
+    motion_diagnostics(ui, service);
+    ui.separator();
     if let Some(warning) = &view.timing_warning {
         ui.colored_label(crate::theme::WARNING, warning);
     }
@@ -886,6 +1019,18 @@ fn diagnostics(ui: &mut egui::Ui, view: &View, service: &Service) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn preparation_keeps_unvalidated_full_frames_out_of_presets() {
+        for rate in [None, Some(3), Some(7), Some(9), Some(11)] {
+            let selected = enhanced_profile(rate);
+            if !pb::FULL_INERTIAL_20HZ_VALIDATED || rate != Some(7) {
+                assert!(matches!(
+                    selected,
+                    pb::OutputProfile::TimestampGyroQuaternion
+                ));
+            }
+        }
+    }
     #[test]
     fn hidden_close_is_guarded_until_device_work_and_magnetic_calibration_end() {
         for (minimized, occluded) in [(true, false), (false, true)] {
