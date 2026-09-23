@@ -109,6 +109,15 @@ impl Preferences {
 #[cfg(any(posebridge_input, test))]
 mod consumption;
 #[cfg(any(posebridge_input, test))]
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "The calibration panel that draws it waits on the magnetometer read path"
+    )
+)]
+mod coverage;
+#[cfg(any(posebridge_input, test))]
 pub mod enhancement;
 #[cfg(any(posebridge_input, test))]
 pub mod mounting;

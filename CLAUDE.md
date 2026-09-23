@@ -32,7 +32,7 @@ Design docs (Chinese) carry the authoritative contracts; keep them in sync when 
 they describe: `docs/ARCHITECTURE.md`, `docs/MACINRENDER.md` (output, Atmos label assist, head
 control, native build), `docs/WINDOWS_DECODE.md`, `docs/WINDOWS_SPATIAL_AUDIO.md`,
 `docs/PLAYLISTS.md` (persistence), `docs/STORAGE.md` (data directory, managed folders), `docs/PACKAGING.md`
-(installers, CI).
+(installers, CI), `docs/POSEBRIDGE-MAGNETIC.md` (magnetic calibration guidance, the coverage grid).
 
 Two user-facing pairs, each of which a user-visible change lands in both halves of: `README.md` /
 `README.en.md` (install, quickstart, platform support, FAQ, building) and `docs/MANUAL.md` /
@@ -408,10 +408,11 @@ stays quiet). Nothing in `src/` writes the conjunctions by hand.
   `backend/macinrender.rs`, most of `backend/controller.rs`, the SOFA and layout settings.
   Pair it with `target_os = "macos"` for the Atmos label assist and AirPods motion.
 - **`posebridge_input`** = macOS/Windows + `posebridge`. Device worker and UI; saved preferences remain
-  portable without this gate. `posebridge::consumption` and `posebridge::mounting` add `test` to the gate
-  so the consumption policy and the mounting arithmetic are checked on every platform — the mounting
-  solver decides what gets written into a device setting, so it is not allowed to be the half nobody
-  can run.
+  portable without this gate. `posebridge::consumption`, `posebridge::mounting` and `posebridge::coverage`
+  add `test` to the gate so the consumption policy, the mounting arithmetic and the calibration coverage
+  are checked on every platform — the mounting solver decides what gets written into a device setting
+  and `coverage` which way every calibration instruction points, so neither is allowed to be the half
+  nobody can run. `coverage` allows `dead_code` outside tests until the calibration panel draws from it.
 - **`spatial_output`** = the union, i.e. *some* real output exists. Deliberately rare now (a repaint
   cadence and one test) — prefer the specific gate that matches the code you are writing.
 

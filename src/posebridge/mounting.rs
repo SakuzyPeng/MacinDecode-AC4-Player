@@ -214,7 +214,7 @@ impl Calibration {
 
 /// A signed axis index as a unit vector, so handedness is a cross product
 /// rather than a table of the six valid orderings.
-fn unit(axis: i8) -> [i8; 3] {
+pub(super) fn unit(axis: i8) -> [i8; 3] {
     let mut vector = [0; 3];
     if let Some(slot) = vector.get_mut(usize::from(axis.unsigned_abs()).wrapping_sub(1)) {
         *slot = axis.signum();
@@ -222,7 +222,7 @@ fn unit(axis: i8) -> [i8; 3] {
     vector
 }
 
-fn cross(a: [i8; 3], b: [i8; 3]) -> [i8; 3] {
+pub(super) fn cross(a: [i8; 3], b: [i8; 3]) -> [i8; 3] {
     [
         a[1] * b[2] - a[2] * b[1],
         a[2] * b[0] - a[0] * b[2],
