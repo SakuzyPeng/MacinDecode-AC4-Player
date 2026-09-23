@@ -73,22 +73,19 @@ pub struct View {
     pub magnetic: Option<Device>,
     /// The open magnetic session, or the last one until something else starts:
     /// what its cleanup did stays readable after it closed.
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "The calibration panel that draws the session is not built yet"
-        )
-    )]
     pub magnetic_session: Option<magnetic::Session>,
     pub apply: Option<ApplyProgress>,
 }
 impl View {
-    /// Whether the service would take `command` now. Controls ask this rather
-    /// than reading the phase, which cannot tell a calibration command for the
-    /// open magnetic session from one for a device that is busy.
+    /// Why the service would refuse `command` now, if it would. Controls ask
+    /// this rather than reading the phase, which cannot tell a calibration
+    /// command for the open magnetic session from one for a device that is
+    /// busy, and a disabled control shows the reason where it stands.
+    pub fn refusal(&self, command: &Command) -> Option<String> {
+        admit(self, command).err()
+    }
     pub fn admits(&self, command: &Command) -> bool {
-        admit(self, command).is_ok()
+        self.refusal(command).is_none()
     }
 }
 pub enum Command {
@@ -102,13 +99,6 @@ pub enum Command {
     /// Open a read-only magnetic session. Starting, ending and saving a
     /// calibration are then ordinary `Write`s to the same device, which the
     /// worker sends into the session.
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "The calibration panel that opens the session is not built yet"
-        )
-    )]
     Magnetic(Device),
     Write(Device, pb::DeviceCommand),
     Apply(Device, Settings, Settings),

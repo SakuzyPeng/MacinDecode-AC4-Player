@@ -2,25 +2,25 @@
 
 本文是磁校准引导的设计契约：流程怎么走、覆盖网格怎么画、中心和指示怎么算、从 PoseBridge 的磁场会话里拿什么。
 播放器钉在 PoseBridge 0.6（`4ecfb6e`），`service.rs` 已接上它的独立磁场会话；覆盖网格的算术在
-`src/posebridge/coverage.rs`，会话读数的分轮在 `src/posebridge/magnetic.rs`，都带单元测试。面板尚未接线，
-所以会话的打开命令、发布出来的视图和这两个模块在非测试构建里还没有消费者；`dead_code` 豁免分别写在
-`posebridge.rs` 的模块声明处和 `service.rs` 的对应条目上，面板接上时一并删掉。
+`src/posebridge/coverage.rs`，会话读数的分轮在 `src/posebridge/magnetic.rs`，设备窗口的 **Magnetic** 页在
+`src/posebridge/ui/calibration.rs`，都带单元测试。
 
 ## 现状与边界
 
-Maintenance 页的“校准与参考方向”分栏里有 `MagStart`，结束靠连接栏里的 **End calibration**（`MagStop`）。
-这两条目前仍走会话之外的老路：PoseBridge 为一次写入单独开连接、写 CALSW、回读、关闭，播放器看不到磁场。
-`service.rs` 的 `observe_magnetic` 维护锁存：写入尝试过的 `mag_start`（包括结果不确定的）和回读到的
+Maintenance 页的“校准与参考方向”分栏原先有 `MagStart`，走会话之外的老路：PoseBridge 为一次写入单独开连接、
+写 CALSW、回读、关闭，播放器看不到磁场，等于盲校。现在那里只剩一个通往 Magnetic 页的按钮，开始校准只能在
+会话里发。老路只留给结束：锁存的设备没有打开的会话时，连接栏和退出拦截里的 **End calibration**（`MagStop`）
+仍这样发。`service.rs` 的 `observe_magnetic` 维护锁存：写入尝试过的 `mag_start`（包括结果不确定的）和回读到的
 `calsw == 7` 都会锁存，只有回读验证成功的 `mag_stop` 能清除。锁存期间只放行原设备的 `MagStop`、
 `Inspect`、磁场会话与停止；Connect、Apply 和安装检查都用不了，退出也会被拦下。
 
 播放器还有两道自己设的门——连接路径回读到 `calsw == 7` 时拒绝开始采集，样本又只在 `Phase::Tracking` 下
-摄取——磁场会话不走姿态样本，这两道门挡不到它。现有的引导只有 `command_effect` 里一句
-“Follow the sensor's physical calibration procedure”。
+摄取——磁场会话不走姿态样本，这两道门挡不到它。引导就是 Magnetic 页本身，见“面板”一节。
 
 ## 流程
 
-**开始前。** 先说清三件事：跟踪和声音会停；只能显式结束，不会超时，回读确认结束之前不许退出；不发 SAVE。
+**开始前。** 先说清三件事：跟踪会停，听音方向停在原处（播放不受影响）；只能显式结束，不会超时，回读确认
+结束之前不许退出；不发 SAVE。
 再给三条准备：
 
 - 传感器留在耳机上。耳机驱动单元的磁铁是要被一起标定进去的硬铁，拆下来单独校准，装回去就又错了。
@@ -30,15 +30,15 @@ Maintenance 页的“校准与参考方向”分栏里有 `MagStart`，结束靠
 同时显示安装状态和“再做一次安装检查”的入口：网格按耳机轴绘制，安装错了，每一条指示都会指反。
 
 **校准中。** 顶部警示条带设备名和已用时间，**End calibration** 是唯一可用的操作；被禁用的控件就地写出原因。
-主体是覆盖网格、目标格和一行指示，旁边是模长离散度和绕三个轴各自累计转过的角度，另有一句
-“覆盖不是进度”。
+主体是覆盖网格、目标格、最新读数的标记和一行指示，旁边是模长离散度和拟合中心，另有一句“覆盖不是进度”。
+原设计里“绕三个轴各自累计转过的角度”拿掉了：会话独占设备，期间没有姿态，这个量无从算起。
 
 **结束后。** 沿用 sent / readback / completion / persistence 四段词汇，“End verified by readback”
 只在回读验证之后出现。然后**再扫一轮**：校准后的离散度只能来自校准后的读数，所以结束校准后要请用户拿同一张
 网格再转一遍——原型画布的“结束后”一页直接给出了校准后的数字，漏掉了这一步。前后对比只在两轮都
 `complete()` 时出现，覆盖不同的两轮读数，离散度不可比。再往下是播放器自己的拟合中心、醒目的“未保存”和单独
-确认的 **Save device settings**，最后引到 Tracking 页的 yaw 回正检查：离散度只说明磁力计读数自洽，是否变成了
-稳定的听感，要靠那一步。
+确认的 **Save current device settings**（与 Maintenance 页同名），最后提示连接后在 Tracking 页确认听音方向
+稳得住：离散度只说明磁力计读数自洽，是否变成了稳定的听感，要靠那一步。专门的 yaw 回正检查还没有做。
 
 三轮都在同一个磁场会话里，按会话的 `phase` 分开：发 `mag_start` 之前的 `Monitoring` 是校准前，`Calibrating`
 是校准中；`mag_stop` 核验之后会话继续监测，`Calibrated` 就是结束后那一轮。所以校准前那一轮要在发出
@@ -80,8 +80,8 @@ Maintenance 页的“校准与参考方向”分栏里有 `MagStart`，结束靠
 读数少于 `MIN_READINGS`（16，按 PoseBridge 的 5 Hz 约 3 秒）时不分箱。一轮最多保留 `MAX_READINGS`（4096，
 约 13 分钟）个读数，更长的一轮保留最新的。非有限读数一律拒收，一个 NaN 就会挪动整轮的中心。
 
-椭球（软铁）拟合不在骨架里。原型“结束后”一页的 Soft-iron axis ratio 目前没有算法支撑，接线之前要么补上
-椭球拟合，要么把这一项拿掉。
+椭球（软铁）拟合不在骨架里。原型“结束后”一页的 Soft-iron axis ratio 没有算法支撑，面板里拿掉了；补上椭球
+拟合之前不画。
 
 ## 下一步指示
 
@@ -94,7 +94,8 @@ Maintenance 页的“校准与参考方向”分栏里有 `MagStart`，结束靠
 `the_named_motion_moves_the_reading_toward_the_target` 不复用上面的推导，而是在固定磁场里把模拟的耳机绕它
 自己的轴按指示转 0.1°，检查读数确实靠近了目标；把叉积的顺序换过来，这条测试立即失败。
 
-两个分量接近时，指示会逐帧来回跳。这归绘制层管：指示保持一小段时间再换，不放进算术。读数恰好在目标的对跖点时
+两个分量接近时，指示会逐帧来回跳。这归绘制层管，不放进算术：`Instruction::hold` 让一条指示至少保持 `HOLD`
+（1.2 s）才换；目标格被读到，或者换了一轮，就立即换。读数恰好在目标的对跖点时
 哪个轴都行，任何一转都会更近。
 
 ## 模长离散度
@@ -152,8 +153,8 @@ Maintenance 页的“校准与参考方向”分栏里有 `MagStart`，结束靠
 会话里的开始、结束和保存不另设命令，仍是 `Command::Write(device, MagStart | MagStop | Save)`。会话开着且是
 同一台设备时，`admit` 放行它并保持 `Phase::Magnetic`，worker 把它送进会话的命令通道，会话、游标和各轮读数都
 不重置；PoseBridge 拒收（会话未就绪，或上一条操作还没完）只写入错误，会话照旧。别的命令一律按忙拒绝，只有
-Stop 能收掉会话。准入规则只有 `admit` 一处，控件用 `View::admits` 去问它：连接栏和退出拦截里的
-**End calibration** 在会话中因此仍然可用，单看阶段却会误判为忙。
+Stop 能收掉会话。准入规则只有 `admit` 一处，控件用 `View::admits` 去问它，要原因时问 `View::refusal`：
+连接栏和退出拦截里的 **End calibration** 在会话中因此仍然可用，单看阶段却会误判为忙。
 
 worker 每轮用会话的游标取一次批次，交给 `magnetic::Run`。读数按样本的 `phase` 分进三轮：`Monitoring` 是校准
 前，`Calibrating` 是校准中，`Calibrated` 是结束后，其余阶段不计。同一会话里第二次开始校准时，上一次的“结束
@@ -168,6 +169,41 @@ worker 每轮用会话的游标取一次批次，交给 `magnetic::Run`。读数
 报告失败；健康的会话在停止时收尾或断连失败，则是新消息，照常报错。停掉之后最后一个会话的视图保留，直到下
 一个命令开始。
 
+## 面板
+
+设备窗口的 **Magnetic** 页，`src/posebridge/ui/calibration.rs`。画这一页不碰硬件，会话只从 **Open magnetic
+session** 打开；打不开时按用户要修的顺序就地写出原因：没选设备、安装不是真旋转、配置无效、`admit` 拒绝
+（例如正在跟踪）。
+
+阶段只由 `Stage::of` 一处推出，依据是 worker 的 `Phase` 和会话自己的 `phase`：
+
+| worker | 会话 | 阶段 | 画什么 |
+| --- | --- | --- | --- |
+| 非 `Magnetic`，无会话 | — | Intro | 说明、准备、安装状态、打开按钮 |
+| `Magnetic` | 无，或 `Idle`／`Opening` | Opening | 正在打开，可关闭 |
+| `Magnetic` | `Monitoring` | Before | 校准前一轮；Start calibration…、Close session |
+| `Magnetic` | `ExternalCalibration` | External | 警示条；End calibration、Close session |
+| `Magnetic` | `Starting`／`Calibrating`／`Stopping` | During | 警示条（设备名、已用时间、End calibration）和校准中一轮 |
+| `Magnetic` | `Calibrated`／`Saving` | After | 结束后一轮、前后对比、未保存；Save…、Calibrate again…、Close session |
+| 非 `Magnetic`；或 `Magnetic` 而会话 `Closed`／`Failed` | 有会话 | Ended | 失败原因、收尾结果、锁存提示、各轮摘要、重新打开 |
+
+`Saving` 归 After：页面只在结束之后提供保存。已用时间取会话统计窗口的 `elapsed_ns`，窗口在开始核验成功时
+重置，所以 `Starting` 期间不显示。
+
+会话里的按钮都问 `View::refusal`（`admits` 的另一面）：会拒收就禁用，原因写在按钮行下方，同一条只写一次；
+会话上一条操作还是 `Running` 也禁用，PoseBridge 那时会以 Busy 拒收。开始和保存走确认框，确认框同样问
+`refusal`，所以会话里阶段读作忙也能确认；结束直接发。连接栏的忙碌按钮在会话中改叫 **Close session**，是任何
+阶段都在的出口：关闭时 PoseBridge 替本会话开始的校准收尾，锁存照“service 里的会话”一节的规则保留。
+
+“End verified by readback” 只在最近一次校准以回读验证成功的 `mag_stop` 结束时出现。会话只报告最新一条操作，
+结束后照例要发的 SAVE 会把它替换掉，所以由 `magnetic::Run` 记住这一点（`Session::end_verified`）：验证成功的
+`mag_stop` 置位，写入尝试过的 `mag_start` 清除，其余操作不动它。设备自己把 CALSW 清零、会话进入 `Calibrated`
+时，页面写明结束没有经本会话验证；锁存照旧，要再结束一次。“未保存”只有在 SAVE 真的发出（`command_sent`）
+之后才换成“SAVE sent”，发之前就被拒的保存什么也没存。校准命令核验期间读数会停约半秒，正好是一个读数保持新鲜
+的时长，所以 `Starting`、`Stopping`、`Saving` 期间不提示“没有新读数”。After 一轮在两轮都
+`complete()` 之前只显示自己的离散度和中心，并写出两轮各读了几格；都满之后改为前后对比：两轮的离散度和拟合中心
+偏移，附一句判据——中心移向原点，设备的输出才随校准改变，离散度也才可比。
+
 ## 视觉
 
 - 圆角一律为 0，与 `theme.rs` 的 `CornerRadius::ZERO` 一致。
@@ -180,7 +216,15 @@ worker 每轮用会话的游标取一次批次，交给 `magnetic::Run`。读数
   加深版保持色相：`#A85A22`（4.7）、`#7A6B57`（4.8）、`#4E6B51`（5.5）。这对整个应用的小字都成立，不只是
   这个面板。
 - `FULL_AT`、离散度分界和颜色属于绘制代码，照 `scene3d/params.rs` 的先例放在画它们的地方，不进
-  `coverage.rs`。
+  `coverage.rs`。格线的 `#CFC4B3` 和三个加深色的对比度由测试 `the_documented_colours_hold` 钉住。
+- 两根轴都标在线上：行标注是格线的仰角（+90°、+30°、0°、−30°、−90°），列标注是方向（Back、Left、Forward、
+  Right、Back）。区间写法不用：Noto Sans CJK 把“…”画成居中的三点。
+- 最新读数画成 7 px 的 INK 方块，SURFACE 描边。位置取 `coverage::place`，分箱用的是同一个换算，所以标记一定
+  落在它计数的格子里（两处测试钉住）。
+- 指示是页面上唯一放大的一行（17 px），下面一行小字：标记是耳机眼中的磁场，和耳机反着走，照文字做。目标在
+  屏幕下方时指示可能是“前端上翘”，这是对的，也正是最容易让人去“推方块”的地方。
+- 离散度旁是一条 0–12% 的短标尺，3% 与 8% 两道刻度；前后两轮放在同一个 `Grid` 里对齐。
+- 按钮一律按文字宽度：`ui.columns` 会把单独一个按钮拉满列宽。
 
 ## 不可动摇的口径
 
@@ -201,7 +245,7 @@ worker 每轮用会话的游标取一次批次，交给 `magnetic::Run`。读数
 `magnetic.rs` 与 `service.rs` 现有：会话的打开与会话内命令、准入、锁存、按阶段分轮、单位与换轴、收会话时的
 最后一批。测试钉住：各阶段的读数进哪一轮，第二次校准以前一次的结束后为准，外部校准清空三轮，新会话与单位
 变化从头开始，只有已知比例时才用 µT，换到耳机轴，没有真旋转的安装打不开会话，只在有新读数时重绘，只有三种
-命令进会话，状态原样传到视图；会话中只放行校准命令和停止，锁存下能观察、能结束、不能重开，没有安装的会话在
+命令进会话，状态原样传到视图，验证过的结束不被其后的 SAVE 抹掉、新的开始才清除它；会话中只放行校准命令和停止，锁存下能观察、能结束、不能重开，没有安装的会话在
 碰硬件之前就被拒，会话报告可能在校准就锁存、会话改口也不解锁。还有一条不要硬件的完整 worker 路径：不存在的
 串口让会话失败，失败可读，停掉干净且不多报一次失败。`reads_the_magnetic_field_without_writing_to_the_device`
 是默认忽略的实机测试，用带安装的 `MACINDECODE_POSEBRIDGE_DEVICE` 只读打开会话。
@@ -210,5 +254,10 @@ worker 每轮用会话的游标取一次批次，交给 `magnetic::Run`。读数
 验证，可以在仓库副本里把 `posebridge-core` 的目标平台条件加上 Linux、以 `--cfg posebridge_input` 构建（需要
 `libdbus-1-dev` 与 `libudev-dev`），副本之外的仓库不做这种改动。
 
-尚未做：面板（打开会话、画网格、会话里的开始／结束／保存，以及让 Maintenance 页的 `MagStart` 改走会话）；前后
-两轮的保存与对比；椭球拟合；yaw 回正检查。
+面板现有：阶段推导、打开会话与就地拒绝原因、会话里的开始／结束／保存、网格与标记、指示保持、前后对比。
+测试钉住：每个会话阶段和 worker 阶段落到哪个阶段；指示在保持期内不换，目标被读到或换轮时立即换；标记落在
+它计数的格子里，网格的角与边对齐；格色到 `FULL_AT` 饱和；文档里的颜色与对比度；无头绘制各阶段——每个阶段只
+提供自己的操作，校准中只剩 End calibration；结束是否经回读验证、SAVE 是否真的发出；前后对比只在两轮都读满时出现；
+没有设备、安装不是真旋转、正在跟踪时打不开会话且写出原因；以上绘制全程不向 service 发任何请求。
+
+尚未做：跨会话保存各轮读数；椭球拟合；yaw 回正检查。

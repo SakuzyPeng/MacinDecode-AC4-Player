@@ -175,6 +175,7 @@ pub struct Run {
     sweeps: Sweeps,
     drawn: [coverage::Snapshot; 3],
     overrun: u64,
+    end_verified: bool,
 }
 
 impl Run {
@@ -186,6 +187,7 @@ impl Run {
             cursor: None,
             drawn: std::array::from_fn(|_| Coverage::default().snapshot()),
             overrun: 0,
+            end_verified: false,
         })
     }
 
@@ -202,6 +204,21 @@ impl Run {
         if self.sweeps.absorb(&batch) {
             self.drawn = Sweep::ALL.map(|sweep| self.sweeps.held[sweep.index()].snapshot());
         }
+        if batch.reset {
+            self.end_verified = false;
+        }
+        // The session reports only its latest operation, and the save that
+        // usually follows an end would hide whether the end was verified.
+        if let Some(operation) = &batch.operation {
+            match operation.action.as_str() {
+                "mag_start" if operation.write_attempted => self.end_verified = false,
+                "mag_stop" => {
+                    self.end_verified = operation.register_verified
+                        && operation.outcome == pb::OperationOutcome::Succeeded;
+                }
+                _ => {}
+            }
+        }
         Session {
             phase: batch.phase,
             active: batch.active,
@@ -217,6 +234,7 @@ impl Run {
             sweeps: self.drawn.clone(),
             latest: self.sweeps.latest,
             overrun: self.overrun,
+            end_verified: self.end_verified,
         }
     }
 }
@@ -247,6 +265,9 @@ pub struct Session {
     pub latest: Option<coverage::Field>,
     /// Readings the session dropped before the player read them.
     pub overrun: u64,
+    /// Whether the latest calibration ended through a stop this session sent
+    /// and read back, whatever operation came after it.
+    pub end_verified: bool,
 }
 
 impl Session {
@@ -454,6 +475,41 @@ mod tests {
         ] {
             assert!(!in_session(&command));
         }
+    }
+
+    /// A save after the end replaces the session's latest operation; the end
+    /// must still read as verified, and a new start must clear it.
+    #[test]
+    fn a_verified_end_outlives_the_save_after_it() {
+        let operation = |action: &str, verified: bool| {
+            let mut status = pb::OperationStatus::new(action.into());
+            status.write_attempted = true;
+            status.command_sent = true;
+            status.register_verified = verified;
+            status.outcome = if verified || action == "save" {
+                pb::OperationOutcome::Succeeded
+            } else {
+                pb::OperationOutcome::Failed
+            };
+            status
+        };
+        let mut run = Run::new(device(IDENTITY)).unwrap();
+        let report = |run: &mut Run, status: Option<pb::OperationStatus>| {
+            let mut report = batch(Vec::new(), true);
+            report.operation = status;
+            run.absorb(report).end_verified
+        };
+        assert!(!report(&mut run, None));
+        assert!(!report(&mut run, Some(operation("mag_start", true))));
+        assert!(report(&mut run, Some(operation("mag_stop", true))));
+        assert!(report(&mut run, Some(operation("save", false))));
+        assert!(report(&mut run, None));
+        // A start that was refused before writing leaves the last end standing.
+        let mut refused = operation("mag_start", false);
+        refused.write_attempted = false;
+        assert!(report(&mut run, Some(refused)));
+        assert!(!report(&mut run, Some(operation("mag_start", true))));
+        assert!(!report(&mut run, Some(operation("mag_stop", false))));
     }
 
     /// The panel reads the session's own status from here, so nothing may be

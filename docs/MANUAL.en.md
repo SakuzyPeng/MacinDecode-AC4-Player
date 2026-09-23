@@ -585,9 +585,55 @@ must also be near 1 g.
 Calibration, zeroing, Flash saving and defaults have their own **Maintenance** page, in separate calibration/reference
 and saved-settings columns. These actions retain a confirmation dialog and never join the ordinary **Apply changes** batch.
 Saved-setting operations use the warning colour. Zero yaw requires six-axis mode; angle reference includes SAVE, and
-restoring defaults also saves. Connect manually after a device operation.
+restoring defaults also saves. Connect manually after a device operation. Magnetic calibration is not started from
+here: **Magnetic calibration…** leads to its own page, described below, which reads the field while it runs.
 Explicitly end magnetic calibration before quitting. The quit guard also runs while the window is minimized or covered and restores it to show the prompt.
 Sent/readback/completion results do not establish calibration accuracy or persistence.
+
+**Magnetic calibration has its own page, Magnetic.** Opening the page reads nothing; **Open magnetic session** does,
+and the session holds the sensor exclusively, so head tracking stops for as long as it lasts and the listening
+direction holds where it was (playback carries on). The top bar's button reads **Close session** meanwhile. The session
+reads the field the sensor reports five times a second, writes nothing by itself, and draws where the readings have
+come from on a grid of 48 cells: 12 columns of heading, forward in the middle and behind at both edges, by 4 rows of
+elevation, with the horizon across the middle. Every cell holds the same share of the sphere, so a full grid means
+every direction was read. A cell deepens with readings up to six and then stops: coverage is not progress, and no
+number on the page is a verdict on the sensor's calibration.
+
+The grid is drawn in headset axes, so the page needs a right-handed mounting and will not open a session without one
+— a wrong mounting would turn every instruction around. **Check the mounting on Tracking** leads to the three motions
+above.
+
+Leave the sensor on the headset, take the headset off and turn it slowly in your hands: the drivers' magnets are
+calibrated in with the sensor, and a neck reaches too few directions. Keep a metre from steel furniture, monitor arms,
+speakers, phones and laptops, or they are calibrated in as if they were the Earth's field.
+
+The page walks through three sweeps of the same grid:
+
+1. **Before.** Turn the headset until the grid fills. This sweep is what the calibration is judged against; starting
+   without it leaves nothing to compare. **Start calibration…** confirms and starts one.
+2. **During.** A banner keeps the device and the elapsed time in view, and **End calibration** is the only operation.
+   It never times out, and quitting waits for an end verified by readback.
+3. **After.** Sweep once more: only readings taken after the end can say what the calibration changed. Once both the
+   before and after sweeps have read every direction, the page compares them — the spread of the field's strength
+   between directions, and the centre each sweep's directions are measured from. A centre that moved toward zero says
+   the device applies the calibration to its own output; only then do the spreads compare.
+
+**Chase the outlined cell.** One cell is outlined, the nearest direction not read yet, and a small square marks where
+the latest reading falls. The large line under the grid names the motion that brings the reading there: tip the front
+up or down, turn it left or right, roll it left or right. The square is the field as the headset sees it, and the
+field holds still, so the square moves *against* the headset — follow the words, not the square. An instruction stays
+a moment before another replaces it, so two nearly equal motions do not flicker. When the readings lie close to one
+plane, as a headset only ever turned about one axis leaves them, the page says so: no centre can be fitted through a
+ring, and the rows that axis cannot reach stay empty. Spread is marked against 3 % and 8 %, provisional until measured
+on real headsets.
+
+**Nothing is saved on its own.** After an end the page says whether it was verified by readback.
+**Save current device settings…** is a separate confirmation, and a sent SAVE is not proof that it survives a power
+cycle. **Close session** ends the session at any stage; a calibration the session started is ended on the way out,
+but the top bar's warning stays until an **End calibration** is verified by readback. If the sensor reports a
+calibration the session did not start, every sweep so far is discarded. Disabled buttons say why beneath them.
+Afterwards, connect and check that the listening direction holds: the spread says only that the readings agree with
+one another.
 On macOS, run the packaged `.app` with its Bluetooth usage description and allow access on the first scan/connection.
 
 

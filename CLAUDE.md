@@ -32,7 +32,8 @@ Design docs (Chinese) carry the authoritative contracts; keep them in sync when 
 they describe: `docs/ARCHITECTURE.md`, `docs/MACINRENDER.md` (output, Atmos label assist, head
 control, native build), `docs/WINDOWS_DECODE.md`, `docs/WINDOWS_SPATIAL_AUDIO.md`,
 `docs/PLAYLISTS.md` (persistence), `docs/STORAGE.md` (data directory, managed folders), `docs/PACKAGING.md`
-(installers, CI), `docs/POSEBRIDGE-MAGNETIC.md` (magnetic calibration guidance, the coverage grid).
+(installers, CI), `docs/POSEBRIDGE-MAGNETIC.md` (magnetic calibration guidance, the coverage grid, the
+Magnetic page).
 
 Two user-facing pairs, each of which a user-visible change lands in both halves of: `README.md` /
 `README.en.md` (install, quickstart, platform support, FAQ, building) and `docs/MANUAL.md` /
@@ -413,8 +414,8 @@ stays quiet). Nothing in `src/` writes the conjunctions by hand.
   are checked on every platform — the mounting solver decides what gets written into a device setting
   and `coverage` which way every calibration instruction points, so neither is allowed to be the half
   nobody can run. `posebridge::magnetic` (sweeps of a PoseBridge magnetic session) is `posebridge_input`
-  alone, because it reads PoseBridge's own types. `coverage`, `magnetic` and the session's command and
-  view in `service.rs` allow `dead_code` outside tests until the calibration panel draws from them.
+  alone, because it reads PoseBridge's own types; the device window's Magnetic page
+  (`posebridge/ui/calibration.rs`) is what draws both.
   Linux never compiles `posebridge_input`; to check it there, build a *copy* of the repository with
   `posebridge-core`'s target list extended to Linux and `RUSTFLAGS="--cfg posebridge_input"` (needs
   `libdbus-1-dev` and `libudev-dev`), never the repository itself.

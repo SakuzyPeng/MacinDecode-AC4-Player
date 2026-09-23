@@ -103,6 +103,7 @@ enum Tab {
     Tracking,
     Device,
     Maintenance,
+    Magnetic,
     Diagnostics,
 }
 #[allow(
@@ -121,6 +122,8 @@ pub struct Panel {
     prepare_request: Option<u64>,
     confirmation: Option<(Device, pb::DeviceCommand)>,
     check: Check,
+    /// The calibration instruction on screen, held against flicker.
+    instruction: calibration::Instruction,
     error: Option<String>,
     observation: Option<(String, Option<u64>)>,
     closing: bool,
@@ -138,6 +141,7 @@ impl Default for Panel {
             prepare_request: None,
             confirmation: None,
             check: Check::default(),
+            instruction: calibration::Instruction::default(),
             error: None,
             observation: None,
             closing: false,
@@ -281,6 +285,7 @@ impl Panel {
             ui.selectable_value(&mut self.tab, Tab::Tracking, "Tracking");
             ui.selectable_value(&mut self.tab, Tab::Device, "Device");
             ui.selectable_value(&mut self.tab, Tab::Maintenance, "Maintenance");
+            ui.selectable_value(&mut self.tab, Tab::Magnetic, "Magnetic");
             ui.selectable_value(&mut self.tab, Tab::Diagnostics, "Diagnostics");
         });
         self.advance_check(head, prefs, &view, enabled);
@@ -300,6 +305,7 @@ impl Panel {
                 Tab::Tracking => "pose-tracking",
                 Tab::Device => "pose-device",
                 Tab::Maintenance => "pose-maintenance",
+                Tab::Magnetic => "pose-magnetic",
                 Tab::Diagnostics => "pose-diagnostics",
             })
             .max_height(height)
@@ -327,6 +333,7 @@ impl Panel {
                 }
                 Tab::Device => self.device(ui, prefs, service, &view),
                 Tab::Maintenance => self.maintenance(ui, prefs, &view),
+                Tab::Magnetic => self.calibration(ui, prefs, service, &view),
                 Tab::Diagnostics => {
                     if wide(ui) {
                         ui.columns(2, |columns| {
@@ -696,7 +703,7 @@ fn command_effect(command: &pb::DeviceCommand) -> &'static str {
             "Keep the sensor level and motionless. Observed start/completion does not verify accuracy. No SAVE is sent."
         }
         pb::DeviceCommand::MagStart => {
-            "Starts magnetic calibration. Follow the sensor's physical calibration procedure, then explicitly end calibration. No SAVE is sent."
+            "Starts magnetic calibration in the open session. It runs until you end it: turn the headset through every direction meanwhile. No SAVE is sent."
         }
         pb::DeviceCommand::Algorithm { .. } => {
             "Changes six/nine-axis fusion and may change the reference direction. Verifies readback; no SAVE is sent."
@@ -709,20 +716,25 @@ fn operation_result(ui: &mut egui::Ui, view: &View) {
         && let Some(op) = &s.operation
     {
         ui.separator();
-        ui.label(format!("{} · {:?}", op.action, op.outcome));
-        ui.small(format!(
-            "Source: {} · Operation {}",
-            op.source_id.as_deref().unwrap_or("unknown"),
-            op.id
-        ));
-        ui.label(format!(
-            "Sent: {} · Readback: {} · Completion observed: {}",
-            op.command_sent, op.register_verified, op.completion_observed
-        ));
-        ui.label(format!("Persistence: {}", op.persistence));
-        if let Some(message) = &op.message {
-            ui.label(message);
-        }
+        operation_lines(ui, op);
+    }
+}
+/// One operation in the words every device operation is reported in: sent,
+/// readback, completion and persistence, none of which is accuracy.
+fn operation_lines(ui: &mut egui::Ui, op: &pb::OperationStatus) {
+    ui.label(format!("{} · {:?}", op.action, op.outcome));
+    ui.small(format!(
+        "Source: {} · Operation {}",
+        op.source_id.as_deref().unwrap_or("unknown"),
+        op.id
+    ));
+    ui.label(format!(
+        "Sent: {} · Readback: {} · Completion observed: {}",
+        op.command_sent, op.register_verified, op.completion_observed
+    ));
+    ui.label(format!("Persistence: {}", op.persistence));
+    if let Some(message) = &op.message {
+        ui.label(message);
     }
 }
 fn motion_diagnostics(ui: &mut egui::Ui, service: &Service) {
@@ -1002,6 +1014,7 @@ mod tests {
 #[path = "ui/mounting_tests.rs"]
 mod mounting_tests;
 
+mod calibration;
 mod device;
 #[cfg(test)]
 mod layout_tests;

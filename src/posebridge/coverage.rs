@@ -87,6 +87,7 @@ impl Coverage {
             centre: None,
             spread: None,
             next: None,
+            latest: None,
         };
         if self.readings.len() < MIN_READINGS {
             return snapshot;
@@ -101,10 +102,9 @@ impl Coverage {
             }
         }
         snapshot.spread = spread(magnitudes);
-        snapshot.next = self
-            .readings
-            .back()
-            .and_then(|&latest| next(&snapshot.counts, sub(latest, origin)));
+        let latest = self.readings.back().map(|&latest| sub(latest, origin));
+        snapshot.next = latest.and_then(|latest| next(&snapshot.counts, latest));
+        snapshot.latest = latest.and_then(place);
         snapshot.centre = Some(located);
         snapshot
     }
@@ -134,6 +134,9 @@ pub struct Snapshot {
     pub spread: Option<f64>,
     /// The nearest direction not read yet, and the motion toward it.
     pub next: Option<Next>,
+    /// Where the latest reading falls, from the centre, as [`place`] puts it:
+    /// the marker the listener steers into the target.
+    pub latest: Option<[f64; 2]>,
 }
 
 impl Snapshot {
@@ -216,25 +219,34 @@ pub fn proper(axes: [i8; 3]) -> bool {
         && mounting::cross(mounting::unit(right), mounting::unit(forward)) == mounting::unit(up)
 }
 
-/// The cell a direction falls in. It need not be a unit vector; a zero or
-/// non-finite one has no cell. A direction on a boundary belongs to the cell
-/// below it or to its right.
+/// Where a direction falls on the grid: columns across from directly behind
+/// and rows down from straight up, both fractional, so `[0, 0]` is the grid's
+/// top left corner and `[COLUMNS, ROWS]` its bottom right. It need not be a
+/// unit vector; a zero or non-finite one has no place.
+pub fn place(direction: Field) -> Option<[f64; 2]> {
+    let length = norm(direction);
+    if !length.is_finite() || length <= 0.0 {
+        return None;
+    }
+    let [right, forward, up] = direction.map(|value| value / length);
+    Some([
+        (right.atan2(forward) + PI) / COLUMN_WIDTH,
+        (1.0 - up) / ROW_HEIGHT,
+    ])
+}
+
+/// The cell a direction falls in: the one its [`place`] floors to, so a marker
+/// drawn at the place always sits in the cell the reading was counted in. A
+/// direction on a boundary belongs to the cell below it or to its right.
 #[allow(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
     reason = "Both indices are floored and non-negative; the cast saturates and the grid clamps"
 )]
 fn cell_of(direction: Field) -> Option<usize> {
-    let length = norm(direction);
-    if !length.is_finite() || length <= 0.0 {
-        return None;
-    }
-    let [right, forward, up] = direction.map(|value| value / length);
-    let row = (((1.0 - up) / ROW_HEIGHT).floor().max(0.0) as usize).min(ROWS - 1);
-    let column = (((right.atan2(forward) + PI) / COLUMN_WIDTH)
-        .floor()
-        .max(0.0) as usize)
-        .min(COLUMNS - 1);
+    let [column, row] = place(direction)?;
+    let row = (row.floor().max(0.0) as usize).min(ROWS - 1);
+    let column = (column.floor().max(0.0) as usize).min(COLUMNS - 1);
     Some(row * COLUMNS + column)
 }
 
@@ -495,6 +507,29 @@ mod tests {
         assert_eq!(at(-179.0, 15.0) % COLUMNS, 0);
         assert_eq!(cell_of([0.0; 3]), None);
         assert_eq!(cell_of([f64::NAN, 0.0, 1.0]), None);
+        // Forward on the horizon is the middle of the grid, straight up its top.
+        let [column, row] = place([0.0, 3.0, 0.0]).unwrap();
+        assert!((column - 6.0).abs() < 1e-12 && (row - 2.0).abs() < 1e-12);
+        assert!(place([0.0, 0.0, 2.0]).unwrap()[1].abs() < 1e-12);
+        assert_eq!(place([0.0; 3]), None);
+    }
+
+    /// The marker is drawn at the latest reading's place, and must sit in the
+    /// cell that reading filled, measured from the same centre.
+    #[test]
+    fn the_latest_reading_is_placed_in_the_cell_it_filled() {
+        for cell in [0, 17, 30, CELLS - 1] {
+            let mut coverage = sweep(even_sphere(400), OFFSET);
+            assert!(coverage.push(add(scale(centre_of(cell), EARTH), OFFSET)));
+            let snapshot = coverage.snapshot();
+            let [column, row] = snapshot.latest.unwrap();
+            assert_eq!(
+                (row.floor(), column.floor()),
+                (index(cell / COLUMNS), index(cell % COLUMNS)),
+                "{cell}"
+            );
+            assert!(snapshot.counts[cell] > 0);
+        }
     }
 
     /// Pins the numbers [`span`]'s documentation and [`MIN_SPAN`]'s rest on.
@@ -709,6 +744,7 @@ mod tests {
         assert!(snapshot.centre.is_none());
         assert!(snapshot.spread.is_none());
         assert!(snapshot.next.is_none());
+        assert!(snapshot.latest.is_none());
     }
 
     #[test]

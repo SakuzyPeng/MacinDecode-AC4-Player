@@ -1,5 +1,5 @@
 use super::{
-    Command, HeadSnapshot, Panel, Phase, Preferences, Service, Settings, Transport, View,
+    Command, HeadSnapshot, Panel, Phase, Preferences, Service, Settings, Tab, Transport, View,
     axis_name, command_effect, command_label, configuration, egui, enhanced_profile, format_label,
     operation_result, pb, phase_tone, section, wide,
 };
@@ -88,11 +88,16 @@ impl Panel {
                             self.send(service, Command::Stop);
                         }
                     } else if view.phase.busy() {
+                        // A session is closed rather than cancelled. Closing
+                        // also ends a calibration it started, but only an End
+                        // calibration clears the warning.
+                        let label = if view.phase == Phase::Magnetic {
+                            "Close session"
+                        } else {
+                            "Cancel operation"
+                        };
                         if ui
-                            .add_enabled(
-                                view.phase != Phase::Stopping,
-                                egui::Button::new("Cancel operation"),
-                            )
+                            .add_enabled(view.phase != Phase::Stopping, egui::Button::new(label))
                             .clicked()
                         {
                             self.send(service, Command::Stop);
@@ -526,32 +531,40 @@ impl Panel {
                 } else {
                     "These operations do not send Flash save. Listening Recenter is in the top bar."
                 });
-                let commands = if persistent {
-                    [
+                let commands: &[pb::DeviceCommand] = if persistent {
+                    &[
                         pb::DeviceCommand::Save,
                         pb::DeviceCommand::AngleReference,
                         pb::DeviceCommand::ResetDefaults,
                     ]
                 } else {
-                    [
+                    &[
                         pb::DeviceCommand::ZeroYaw,
                         pb::DeviceCommand::AccelCalibrate,
-                        pb::DeviceCommand::MagStart,
                     ]
                 };
                 ui.add_enabled_ui(editable, |ui| {
                     for command in commands {
                         let label =
-                            egui::RichText::new(command_label(&command)).color(if persistent {
+                            egui::RichText::new(command_label(command)).color(if persistent {
                                 crate::theme::WARNING
                             } else {
                                 crate::theme::TEXT
                             });
                         if ui.button(label).clicked() {
-                            self.confirmation = Some((prefs.device.clone(), command));
+                            self.confirmation = Some((prefs.device.clone(), command.clone()));
                         }
                     }
                 });
+                if !persistent {
+                    // A start from here would calibrate blind: only the
+                    // session shows the field while it runs.
+                    ui.add_space(4.);
+                    if ui.button("Magnetic calibration…").clicked() {
+                        self.tab = Tab::Magnetic;
+                    }
+                    ui.small("Has its own page, which reads the field while it runs.");
+                }
             },
         );
     }
@@ -564,6 +577,10 @@ impl Panel {
         let Some((device, command)) = self.confirmation.clone() else {
             return;
         };
+        let write = Command::Write(device.clone(), command.clone());
+        // The service decides, not the phase: a start or save for the open
+        // magnetic session goes into it while the phase reads busy.
+        let refusal = view.refusal(&write);
         let response =
             egui::Modal::new(egui::Id::new("pose-device-confirmation")).show(context, |ui| {
                 ui.set_max_width(420.);
@@ -572,16 +589,19 @@ impl Panel {
                 ui.label(command_effect(&command));
                 ui.horizontal(|ui| {
                     if ui
-                        .add_enabled(!view.phase.busy(), egui::Button::new("Confirm operation"))
+                        .add_enabled(refusal.is_none(), egui::Button::new("Confirm operation"))
                         .clicked()
                     {
-                        self.send(service, Command::Write(device.clone(), command.clone()));
+                        self.send(service, write);
                         self.confirmation = None;
                     }
                     if ui.button("Cancel").clicked() {
                         self.confirmation = None;
                     }
                 });
+                if let Some(reason) = &refusal {
+                    ui.small(reason);
+                }
             });
         if response.should_close() {
             self.confirmation = None;
