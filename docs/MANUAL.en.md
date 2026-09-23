@@ -634,6 +634,9 @@ but the top bar's warning stays until an **End calibration** is verified by read
 calibration the session did not start, every sweep so far is discarded. Disabled buttons say why beneath them.
 Afterwards, connect and check that the listening direction holds: the spread says only that the readings agree with
 one another.
+Once queued, a start, end or save operation guards quitting until its outcome is reported, or it is explicitly
+cancelled and session cleanup finishes. After a session fails, **End calibration** reconnects to the original device
+to try ending it. A read-only session with no pending operation or calibration warning allows quitting directly.
 On macOS, run the packaged `.app` with its Bluetooth usage description and allow access on the first scan/connection.
 
 

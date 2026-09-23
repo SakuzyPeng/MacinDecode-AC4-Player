@@ -574,8 +574,7 @@ impl Panel {
 
     /// Runs from [`eframe::App::logic`], including when eframe skips the entire UI pass.
     pub fn guard_close(&mut self, context: &egui::Context, view: &View) {
-        let guarded =
-            view.magnetic.is_some() || matches!(view.phase, Phase::Operating | Phase::Stopping);
+        let guarded = view.guards_quit();
         if context.input(|i| i.viewport().close_requested()) && guarded && !self.allow_close {
             context.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             if !self.closing {
@@ -912,16 +911,61 @@ mod tests {
         }
     }
     #[test]
-    fn idle_close_does_not_restore_or_block_a_hidden_window() {
+    fn session_writes_guard_a_hidden_quit_until_their_outcome_is_published() {
         let context = egui::Context::default();
         let mut panel = Panel::default();
         let mut input = egui::RawInput::default();
         let viewport = input.viewports.get_mut(&egui::ViewportId::ROOT).unwrap();
         viewport.minimized = Some(true);
         viewport.events.push(egui::ViewportEvent::Close);
-        let output = context.run_logic(&input, |ctx| panel.guard_close(ctx, &View::default()));
+        let mut view = View {
+            phase: Phase::Magnetic,
+            session_write_pending: true,
+            ..View::default()
+        };
+        // The write is queued, before PoseBridge has an operation to publish.
+        let output = context.run_logic(&input, |ctx| panel.guard_close(ctx, &view));
+        let commands = &output.viewport_commands[&egui::ViewportId::ROOT];
+        assert!(commands.contains(&egui::ViewportCommand::CancelClose));
+        assert!(commands.contains(&egui::ViewportCommand::Minimized(false)));
+        assert!(panel.closing);
+        input
+            .viewports
+            .get_mut(&egui::ViewportId::ROOT)
+            .unwrap()
+            .events
+            .clear();
+        // A subsequent logic tick must not mistake the session for idle work.
+        let output = context.run_logic(&input, |ctx| panel.guard_close(ctx, &view));
         assert!(output.viewport_commands.is_empty());
+        assert!(panel.closing);
+        // SAVE finished. The session can remain open and read-only while quit
+        // proceeds; it must not require a separate Close session click.
+        view.session_write_pending = false;
+        let output = context.run_logic(&input, |ctx| panel.guard_close(ctx, &view));
+        assert!(
+            output.viewport_commands[&egui::ViewportId::ROOT]
+                .contains(&egui::ViewportCommand::Close)
+        );
         assert!(!panel.closing);
+    }
+    #[test]
+    fn idle_or_read_only_session_close_does_not_restore_or_block_a_hidden_window() {
+        for phase in [Phase::Idle, Phase::Magnetic] {
+            let context = egui::Context::default();
+            let mut panel = Panel::default();
+            let mut input = egui::RawInput::default();
+            let viewport = input.viewports.get_mut(&egui::ViewportId::ROOT).unwrap();
+            viewport.minimized = Some(true);
+            viewport.events.push(egui::ViewportEvent::Close);
+            let view = View {
+                phase,
+                ..View::default()
+            };
+            let output = context.run_logic(&input, |ctx| panel.guard_close(ctx, &view));
+            assert!(output.viewport_commands.is_empty());
+            assert!(!panel.closing);
+        }
     }
     /// The window this panel now owns sizes itself, so what is worth pinning is
     /// the module's own claim: drawing any tab, repeatedly, issues no command.

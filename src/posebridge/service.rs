@@ -74,6 +74,9 @@ pub struct View {
     /// The open magnetic session, or the last one until something else starts:
     /// what its cleanup did stays readable after it closed.
     pub magnetic_session: Option<magnetic::Session>,
+    /// A session write has been queued and has not finished or been refused.
+    /// Set by send, before the worker can publish its operation status.
+    pub session_write_pending: bool,
     pub apply: Option<ApplyProgress>,
 }
 impl View {
@@ -86,6 +89,11 @@ impl View {
     }
     pub fn admits(&self, command: &Command) -> bool {
         self.refusal(command).is_none()
+    }
+    pub fn guards_quit(&self) -> bool {
+        self.magnetic.is_some()
+            || self.session_write_pending
+            || matches!(self.phase, Phase::Operating | Phase::Stopping)
     }
 }
 pub enum Command {
@@ -183,6 +191,7 @@ impl Service {
             _ => v.device.clone(),
         };
         let stopping = matches!(command, Command::Stop | Command::Shutdown);
+        let session_write = into_session(&v, &command);
         self.sender
             .try_send(Request { id, command })
             .map_err(|e| format!("Device worker: {e}"))?;
@@ -190,6 +199,7 @@ impl Service {
         v.phase = phase;
         v.error = None;
         v.device = device;
+        v.session_write_pending = session_write;
         if !stopping {
             v.apply = None;
         }
@@ -223,6 +233,9 @@ fn wake(listener: &Mutex<Option<Thread>>) {
 }
 /// Whether `command` may start now, and the phase it leaves the worker in.
 fn admit(v: &View, command: &Command) -> Result<Phase, String> {
+    if v.session_write_pending && !matches!(command, Command::Stop | Command::Shutdown) {
+        return Err("Waiting for the last operation to finish.".into());
+    }
     let into_session = into_session(v, command);
     if v.phase.busy() && !into_session && !matches!(command, Command::Stop | Command::Shutdown) {
         return Err("Disconnect or finish the current operation first".into());
@@ -341,9 +354,17 @@ fn observe_magnetic(view: &mut View, snapshot: &pb::Snapshot, device: Option<&De
 /// calibrating: a start it wrote and has not seen end, or CALSW = 7 found on
 /// the device. Only a verified stop unlatches, so a session that stops saying
 /// so leaves the latch as it was.
-fn publish_session(v: &mut View, session: magnetic::Session, device: &Device) {
+fn publish_session(v: &mut View, session: magnetic::Session, device: &Device, request: u64) {
     if session.device_may_be_calibrating {
         v.magnetic = Some(device.clone());
+    }
+    // Cleanup can publish after a newer request was queued. Only the request
+    // that dispatched the write may release its quit guard.
+    if v.request == request {
+        v.session_write_pending &= session
+            .operation
+            .as_ref()
+            .is_some_and(|operation| operation.outcome == pb::OperationOutcome::Running);
     }
     v.magnetic_session = Some(session);
 }
@@ -391,18 +412,22 @@ fn worker(
             Ok(Request {
                 id,
                 command: Command::Write(target, operation),
-            }) if session
-                .as_ref()
-                .is_some_and(|run| run.device == target && magnetic::in_session(&operation)) =>
+            }) if phase == Phase::Magnetic
+                && session.as_ref().is_some_and(|run| {
+                    run.device == target && magnetic::in_session(&operation)
+                }) =>
             {
                 // The session, its history and its sweeps carry on: only the
                 // command is new, and a refusal leaves the session as it was.
+                // A failed session must instead be retired below, so recovery
+                // starts a fresh operation rather than repeating its failure.
                 current = id;
                 if let Some(c) = controller.as_mut()
                     && let Err(error) = c.configure_device(operation)
                 {
                     let mut v = lock(view);
                     if v.request == current {
+                        v.session_write_pending = false;
                         v.error = Some(match error {
                             pb::Error::Busy => "The magnetic session is not ready, or its last operation is still running".into(),
                             other => other.to_string(),
@@ -435,7 +460,7 @@ fn worker(
                         // only until the next configuration resets the session.
                         let stopped = c.stop();
                         let last = run.absorb(c.magnetic_since(run.cursor()));
-                        publish_session(&mut lock(view), last, &run.device);
+                        publish_session(&mut lock(view), last, &run.device, current);
                         // A session that already failed has said why; its
                         // stop repeating that is not news. A healthy one whose
                         // cleanup or close failed is.
@@ -534,6 +559,7 @@ fn worker(
                     pending_connect = None;
                     let mut v = lock(view);
                     if v.request == current {
+                        v.session_write_pending = false;
                         v.error = Some(error);
                     }
                 }
@@ -742,7 +768,7 @@ fn worker(
         }
         observe_magnetic(&mut v, &snapshot, device.as_ref());
         if let (Some(published), Some(run)) = (published, &session) {
-            publish_session(&mut v, published, &run.device);
+            publish_session(&mut v, published, &run.device, current);
         }
         let reads = snapshot.status.delivery.reads;
         let session_id = snapshot.status.session_id;
@@ -952,6 +978,41 @@ mod lifecycle_tests {
             "stopping keeps the outcome"
         );
     }
+
+    #[test]
+    fn ending_a_failed_session_attempts_a_new_operation_on_the_first_request() {
+        let service = Service::new();
+        let device = Device {
+            transport: Transport::Usb,
+            id: "posebridge-recovery-no-such-port".into(),
+            mounting: [1, 2, 3],
+            ..Device::default()
+        };
+        service.send(Command::Magnetic(device.clone())).unwrap();
+        until(|| service.view().phase == Phase::Failed);
+        // Model the retained warning after a connection was lost during
+        // calibration. Recovery must try the original device straight away.
+        lock(&service.view).magnetic = Some(device.clone());
+        service
+            .send(Command::Write(device.clone(), pb::DeviceCommand::MagStop))
+            .unwrap();
+        until(|| service.view().error.is_some());
+        let view = service.view();
+        assert!(view.magnetic_session.is_none(), "retire the failed session");
+        let operation = view
+            .snapshot
+            .as_ref()
+            .unwrap()
+            .operation
+            .as_ref()
+            .expect("a new stop attempt");
+        assert_eq!(operation.action, "mag_stop");
+        // The port is still absent, so this new attempt cannot verify an end.
+        assert_eq!(operation.outcome, pb::OperationOutcome::Failed);
+        assert!(!operation.write_attempted);
+        assert_eq!(view.magnetic, Some(device));
+        assert!(view.guards_quit());
+    }
 }
 
 #[cfg(test)]
@@ -998,6 +1059,93 @@ mod magnetic_tests {
             admit(&idle, &Command::Magnetic(device)),
             Ok(Phase::Magnetic)
         );
+    }
+
+    #[test]
+    fn queued_session_writes_guard_quit_before_the_worker_can_report_them() {
+        for operation in [MagStart, MagStop, Save] {
+            let device = Device {
+                transport: Transport::Usb,
+                ..sensor("sensor")
+            };
+            let (sender, receiver) = mpsc::sync_channel(8);
+            // No worker: keep the command queued deterministically, with no
+            // operation snapshot yet and without accessing a real device.
+            let service = Service {
+                sender,
+                view: Arc::new(Mutex::new(View {
+                    phase: Phase::Magnetic,
+                    device: Some(device.clone()),
+                    ..View::default()
+                })),
+                sample: Arc::default(),
+                motion: Arc::default(),
+                enhancement: Arc::default(),
+                listener: Arc::default(),
+                join: None,
+            };
+            assert!(!service.view().guards_quit(), "monitoring writes nothing");
+            service
+                .send(Command::Write(device.clone(), operation))
+                .unwrap();
+            let queued = service.view();
+            assert_eq!(queued.phase, Phase::Magnetic);
+            assert!(queued.guards_quit());
+            assert!(queued.magnetic.is_none() && queued.snapshot.is_none());
+            // A second write cannot supersede the guard before dispatch.
+            assert!(service.send(Command::Write(device, MagStop)).is_err());
+            assert_eq!(service.view().request, queued.request);
+            assert!(matches!(
+                receiver.try_recv().unwrap().command,
+                Command::Write(..)
+            ));
+            service.send(Command::Stop).unwrap();
+            assert!(!service.view().session_write_pending);
+            assert!(
+                service.view().guards_quit(),
+                "closing still waits for cleanup"
+            );
+        }
+    }
+
+    #[test]
+    fn a_session_write_guards_until_its_outcome_and_preserves_the_calibration_warning() {
+        let device = sensor("sensor");
+        for outcome in [
+            pb::OperationOutcome::Succeeded,
+            pb::OperationOutcome::Unverified,
+            pb::OperationOutcome::Failed,
+            pb::OperationOutcome::Cancelled,
+        ] {
+            let mut run = magnetic::Run::new(device.clone()).unwrap();
+            let mut view = View {
+                request: 1,
+                phase: Phase::Magnetic,
+                session_write_pending: true,
+                ..View::default()
+            };
+            let mut batch = magnetic::fixtures::batch(Vec::new(), true);
+            batch.phase = pb::MagneticPhase::Saving;
+            batch.operation = Some(pb::OperationStatus::new("save".into()));
+            publish_session(&mut view, run.absorb(batch.clone()), &device, 1);
+            assert!(view.guards_quit(), "SAVE is still running");
+            batch.operation.as_mut().unwrap().outcome = outcome;
+            batch.phase = pb::MagneticPhase::Calibrated;
+            publish_session(&mut view, run.absorb(batch.clone()), &device, 0);
+            assert!(
+                view.guards_quit(),
+                "an older request cannot release the write"
+            );
+            publish_session(&mut view, run.absorb(batch.clone()), &device, 1);
+            assert!(!view.guards_quit(), "SAVE finished: {outcome:?}");
+
+            // Finishing a write is not enough when calibration may persist.
+            view.session_write_pending = true;
+            batch.device_may_be_calibrating = true;
+            publish_session(&mut view, run.absorb(batch), &device, 1);
+            assert!(!view.session_write_pending);
+            assert!(view.guards_quit());
+        }
     }
 
     #[test]
@@ -1052,11 +1200,11 @@ mod magnetic_tests {
         let mut view = View::default();
         let mut calibrating = magnetic::fixtures::batch(Vec::new(), true);
         calibrating.device_may_be_calibrating = true;
-        publish_session(&mut view, run.absorb(calibrating), &device);
+        publish_session(&mut view, run.absorb(calibrating), &device, 0);
         assert_eq!(view.magnetic, Some(device.clone()));
         // Only a verified stop unlatches; a session that stops saying so does not.
         let quiet = magnetic::fixtures::batch(Vec::new(), true);
-        publish_session(&mut view, run.absorb(quiet), &device);
+        publish_session(&mut view, run.absorb(quiet), &device, 0);
         assert_eq!(view.magnetic, Some(device));
         assert!(view.magnetic_session.is_some());
     }
