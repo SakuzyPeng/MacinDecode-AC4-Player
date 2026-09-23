@@ -121,14 +121,14 @@ impl Panel {
         if let Some(device) = &view.magnetic {
             ui.horizontal_wrapped(|ui| {
                 ui.colored_label(crate::theme::WARNING, "Magnetic calibration may be active");
+                // Also inside an open magnetic session, where the service sends
+                // the stop into the session instead of refusing it as busy.
+                let end = Command::Write(device.clone(), pb::DeviceCommand::MagStop);
                 if ui
-                    .add_enabled(!view.phase.busy(), egui::Button::new("End calibration"))
+                    .add_enabled(view.admits(&end), egui::Button::new("End calibration"))
                     .clicked()
                 {
-                    self.send(
-                        service,
-                        Command::Write(device.clone(), pb::DeviceCommand::MagStop),
-                    );
+                    self.send(service, end);
                 }
             });
         } else if !enabled {

@@ -1,6 +1,7 @@
 //! Own all blocking lifecycle calls on one device worker, never on egui/audio.
 use super::configuration::{Action as ApplyAction, Apply, Progress as ApplyProgress, Settings};
 use super::enhancement::{Diagnostics, Inbox, Motion};
+use super::magnetic;
 use super::{Device, Input, Sample, Transport};
 use crate::head_tracking::Quaternion;
 use posebridge_core as pb;
@@ -32,6 +33,9 @@ pub enum Phase {
     Inspecting,
     Tracking,
     Operating,
+    /// A magnetic session is open. It holds the device exclusively, so there
+    /// is no tracking and no pose for as long as it lasts.
+    Magnetic,
     Stopping,
     Failed,
 }
@@ -49,6 +53,7 @@ impl Phase {
             Self::Inspecting => "Reading device configuration…",
             Self::Tracking => "Connected · tracking",
             Self::Operating => "Applying a device operation…",
+            Self::Magnetic => "Reading the magnetic field · not tracking",
             Self::Stopping => "Finishing…",
             Self::Failed => "Device operation failed",
         }
@@ -66,7 +71,25 @@ pub struct View {
     pub delivery_hz: f64,
     /// Retained until a verified stop, including uncertain/cancelled start writes.
     pub magnetic: Option<Device>,
+    /// The open magnetic session, or the last one until something else starts:
+    /// what its cleanup did stays readable after it closed.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "The calibration panel that draws the session is not built yet"
+        )
+    )]
+    pub magnetic_session: Option<magnetic::Session>,
     pub apply: Option<ApplyProgress>,
+}
+impl View {
+    /// Whether the service would take `command` now. Controls ask this rather
+    /// than reading the phase, which cannot tell a calibration command for the
+    /// open magnetic session from one for a device that is busy.
+    pub fn admits(&self, command: &Command) -> bool {
+        admit(self, command).is_ok()
+    }
 }
 pub enum Command {
     Scan(Transport),
@@ -76,6 +99,17 @@ pub enum Command {
     },
     Connect(Device),
     Inspect(Device),
+    /// Open a read-only magnetic session. Starting, ending and saving a
+    /// calibration are then ordinary `Write`s to the same device, which the
+    /// worker sends into the session.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "The calibration panel that opens the session is not built yet"
+        )
+    )]
+    Magnetic(Device),
     Write(Device, pb::DeviceCommand),
     Apply(Device, Settings, Settings),
     Stop,
@@ -140,39 +174,20 @@ impl Service {
         if let Command::Apply(_, _, settings) = &command {
             settings.validate()?;
         }
+        if let Command::Magnetic(device) = &command {
+            magnetic::check(device)?;
+        }
         #[cfg(target_os = "macos")]
         if needs_bluetooth(&command) && !packaged_host() {
             return Err("Bluetooth access requires the packaged MacinDecode .app with its Bluetooth usage description. USB remains available.".into());
         }
         let mut v = lock(&self.view);
-        if v.phase.busy() && !matches!(command, Command::Stop | Command::Shutdown) {
-            return Err("Disconnect or finish the current operation first".into());
-        }
-        if let Some(magnetic) = &v.magnetic {
-            let allowed = match &command {
-                Command::Write(device, pb::DeviceCommand::MagStop) | Command::Inspect(device) => {
-                    device == magnetic
-                }
-                Command::Stop | Command::Shutdown => true,
-                _ => false,
-            };
-            if !allowed {
-                return Err("End magnetic calibration on its original device first".into());
-            }
-        }
-        let phase = match &command {
-            Command::Scan(_) => Phase::Scanning,
-            #[cfg(test)]
-            Command::Simulate { .. } => Phase::Tracking,
-            Command::Connect(_) => Phase::Tracking,
-            Command::Inspect(_) => Phase::Inspecting,
-            Command::Write(_, _) | Command::Apply(_, _, _) => Phase::Operating,
-            Command::Stop | Command::Shutdown => Phase::Stopping,
-        };
+        let phase = admit(&v, &command)?;
         let id = v.request.wrapping_add(1);
         let device = match &command {
             Command::Connect(d)
             | Command::Inspect(d)
+            | Command::Magnetic(d)
             | Command::Write(d, _)
             | Command::Apply(d, _, _) => Some(d.clone()),
             _ => v.device.clone(),
@@ -215,6 +230,46 @@ fn wake(listener: &Mutex<Option<Thread>>) {
     if let Some(listener) = lock(listener).as_ref() {
         listener.unpark();
     }
+}
+/// Whether `command` may start now, and the phase it leaves the worker in.
+fn admit(v: &View, command: &Command) -> Result<Phase, String> {
+    let into_session = into_session(v, command);
+    if v.phase.busy() && !into_session && !matches!(command, Command::Stop | Command::Shutdown) {
+        return Err("Disconnect or finish the current operation first".into());
+    }
+    if let Some(magnetic) = &v.magnetic {
+        // A latched device can still be ended, looked at, or watched while it
+        // is ended; nothing else may reach it, and no other device may start.
+        let allowed = match command {
+            Command::Write(device, pb::DeviceCommand::MagStop)
+            | Command::Inspect(device)
+            | Command::Magnetic(device) => device == magnetic,
+            Command::Stop | Command::Shutdown => true,
+            _ => false,
+        };
+        if !allowed {
+            return Err("End magnetic calibration on its original device first".into());
+        }
+    }
+    Ok(match command {
+        Command::Scan(_) => Phase::Scanning,
+        #[cfg(test)]
+        Command::Simulate { .. } => Phase::Tracking,
+        Command::Connect(_) => Phase::Tracking,
+        Command::Inspect(_) => Phase::Inspecting,
+        Command::Magnetic(_) => Phase::Magnetic,
+        Command::Write(_, _) if into_session => Phase::Magnetic,
+        Command::Write(_, _) | Command::Apply(_, _, _) => Phase::Operating,
+        Command::Stop | Command::Shutdown => Phase::Stopping,
+    })
+}
+/// A calibration command for the device whose magnetic session is open. It
+/// goes into that session: a connection of its own would be refused, because
+/// the session holds the device.
+fn into_session(v: &View, command: &Command) -> bool {
+    v.phase == Phase::Magnetic
+        && matches!(command, Command::Write(device, operation)
+            if v.device.as_ref() == Some(device) && magnetic::in_session(operation))
 }
 pub fn configuration(device: &Device, acquisition: bool) -> Result<pb::Config, String> {
     let [right, forward, up] = device.mounting;
@@ -292,6 +347,16 @@ fn observe_magnetic(view: &mut View, snapshot: &pb::Snapshot, device: Option<&De
         }
     }
 }
+/// Publish a session, latching its device when the session says it may be
+/// calibrating: a start it wrote and has not seen end, or CALSW = 7 found on
+/// the device. Only a verified stop unlatches, so a session that stops saying
+/// so leaves the latch as it was.
+fn publish_session(v: &mut View, session: magnetic::Session, device: &Device) {
+    if session.device_may_be_calibrating {
+        v.magnetic = Some(device.clone());
+    }
+    v.magnetic_session = Some(session);
+}
 fn start_acquisition(controller: &mut pb::Controller, config: pb::Config) -> pb::Result<()> {
     // Complete is published before PoseBridge's task handle finishes. Retire the
     // inspection on this device worker before set_config can reject it as Busy.
@@ -318,6 +383,7 @@ fn worker(
     let mut device = None::<Device>;
     let mut pending_connect = None::<Device>;
     let mut pending_apply = None::<Apply>;
+    let mut session = None::<magnetic::Run>;
     let mut last_view = Instant::now();
     let mut next_poll = Instant::now();
     let mut delivery_mark = None::<(Instant, u64, u64)>;
@@ -332,6 +398,28 @@ fn worker(
             Duration::from_millis(20)
         };
         match receiver.recv_timeout(delay) {
+            Ok(Request {
+                id,
+                command: Command::Write(target, operation),
+            }) if session
+                .as_ref()
+                .is_some_and(|run| run.device == target && magnetic::in_session(&operation)) =>
+            {
+                // The session, its history and its sweeps carry on: only the
+                // command is new, and a refusal leaves the session as it was.
+                current = id;
+                if let Some(c) = controller.as_mut()
+                    && let Err(error) = c.configure_device(operation)
+                {
+                    let mut v = lock(view);
+                    if v.request == current {
+                        v.error = Some(match error {
+                            pb::Error::Busy => "The magnetic session is not ready, or its last operation is still running".into(),
+                            other => other.to_string(),
+                        });
+                    }
+                }
+            }
             Ok(request) => {
                 current = request.id;
                 if let Some(mut apply) = pending_apply.take() {
@@ -351,6 +439,24 @@ fn worker(
                         controller = Some(pb::Controller::new().map_err(|e| e.to_string())?);
                     }
                     let c = controller.as_mut().expect("created controller");
+                    if let Some(mut run) = session.take() {
+                        // PoseBridge ends a calibration this session started
+                        // while it stops, and what that cleanup did is readable
+                        // only until the next configuration resets the session.
+                        let stopped = c.stop();
+                        let last = run.absorb(c.magnetic_since(run.cursor()));
+                        publish_session(&mut lock(view), last, &run.device);
+                        // A session that already failed has said why; its
+                        // stop repeating that is not news. A healthy one whose
+                        // cleanup or close failed is.
+                        if matches!(request.command, Command::Stop) && phase != Phase::Failed {
+                            stopped.map_err(|e| e.to_string())?;
+                        }
+                    }
+                    if !matches!(request.command, Command::Stop) {
+                        // Whatever starts now is no longer about that session.
+                        lock(view).magnetic_session = None;
+                    }
                     match request.command {
                         #[cfg(test)]
                         Command::Simulate { rate } => {
@@ -397,6 +503,19 @@ fn worker(
                             c.inspect_start().map_err(|e| e.to_string())?;
                             device = Some(d);
                             phase = Phase::Inspecting;
+                        }
+                        Command::Magnetic(d) => {
+                            let run = magnetic::Run::new(d.clone())?;
+                            // Retire a finished inspection's task first, as
+                            // acquisition does, before the session claims the
+                            // device.
+                            c.stop().map_err(|e| e.to_string())?;
+                            c.set_config(configuration(&d, false)?)
+                                .map_err(|e| e.to_string())?;
+                            c.magnetic_start().map_err(|e| e.to_string())?;
+                            device = Some(d);
+                            session = Some(run);
+                            phase = Phase::Magnetic;
                         }
                         Command::Write(d, command) => {
                             c.set_config(configuration(&d, false)?)
@@ -572,6 +691,11 @@ fn worker(
         if next_poll <= now {
             next_poll = now + Duration::from_millis(5);
         }
+        // Read even when publication is skipped below: the sweeps keep what
+        // arrived, and the next publication carries it.
+        let published = session
+            .as_mut()
+            .map(|run| run.absorb(c.magnetic_since(run.cursor())));
         // A queued stop supersedes publication immediately, even while stop itself is blocking.
         let mut v = lock(view);
         if v.request != current {
@@ -627,17 +751,20 @@ fn worker(
             wake(listener);
         }
         observe_magnetic(&mut v, &snapshot, device.as_ref());
+        if let (Some(published), Some(run)) = (published, &session) {
+            publish_session(&mut v, published, &run.device);
+        }
         let reads = snapshot.status.delivery.reads;
-        let session = snapshot.status.session_id;
+        let session_id = snapshot.status.session_id;
         match delivery_mark {
-            Some((at, before, previous)) if previous == session && reads >= before => {
+            Some((at, before, previous)) if previous == session_id && reads >= before => {
                 if now.duration_since(at) >= Duration::from_secs(1) {
                     v.delivery_hz = count_rate(reads - before, now.duration_since(at));
-                    delivery_mark = Some((now, reads, session));
+                    delivery_mark = Some((now, reads, session_id));
                 }
             }
             _ => {
-                delivery_mark = Some((now, reads, session));
+                delivery_mark = Some((now, reads, session_id));
                 v.delivery_hz = 0.0;
             }
         }
@@ -802,6 +929,147 @@ mod lifecycle_tests {
         observe_magnetic(&mut view, &snapshot, Some(&device));
         assert!(view.magnetic.is_none());
     }
+    /// The whole worker path without hardware: a port that is not there fails
+    /// the session the way a lost device would, and it must fail readably and
+    /// stop cleanly rather than latch anything.
+    #[test]
+    fn a_session_that_cannot_open_reports_why_and_stops_cleanly() {
+        let service = Service::new();
+        let device = Device {
+            transport: Transport::Usb,
+            id: "posebridge-test-no-such-port".into(),
+            mounting: [1, 2, 3],
+            ..Device::default()
+        };
+        service.send(Command::Magnetic(device)).unwrap();
+        until(|| service.view().phase == Phase::Failed);
+        let view = service.view();
+        let reason = view.error.clone();
+        let session = view
+            .magnetic_session
+            .expect("a failed session stays readable");
+        assert_eq!(session.phase, pb::MagneticPhase::Failed);
+        assert!(session.last_error.is_some() && reason.is_some());
+        assert!(view.magnetic.is_none(), "nothing was written to latch");
+        service.send(Command::Stop).unwrap();
+        // Idle, not failed again: the session already said why it failed,
+        // and stopping it adds no failure of its own.
+        until(|| service.view().phase == Phase::Idle);
+        let view = service.view();
+        assert_eq!(view.error, reason);
+        assert!(
+            view.magnetic_session.is_some(),
+            "stopping keeps the outcome"
+        );
+    }
+}
+
+#[cfg(test)]
+mod magnetic_tests {
+    use super::*;
+    use pb::DeviceCommand::{MagStart, MagStop, Save, ZeroYaw};
+
+    fn sensor(id: &str) -> Device {
+        Device {
+            id: id.into(),
+            mounting: [1, 2, 3],
+            ..Device::default()
+        }
+    }
+
+    #[test]
+    fn calibration_goes_into_the_open_session_and_nothing_else_gets_in() {
+        let (device, other) = (sensor("sensor"), sensor("other"));
+        let open = View {
+            phase: Phase::Magnetic,
+            device: Some(device.clone()),
+            ..View::default()
+        };
+        for operation in [MagStart, MagStop, Save] {
+            let write = Command::Write(device.clone(), operation);
+            assert_eq!(admit(&open, &write), Ok(Phase::Magnetic));
+        }
+        for refused in [
+            Command::Write(device.clone(), ZeroYaw),
+            Command::Write(other, MagStart),
+            Command::Connect(device.clone()),
+            Command::Magnetic(device.clone()),
+        ] {
+            assert!(admit(&open, &refused).is_err());
+        }
+        assert_eq!(admit(&open, &Command::Stop), Ok(Phase::Stopping));
+        // Without a session the same write is an operation of its own.
+        let idle = View::default();
+        assert_eq!(
+            admit(&idle, &Command::Write(device.clone(), MagStart)),
+            Ok(Phase::Operating)
+        );
+        assert_eq!(
+            admit(&idle, &Command::Magnetic(device)),
+            Ok(Phase::Magnetic)
+        );
+    }
+
+    #[test]
+    fn a_latched_device_can_be_watched_and_ended_but_not_restarted() {
+        let (device, other) = (sensor("sensor"), sensor("other"));
+        let latched = View {
+            magnetic: Some(device.clone()),
+            ..View::default()
+        };
+        assert_eq!(
+            admit(&latched, &Command::Magnetic(device.clone())),
+            Ok(Phase::Magnetic)
+        );
+        assert!(admit(&latched, &Command::Magnetic(other)).is_err());
+        assert!(admit(&latched, &Command::Connect(device.clone())).is_err());
+        let watching = View {
+            phase: Phase::Magnetic,
+            device: Some(device.clone()),
+            ..latched
+        };
+        assert_eq!(
+            admit(&watching, &Command::Write(device.clone(), MagStop)),
+            Ok(Phase::Magnetic)
+        );
+        // So the End calibration buttons stay live while the session is open,
+        // though the phase alone reads as busy.
+        assert!(watching.phase.busy());
+        assert!(watching.admits(&Command::Write(device.clone(), MagStop)));
+        assert!(admit(&watching, &Command::Write(device.clone(), MagStart)).is_err());
+        assert!(admit(&watching, &Command::Write(device, Save)).is_err());
+    }
+
+    #[test]
+    fn a_session_without_a_mounting_is_refused_before_any_hardware() {
+        let service = Service::new();
+        let error = service
+            .send(Command::Magnetic(Device {
+                id: "sensor".into(),
+                ..Device::default()
+            }))
+            .unwrap_err();
+        assert!(error.contains("mounting"), "{error}");
+        let view = service.view();
+        assert_eq!(view.phase, Phase::Idle);
+        assert!(view.snapshot.is_none() && view.magnetic_session.is_none());
+    }
+
+    #[test]
+    fn a_session_that_may_be_calibrating_latches_and_never_unlatches() {
+        let device = sensor("sensor");
+        let mut run = magnetic::Run::new(device.clone()).unwrap();
+        let mut view = View::default();
+        let mut calibrating = magnetic::fixtures::batch(Vec::new(), true);
+        calibrating.device_may_be_calibrating = true;
+        publish_session(&mut view, run.absorb(calibrating), &device);
+        assert_eq!(view.magnetic, Some(device.clone()));
+        // Only a verified stop unlatches; a session that stops saying so does not.
+        let quiet = magnetic::fixtures::batch(Vec::new(), true);
+        publish_session(&mut view, run.absorb(quiet), &device);
+        assert_eq!(view.magnetic, Some(device));
+        assert!(view.magnetic_session.is_some());
+    }
 }
 
 #[cfg(test)]
@@ -855,6 +1123,54 @@ mod hardware_tests {
             thread::sleep(Duration::from_millis(10));
         }
     }
+    #[test]
+    #[ignore = "requires MACINDECODE_POSEBRIDGE_DEVICE JSON with its mounting; read-only magnetic session"]
+    fn reads_the_magnetic_field_without_writing_to_the_device() {
+        let device: Device = serde_json::from_str(
+            &std::env::var("MACINDECODE_POSEBRIDGE_DEVICE").expect("explicit Device JSON"),
+        )
+        .unwrap();
+        let service = Service::new();
+        service.send(Command::Magnetic(device)).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let session = loop {
+            let view = service.view();
+            assert_ne!(view.phase, Phase::Failed, "{:?}", view.error);
+            if let Some(session) = view.magnetic_session
+                && session.sweep(magnetic::Sweep::Before).readings >= 25
+            {
+                break session;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "No magnetic readings: {:?}",
+                view.error
+            );
+            thread::sleep(Duration::from_millis(50));
+        };
+        assert_eq!(session.phase, pb::MagneticPhase::Monitoring);
+        assert!(session.operation.is_none(), "monitoring wrote nothing");
+        assert!(
+            session
+                .latest
+                .is_some_and(|field| field.iter().all(|value| value.is_finite()))
+        );
+        println!(
+            "READ-ONLY MAGNETIC: units={:?} sensor_type={:?} rate_hz={:.2} calsw={:?} latest={:?}",
+            session.units,
+            session.sensor_type,
+            session.statistics.actual_rate_hz,
+            session.calsw,
+            session.latest
+        );
+        service.send(Command::Stop).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while service.view().phase != Phase::Idle {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(service.view().magnetic.is_none());
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -863,6 +1179,7 @@ fn needs_bluetooth(command: &Command) -> bool {
         Command::Scan(Transport::Ble) => true,
         Command::Connect(device)
         | Command::Inspect(device)
+        | Command::Magnetic(device)
         | Command::Write(device, _)
         | Command::Apply(device, _, _) => device.transport == Transport::Ble,
         _ => false,

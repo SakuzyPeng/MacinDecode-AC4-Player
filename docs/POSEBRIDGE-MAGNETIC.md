@@ -1,21 +1,22 @@
 # 磁校准引导与覆盖网格
 
 本文是磁校准引导的设计契约：流程怎么走、覆盖网格怎么画、中心和指示怎么算、从 PoseBridge 的磁场会话里拿什么。
-播放器侧的算术在 `src/posebridge/coverage.rs`，带单元测试。读数接口是 PoseBridge 0.6 的独立磁场会话
-（`main` 上的 `4ecfb6e`）；播放器还钉在 0.5.0（`b8b6a41`），面板也尚未接线，所以这个模块目前只有测试在用。
-非测试构建里的 `dead_code` 豁免写在 `posebridge.rs` 的模块声明处，接线时一并删掉。
+播放器钉在 PoseBridge 0.6（`4ecfb6e`），`service.rs` 已接上它的独立磁场会话；覆盖网格的算术在
+`src/posebridge/coverage.rs`，会话读数的分轮在 `src/posebridge/magnetic.rs`，都带单元测试。面板尚未接线，
+所以会话的打开命令、发布出来的视图和这两个模块在非测试构建里还没有消费者；`dead_code` 豁免分别写在
+`posebridge.rs` 的模块声明处和 `service.rs` 的对应条目上，面板接上时一并删掉。
 
 ## 现状与边界
 
 Maintenance 页的“校准与参考方向”分栏里有 `MagStart`，结束靠连接栏里的 **End calibration**（`MagStop`）。
+这两条目前仍走会话之外的老路：PoseBridge 为一次写入单独开连接、写 CALSW、回读、关闭，播放器看不到磁场。
 `service.rs` 的 `observe_magnetic` 维护锁存：写入尝试过的 `mag_start`（包括结果不确定的）和回读到的
 `calsw == 7` 都会锁存，只有回读验证成功的 `mag_stop` 能清除。锁存期间只放行原设备的 `MagStop`、
-`Inspect` 与停止；Connect、Apply 和安装检查都用不了，退出也会被拦下。
+`Inspect`、磁场会话与停止；Connect、Apply 和安装检查都用不了，退出也会被拦下。
 
-播放器看不到传感器的标定，眼下也看不到磁场：它钉的 0.5.0 没有磁场接口，已验证的几种姿态输出格式也都不带
-磁场字段。播放器还有两道自己设的门——连接路径回读到 `calsw == 7` 时拒绝开始采集，样本又只在
-`Phase::Tracking` 下摄取——但 0.6 的磁场会话不走姿态样本，这两道门挡不到它。现有的引导只有 `command_effect`
-里一句 “Follow the sensor's physical calibration procedure”。
+播放器还有两道自己设的门——连接路径回读到 `calsw == 7` 时拒绝开始采集，样本又只在 `Phase::Tracking` 下
+摄取——磁场会话不走姿态样本，这两道门挡不到它。现有的引导只有 `command_effect` 里一句
+“Follow the sensor's physical calibration procedure”。
 
 ## 流程
 
@@ -142,8 +143,30 @@ Maintenance 页的“校准与参考方向”分栏里有 `MagStart`，结束靠
 - **`Calibrating` 期间的输出和校准前是否一致。** 一致（拟合中心相同）的话，校准这一轮就能兼作校准前那一轮，
   用户少转一轮；覆盖网格不受影响，它自带定心。
 
-还要做的：把播放器钉的 PoseBridge rev 从 `b8b6a41`（0.5.0）升到 0.6（`4ecfb6e` 或之后），中间会带进电池电量
-报告的提交。
+## service 里的会话
+
+`Command::Magnetic(device)` 打开会话。安装必须是真旋转（`magnetic::check`），不是就在 `send` 里同步拒绝，
+不碰硬件。worker 先 `stop()` 收掉可能残留的检查任务，再用不带安装的配置 `set_config`、`magnetic_start`，
+进入 `Phase::Magnetic`。这个阶段算忙：会话独占设备，没有跟踪，也不发布任何姿态。
+
+会话里的开始、结束和保存不另设命令，仍是 `Command::Write(device, MagStart | MagStop | Save)`。会话开着且是
+同一台设备时，`admit` 放行它并保持 `Phase::Magnetic`，worker 把它送进会话的命令通道，会话、游标和各轮读数都
+不重置；PoseBridge 拒收（会话未就绪，或上一条操作还没完）只写入错误，会话照旧。别的命令一律按忙拒绝，只有
+Stop 能收掉会话。准入规则只有 `admit` 一处，控件用 `View::admits` 去问它：连接栏和退出拦截里的
+**End calibration** 在会话中因此仍然可用，单看阶段却会误判为忙。
+
+worker 每轮用会话的游标取一次批次，交给 `magnetic::Run`。读数按样本的 `phase` 分进三轮：`Monitoring` 是校准
+前，`Calibrating` 是校准中，`Calibrated` 是结束后，其余阶段不计。同一会话里第二次开始校准时，上一次的“结束
+后”变成这一次的“校准前”；出现 `ExternalCalibration` 则三轮全部作废，因为别的程序在改标定，之前的读数描述
+不了之后的设备；`reset` 或单位变化同样从头开始。读数经 `headset_axes` 换到耳机轴。三轮的快照只在有新读数时
+重算，发布到 `View.magnetic_session`。
+
+锁存：会话报告 `device_may_be_calibrating`（本会话写过开始而没见到结束，或读到 CALSW = 7）时锁存；解除仍只认
+回读验证成功的 `mag_stop`。会话关闭时 PoseBridge 会替它开始过的校准收尾，收尾结果只能在下一次配置清空会话
+之前读到，所以 worker 收会话时先 `stop()`，再取最后一批发布出去。收尾成功并不解锁：会话里最后一条用户操作
+仍是那次开始，锁存规则一视同仁，用户再点一次 **End calibration** 即可。已经自己失败的会话，停掉时不再重复
+报告失败；健康的会话在停止时收尾或断连失败，则是新消息，照常报错。停掉之后最后一个会话的视图保留，直到下
+一个命令开始。
 
 ## 视觉
 
@@ -163,11 +186,11 @@ Maintenance 页的“校准与参考方向”分栏里有 `MagStart`，结束靠
 
 - 覆盖不是完成度：屏上只有“n / 48”和一张图，不出现百分比进度条。
 - 屏上的每个数字都是播放器自己的读数，不是对传感器标定的判决。
-- 锁存只能由回读验证成功的 `mag_stop` 清除；计时器不行，用户点“我做完了”也不行。
+- 锁存只能由回读验证成功的 `mag_stop` 清除；计时器不行，用户点“我做完了”也不行，会话收尾成功也不行。
 - 不替用户发 SAVE；保存是结束之后单独确认的一次操作。
 - 读数路径不喂 `head_tracking`，也不喂渲染器。
 
-## 骨架的范围
+## 已有与未做
 
 `coverage.rs` 现有：网格与分箱、定心（球拟合与均值退路）、逐格中位数离散度、最近空格与指示、传感器轴到
 耳机轴的换算。测试钉住的是设计赖以成立的不变量：均匀球面把 48 格填得一样多，每格中心落回本格，网格方向与
@@ -175,6 +198,17 @@ Maintenance 页的“校准与参考方向”分栏里有 `MagStart`，结束靠
 手持措辞与 `mounting::Motion` 的正方向一致，唯一的空格就是目标，离散度按送来的读数计算（不先定心）且每个方向
 一票，读数不足不分箱，滑窗与拒收，按手册记录的安装 `[-2, 1, 3]` 换轴。
 
-尚未做：升级 PoseBridge rev；把磁场会话接进 service（新的阶段、`magnetic_since` 游标轮询、按 `phase` 分轮、
-`reset` 时清空）；带 revision 的控制器（快照只在有新读数时重算）；面板绘制；前后两轮的保存与对比；椭球拟合；
-yaw 回正检查。
+`magnetic.rs` 与 `service.rs` 现有：会话的打开与会话内命令、准入、锁存、按阶段分轮、单位与换轴、收会话时的
+最后一批。测试钉住：各阶段的读数进哪一轮，第二次校准以前一次的结束后为准，外部校准清空三轮，新会话与单位
+变化从头开始，只有已知比例时才用 µT，换到耳机轴，没有真旋转的安装打不开会话，只在有新读数时重绘，只有三种
+命令进会话，状态原样传到视图；会话中只放行校准命令和停止，锁存下能观察、能结束、不能重开，没有安装的会话在
+碰硬件之前就被拒，会话报告可能在校准就锁存、会话改口也不解锁。还有一条不要硬件的完整 worker 路径：不存在的
+串口让会话失败，失败可读，停掉干净且不多报一次失败。`reads_the_magnetic_field_without_writing_to_the_device`
+是默认忽略的实机测试，用带安装的 `MACINDECODE_POSEBRIDGE_DEVICE` 只读打开会话。
+
+`posebridge_input` 在 Linux 上不编译，这部分的类型检查和测试在 macOS／Windows 的 CI 里跑。本地要在 Linux 上
+验证，可以在仓库副本里把 `posebridge-core` 的目标平台条件加上 Linux、以 `--cfg posebridge_input` 构建（需要
+`libdbus-1-dev` 与 `libudev-dev`），副本之外的仓库不做这种改动。
+
+尚未做：面板（打开会话、画网格、会话里的开始／结束／保存，以及让 Maintenance 页的 `MagStart` 改走会话）；前后
+两轮的保存与对比；椭球拟合；yaw 回正检查。

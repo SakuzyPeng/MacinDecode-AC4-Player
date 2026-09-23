@@ -200,16 +200,20 @@ impl Next {
 /// `axes` is the array `Device::mounting` stores and the mounting check
 /// writes: entry `i` is the signed sensor axis, 1 to 3 for X to Z, that points
 /// along head direction `i` — right, forward, up. So each headset component is
-/// one sensor component with a sign. Anything but a proper rotation is
+/// one sensor component with a sign. Anything but a [`proper`] rotation is
 /// refused: a mirrored mounting would turn every instruction the wrong way
 /// while the grid went on looking plausible.
 pub fn headset_axes(axes: [i8; 3], sensor: Field) -> Option<Field> {
+    proper(axes).then(|| axes.map(|axis| dot(mounting::unit(axis).map(f64::from), sensor)))
+}
+
+/// Whether a mounting is a rotation: three distinct axes out of X, Y and Z,
+/// right-handed. Mirrored, repeated, missing and out-of-range ones are not.
+pub fn proper(axes: [i8; 3]) -> bool {
     let [right, forward, up] = axes;
-    let proper = axes
-        .iter()
+    axes.iter()
         .all(|axis| (1..=3).contains(&axis.unsigned_abs()))
-        && mounting::cross(mounting::unit(right), mounting::unit(forward)) == mounting::unit(up);
-    proper.then(|| axes.map(|axis| dot(mounting::unit(axis).map(f64::from), sensor)))
+        && mounting::cross(mounting::unit(right), mounting::unit(forward)) == mounting::unit(up)
 }
 
 /// The cell a direction falls in. It need not be a unit vector; a zero or
@@ -734,8 +738,10 @@ mod tests {
         let recorded = headset_axes([-2, 1, 3], reading).unwrap();
         assert!(norm(sub(recorded, [-2.0, 1.0, 3.0])) < 1e-12);
         // Mirrored, repeated, missing and out-of-range axes are no rotation.
-        for refused in [[2, 1, 3], [1, 1, 3], [0, 2, 3], [1, 2, 4]] {
+        for refused in [[2, 1, 3], [1, 1, 3], [0, 2, 3], [1, 2, 4], [0, 0, 0]] {
+            assert!(!proper(refused), "{refused:?}");
             assert!(headset_axes(refused, reading).is_none(), "{refused:?}");
         }
+        assert!(proper([1, 2, 3]) && proper([-2, 1, 3]));
     }
 }

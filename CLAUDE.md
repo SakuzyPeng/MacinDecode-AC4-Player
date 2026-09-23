@@ -412,7 +412,12 @@ stays quiet). Nothing in `src/` writes the conjunctions by hand.
   add `test` to the gate so the consumption policy, the mounting arithmetic and the calibration coverage
   are checked on every platform — the mounting solver decides what gets written into a device setting
   and `coverage` which way every calibration instruction points, so neither is allowed to be the half
-  nobody can run. `coverage` allows `dead_code` outside tests until the calibration panel draws from it.
+  nobody can run. `posebridge::magnetic` (sweeps of a PoseBridge magnetic session) is `posebridge_input`
+  alone, because it reads PoseBridge's own types. `coverage`, `magnetic` and the session's command and
+  view in `service.rs` allow `dead_code` outside tests until the calibration panel draws from them.
+  Linux never compiles `posebridge_input`; to check it there, build a *copy* of the repository with
+  `posebridge-core`'s target list extended to Linux and `RUSTFLAGS="--cfg posebridge_input"` (needs
+  `libdbus-1-dev` and `libudev-dev`), never the repository itself.
 - **`spatial_output`** = the union, i.e. *some* real output exists. Deliberately rare now (a repaint
   cadence and one test) — prefer the specific gate that matches the code you are writing.
 

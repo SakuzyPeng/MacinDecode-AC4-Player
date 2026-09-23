@@ -4,6 +4,15 @@ use serde::{Deserialize, Serialize};
 #[cfg(posebridge_input)]
 mod configuration;
 #[cfg(posebridge_input)]
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "The calibration panel that draws the session is not built yet"
+    )
+)]
+mod magnetic;
+#[cfg(posebridge_input)]
 pub mod service;
 #[cfg(posebridge_input)]
 pub mod ui;

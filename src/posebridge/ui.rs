@@ -597,8 +597,9 @@ impl Panel {
         egui::Window::new("Finish device operation before quitting").collapsible(false).show(context,|ui| {
             if let Some(device)=&view.magnetic {
                 ui.label("Magnetic calibration may still be active. End it before quitting; this does not save calibration.");
-                if ui.add_enabled(!view.phase.busy(),egui::Button::new("End calibration and quit")).clicked() {
-                    self.send(service,Command::Write(device.clone(),pb::DeviceCommand::MagStop));
+                let end=Command::Write(device.clone(),pb::DeviceCommand::MagStop);
+                if ui.add_enabled(view.admits(&end),egui::Button::new("End calibration and quit")).clicked() {
+                    self.send(service,end);
                 }
             } else {
                 ui.label("Waiting for the device operation. Cancelling does not undo a command already sent.");
