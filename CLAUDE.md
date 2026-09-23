@@ -39,10 +39,12 @@ Two user-facing pairs, each of which a user-visible change lands in both halves 
 `README.en.md` (install, quickstart, platform support, FAQ, building) and `docs/MANUAL.md` /
 `docs/MANUAL.en.md` (the interface reference — the 3D scene, every Visual settings switch and what it
 reads, the playback modes in depth). Reference material about the UI belongs in the manual, not in
-the README; the README links into it. The manual's eight diagrams come from
+the README; the README links into it. The manual's ten diagrams come from
 `scripts/generate-readme-diagrams.py`, which transcribes the constants it annotates (the silence
 floor, the footprint scales, the nameplate dim, the silence hold) into one block — change one of
-those in `src/scene3d/params.rs` or `src/app.rs` and that block has to follow. Reference frames are
+those in `src/scene3d/params.rs` or `src/app.rs` and that block has to follow — and the Magnetic
+page's grid (its shape, `FULL_AT`, the marker, the line colours) from `src/posebridge/coverage.rs`
+and `src/posebridge/ui/calibration.rs` into another. Reference frames are
 drawn as a **bearing** as well as a place, because that is the half a reader gets backwards: scene
 relative keeps its place and gives up its bearing, head locked the reverse, and the bearing is what
 is heard — so the object that moves on screen is the one that does not move in the ears.

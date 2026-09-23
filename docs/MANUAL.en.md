@@ -658,6 +658,8 @@ elevation, with the horizon across the middle. Every cell holds the same share o
 every direction was read. A cell deepens with readings up to six and then stops: coverage is not progress, and no
 number on the page is a verdict on the sensor's calibration.
 
+![The magnetic coverage grid enlarged: twelve columns of heading from behind through left, forward and right to behind again, by four rows of elevation split at +30°, 0° and −30°. Read cells deepen with their readings up to six. The outlined empty cell is the target, the small square just left of it is the latest reading, and the page says Turn it to its left underneath.](../assets/readme/magnetic-grid.svg)
+
 The grid is drawn in headset axes, so the page needs a right-handed mounting and will not open a session without one
 — a wrong mounting would turn every instruction around. **Check the mounting on Tracking** leads to the three motions
 above.
@@ -685,6 +687,8 @@ a moment before another replaces it, so two nearly equal motions do not flicker.
 plane, as a headset only ever turned about one axis leaves them, the page says so: no centre can be fitted through a
 ring, and the rows that axis cannot reach stay empty. Spread is marked against 3 % and 8 %, provisional until measured
 on real headsets.
+
+![Following an instruction: the field is an arrow fixed in the room, 50° right of where the headset first faces. After turning the headset 30° to its left, as Turn it to its left asks, the field has not moved and its bearing from the headset is 80°; in the grid row below, the square has moved one column right, into the outlined cell.](../assets/readme/magnetic-turn.svg)
 
 **Nothing is saved on its own.** After an end the page says whether it was verified by readback.
 **Save current device settings…** is a separate confirmation, and a sent SAVE is not proof that it survives a power

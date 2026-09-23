@@ -1,8 +1,8 @@
 # README artwork
 
-Nine SVGs are shared by the Chinese and English READMEs and by
+Eleven SVGs illustrate the Chinese and English READMEs,
 [`docs/MANUAL.md`](../../docs/MANUAL.md) and its English twin: the animated
-scene, seven static diagrams that annotate what the player draws, and one more
+scene, nine static diagrams that annotate what the player draws, and one more
 animation for the single thing a still picture cannot show. All of them follow
 the palette and geometry in `src/theme.rs` and `src/scene3d/`.
 
@@ -52,12 +52,26 @@ that support CSS but do not run animations.
 | `trail-jumps.svg` | What a trail's spacing says, and what the hollow marks add where the path is broken |
 | `reference-frames.svg` | What scene-relative and head-locked each keep constant when the listener turns |
 | `projection-modes.svg` | Why the projection toggle exists: which footprints a straight-down orthographic view hides |
-| | Its cubes are boxes, not squares: perspective gives each corner its own reach, so an off-axis cube leans and its inward faces come into view, while orthographic shows the top face alone and covers the footprint exactly. Element numbers are the player's seven segments, laid on the top face. Its objects sit low in the room, and that is what makes the boxes legible: side faces are as tall as a cube is thick, while the gap to the footprint is as wide as the cube is high above the floor, so the two grow together as the camera comes in. High in the room that ratio is about a tenth and the side faces land under two pixels; low it is nearer a third, which buys a much closer camera at the same separation, and with the faces that size they carry `params::TONE_LEFT` and `TONE_RIGHT` unexaggerated — one shading rule across all nine pictures. Nothing distorts from that — every point at one height shares one reach, so the floor grid stays square however near the camera comes, and orthographic is scaled at the floor so both panels draw one room at one size. |
+| | Its cubes are boxes, not squares: perspective gives each corner its own reach, so an off-axis cube leans and its inward faces come into view, while orthographic shows the top face alone and covers the footprint exactly. Element numbers are the player's seven segments, laid on the top face. Its objects sit low in the room, and that is what makes the boxes legible: side faces are as tall as a cube is thick, while the gap to the footprint is as wide as the cube is high above the floor, so the two grow together as the camera comes in. High in the room that ratio is about a tenth and the side faces land under two pixels; low it is nearer a third, which buys a much closer camera at the same separation, and with the faces that size they carry `params::TONE_LEFT` and `TONE_RIGHT` unexaggerated — one shading rule across every picture. Nothing distorts from that — every point at one height shares one reach, so the floor grid stays square however near the camera comes, and orthographic is scaled at the floor so both panels draw one room at one size. |
 | `head-tracking.svg` | The same distinction in motion — one bearing arc rigid, the other breathing |
+| `magnetic-grid.svg` | What the Magnetic page's coverage grid shows — its columns and rows, the target, the latest reading — and why its fill stops deepening |
+| `magnetic-turn.svg` | Why that grid's square moves against the headset, so the page's words are the thing to follow |
 
 They carry labels only: the prose that explains them lives in the manual beside
 each image, where it can be translated and searched. Their frame, palette and
-isometric camera are the scene's, so all nine read as one set.
+isometric camera are the scene's, so all eleven read as one set.
+
+The two magnetic pictures show one moment of a sweep, so the second can follow
+the first: the latest reading 50 degrees right of forward and 15 below the
+horizon, the nearest cell not read yet one column to its right, and "Turn it to
+its left" as the page would word it there — checked against
+`coverage::towards`, since a target and an instruction that disagree would teach
+the one thing the pictures exist to correct. The turn is drawn in the
+reference-frames room because the field is scene relative: it keeps its place
+and gives up its bearing, and the page's square shows the bearing. The
+listener's head stands in for the headset, whose forward is what the grid is
+measured from; the card's footer says the headset is really turned in the
+hands.
 
 `head-tracking.svg` is the one diagram that moves, because the distinction it
 draws only exists while the head turns — two objects standing still are
@@ -116,8 +130,11 @@ either.
 geometry from `generate-readme-scene.py` rather than restating them, and
 transcribes the constants it annotates — the silence floor, the footprint
 scales, the nameplate dim, the silence hold, the peak hold — from
-`src/scene3d/params.rs` and `src/app.rs` into one block at the top. Change one
-of those in the player and this block has to follow; it exists so that the
+`src/scene3d/params.rs` and `src/app.rs` into one block at the top, and the
+Magnetic page's grid — its shape, the reading its fill stops at, its marker and
+its line colours — from `src/posebridge/coverage.rs` and
+`src/posebridge/ui/calibration.rs` into another beside it. Change one of those
+in the player and its block has to follow; it exists so that the
 drift is visible rather than buried in coordinates. Leader lines aim at
 geometry the generator projects, never at coordinates measured by hand.
 
