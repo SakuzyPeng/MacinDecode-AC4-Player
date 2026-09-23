@@ -2117,7 +2117,7 @@ dependencies = [
  "mio",
  "nix 0.31.3",
  "serialport",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2837,8 +2837,8 @@ dependencies = [
 
 [[package]]
 name = "posebridge-core"
-version = "0.5.0"
-source = "git+https://github.com/SakuzyPeng/PoseBridge.git?rev=b8b6a415ecdff8a0e1f2fdd0979798d80f84ad21#b8b6a415ecdff8a0e1f2fdd0979798d80f84ad21"
+version = "0.6.0"
+source = "git+https://github.com/SakuzyPeng/PoseBridge.git?rev=4ecfb6ea6e2b0e7b0705e4475f979129ebb1dc68#4ecfb6ea6e2b0e7b0705e4475f979129ebb1dc68"
 dependencies = [
  "btleplug",
  "futures-util",
@@ -3422,7 +3422,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3481,7 +3481,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",

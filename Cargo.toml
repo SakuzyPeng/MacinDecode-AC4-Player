@@ -76,7 +76,7 @@ macindecode-windows-spatial-audio = { path = "crates/windows-spatial-audio" }
 
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 macindecode-macinrender = { path = "crates/macinrender", optional = true }
-posebridge-core = { git = "https://github.com/SakuzyPeng/PoseBridge.git", rev = "b8b6a415ecdff8a0e1f2fdd0979798d80f84ad21", optional = true }
+posebridge-core = { git = "https://github.com/SakuzyPeng/PoseBridge.git", rev = "4ecfb6ea6e2b0e7b0705e4475f979129ebb1dc68", optional = true }
 
 [lints.rust]
 unsafe_code = "forbid"
