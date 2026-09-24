@@ -44,7 +44,7 @@ const output = {textContent: ''};
 vm.runInNewContext(input.probe, {
   document: {querySelector: () => svg, getElementById: () => output},
   getComputedStyle: text => text.style
-});
+}, {timeout: 2000});
 process.stdout.write(output.textContent);
 """
 
@@ -52,10 +52,12 @@ process.stdout.write(output.textContent);
 @unittest.skipUnless(NODE, "Node.js is required to exercise the SVG DOM probe")
 class PanelOwnershipTests(unittest.TestCase):
     def probe(self, texts, panels):
+        # Windows CI has exceeded the old 10-second process limit. The VM's
+        # separate limit still catches a probe that loops indefinitely.
         result = subprocess.run(
             [NODE, "-e", PROBE_HARNESS],
             input=json.dumps({"probe": checker.PROBE, "texts": texts, "panels": panels}),
-            capture_output=True, text=True, encoding="utf-8", check=True, timeout=10)
+            capture_output=True, text=True, encoding="utf-8", check=True, timeout=60)
         return json.loads(result.stdout)
 
     def test_widening_text_does_not_detach_it_from_its_panel(self):
