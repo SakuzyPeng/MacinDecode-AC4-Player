@@ -505,6 +505,8 @@ The default wide layout places sensor selection, mounting and acquisition on the
 the right. Narrow windows stack these sections. Connection and recenter controls remain at the top; Device actions stay at the bottom.
 
 1. In the device window, open **Device**, select Bluetooth LE or USB serial, Scan and choose the device.
+   On macOS, BLE needs the packaged `.app` with its Bluetooth usage description; allow access on the first scan or
+   connection.
 2. Choose the sensor axes pointing toward head Right, Forward and Up. They must form a right-handed basis; check all three directions while wearing it.
 3. Connect. The player reads the current format without changing device rate, output or calibration. Connection is manual on each application launch.
 4. Use Recenter listening direction, on the `Head` summary row or in the window's top bar. Initial connection and reconnection preserve the presented heading.
@@ -554,41 +556,98 @@ For a slow device (for example 10 Hz), explicitly raise its rate or choose a fre
 Expired input freezes the presented orientation. Diagnostics distinguishes samples, host deliveries and reception age.
 Device clocks are unsynchronized; age excludes sensor, USB/BLE and audio delay. Faster polling does not remove BLE batching.
 
-**Sensor-side enhancement is off by default.** Toggle it during playback to compare using the same device format and rate.
-The switch changes only player settings. It never reconnects or writes the sensor. After at least 8 samples spanning
-300 ms, trusted timing and same-frame body gyro can predict up to 25 ms / 5° from each new measured quaternion,
-followed by the existing smoothing. Mode changes blend for 50 ms. Recenter and mounting checks use measured poses;
-audio and the scene consume the same final orientation.
+#### Sensor-side enhancement
 
-On **Device**, use the bottom **Read settings** action, then edit rate, format and fusion on the right.
-**Green ✓** identifies the device's readback value inside each control; **orange •** marks the selected pending value.
-There is no separate duplicate current-value panel. These drafts can be edited while tracking. Disconnect using the top
-bar before pressing the single **Apply changes** button at the bottom. The player rereads the device, writes only the
-submitted changes, checks each write, then verifies the complete configuration. Stale settings, cancellation and partial
-failure are reported explicitly. **Discard edits** changes the draft only; it does not undo device writes.
+**Sensor-side enhancement**, on the `Tracking` page, is off by default. On, it uses the sensor's own timestamps and
+the angular velocity measured in the same frame to carry each newly measured pose a little further along the turn it
+is making, which takes back part of the delay on the way. Off is ordinary tracking.
 
-**Prepare enhanced data** stages the appropriate format without changing the selected rate, using that same Apply action.
-The current choice is verified **0xA4** (timestamp, gyro, quaternion). The 30-byte **0xE4** full inertial format remains an
-experimental 20 Hz option, excluded from presets pending USB/BLE hardware acceptance. Existing Motion acceleration still
-supports diagnostics; missing timestamps keep prediction disabled. Connect manually afterwards. Applying ordinary settings
-does not calibrate, zero or save to Flash.
+The switch changes the player only — it never reconnects, writes the sensor or changes its rate — so it can be flipped
+while listening to compare, and the change itself blends over 50 ms. The line under it always says what it is doing:
+ordinary, warming up, enhanced, or why it fell back to ordinary tracking.
 
-Diagnostics reports the actual sensor attitude source, head-axis gyro/acceleration, clock readiness/drift, estimated
-excess holding, prediction, residual and history counts. Timing uses a 10-second lower envelope with one-second bins;
-drift is fitted after five bins and limited to ±5000 ppm. **Excess holding is not end-to-end listening latency.**
-Fixed transport/fusion and audio delay remain unknown; queued audio frames do not substitute for that measurement.
-Enhanced expiry uses the larger of host age and trusted mapped age. Expiry freezes the presented pose immediately,
-including smoothing. Missing fields, clock anomalies, a gyro/pose residual above 5° or acceleration outside 0.5–1.5 g
-fall back to ordinary tracking. Low gyro and pose-change rates lasting 500 ms stop extrapolation; available acceleration
-must also be near 1 g.
+- **What it needs** — timestamps and angular velocity from the device, which is the **0xA4** format; see
+  [Preparing enhanced data](#preparing-enhanced-data). Without either it stays ordinary.
+- **When it starts** — after warming up: at least 8 samples spanning 300 ms, on a stable device clock.
+- **How far it reaches** — at most 25 ms and 5° per sample, followed by the same Smoothing as before.
+- **When it holds back** — while the sensor is nearly still: angular velocity and pose change both under 1°/s for
+  500 ms, and close to 1 g where acceleration is reported. A head at rest does not shimmer.
+- **When it falls back** — when integrated angular velocity and the measured pose disagree by more than 5°,
+  acceleration leaves 0.5–1.5 g, timestamps are missing or the device clock is unstable.
 
-Calibration, zeroing, Flash saving and defaults have their own **Maintenance** page, in separate calibration/reference
-and saved-settings columns. These actions retain a confirmation dialog and never join the ordinary **Apply changes** batch.
-Saved-setting operations use the warning colour. Zero yaw requires six-axis mode; angle reference includes SAVE, and
-restoring defaults also saves. Connect manually after a device operation. Magnetic calibration is not started from
-here: **Magnetic calibration…** leads to its own page, described below, which reads the field while it runs.
-Explicitly end magnetic calibration before quitting. The quit guard also runs while the window is minimized or covered and restores it to show the prompt.
-Sent/readback/completion results do not establish calibration accuracy or persistence.
+While enhanced, **Freeze after** judges a sample by the larger of two ages: how long ago the host received it, and how
+old the device clock says it is. The second catches the samples that sat waiting when BLE delivers a batch at once. On
+expiry the presented orientation freezes immediately, prediction and smoothing included. Recenter and the mounting
+check always read unpredicted measurements, and audio and the scene use the same final orientation.
+
+#### Changing device settings
+
+Rate, output format and fusion are edited on the right of the `Device` page, as a draft:
+
+1. Press **Read settings** at the bottom to read what the device has now.
+2. Choose new values on the right. Inside each control **green ✓** marks the device's readback value and **orange •**
+   the value you picked, and the bottom row counts what is pending. This works while tracking too.
+3. Stop tracking with **Disconnect** in the top bar.
+4. Press **Apply changes** at the bottom. The player reads the device again, writes only what you changed, checks each
+   write, then verifies the whole configuration.
+5. **Connect** again by hand.
+
+Settings changed elsewhere after the read, a cancellation and a partial write are each reported as such; an unfinished
+change is never shown as done. **Discard edits** throws the draft away and does not undo anything already written.
+Switching between nine- and six-axis fusion can move the sensor's reference direction. **Apply changes** writes these
+settings only: it does not calibrate, zero or save to Flash, which is what the `Maintenance` page is for.
+
+#### Preparing enhanced data
+
+The timestamps and angular velocity that enhancement needs come with a different output format.
+**Prepare enhanced data** puts the verified **0xA4** format (timestamp, angular velocity, quaternion) into the draft
+without touching the rate, and once the write succeeds switches acquisition to **Read current stream format**. It
+changes the draft only: apply it with **Apply changes** as above, then **Connect**.
+
+The 30-byte **0xE4** full inertial frame (0xA4 plus acceleration) works at 20 Hz only, and stays out of the presets
+until it has passed hardware acceptance over USB and BLE. A device already sending acceleration in the Motion format
+still shows it in Diagnostics, but without timestamps nothing is predicted.
+
+#### Diagnostics
+
+The `Diagnostics` page has two columns.
+
+**Sensor processing** is what enhancement works from:
+
+- The attitude source actually in use (a native quaternion, converted Euler angles and so on), and angular velocity
+  and acceleration in head axes.
+- Whether the device clock is ready, and its drift in ppm. The player lines the device clock up with the host's over the
+  last 10 seconds: one bin per second, each keeping only the sample that arrived fastest. Drift is estimated from five
+  bins on, and beyond ±5000 ppm the clock counts as unstable.
+- **Estimated excess holding** — how much longer this sample took to arrive than the fastest recent one: the delay that
+  batching adds. **It is not end-to-end listening latency.** Fixed sensor fusion, USB/BLE transport and audio output
+  delay cannot be measured here, and queued audio frames are not passed off as that measurement.
+- How far the last prediction reached in milliseconds and degrees, the residual between integrated angular velocity and
+  the pose, and the counts of samples, coalesced samples and history overruns.
+
+**Connection details** is the connection itself: the reception age, the sample and delivery rates (with the most frames
+one delivery carried), reconnects and invalid poses, the device's sample clock, firmware, and the result of the last
+device operation.
+
+#### Calibration, zeroing and saving
+
+These live on the `Maintenance` page, in two columns. Each opens a confirmation dialog saying what it will do, and none
+of them joins **Apply changes**.
+
+- **Calibration and reference** — nothing here saves to Flash. **Zero device yaw** needs six-axis mode, which the player
+  will not switch to for you; **Calibrate accelerometer** wants the sensor level and still; **Magnetic calibration…**
+  leads to the Magnetic page below, since magnetic calibration does not start here.
+- **Saved device settings** — these write what the device keeps, and their buttons are in the warning colour:
+  **Save current device settings**, **Set device angle reference and save**, **Restore device defaults and save**.
+
+**Connect** again by hand afterwards. Results are reported as sent, read back, completion observed and persistence.
+Those say the command arrived and the register changed — not that a calibration is accurate, nor that it survives a
+power cycle.
+
+Magnetic calibration has to be ended explicitly. Quitting before that is held back, even with the window minimized or
+covered, and the window comes back to show why.
+
+#### Magnetic calibration
 
 **Magnetic calibration has its own page, Magnetic.** Opening the page reads nothing; **Open magnetic session** does,
 and the session holds the sensor exclusively, so head tracking stops for as long as it lasts and the listening
@@ -598,6 +657,8 @@ come from on a grid of 48 cells: 12 columns of heading, forward in the middle an
 elevation, with the horizon across the middle. Every cell holds the same share of the sphere, so a full grid means
 every direction was read. A cell deepens with readings up to six and then stops: coverage is not progress, and no
 number on the page is a verdict on the sensor's calibration.
+
+![The magnetic coverage grid enlarged: twelve columns of heading from behind through left, forward and right to behind again, by four rows of elevation split at +30°, 0° and −30°. Read cells deepen with their readings up to six. The outlined empty cell is the target, the small square just left of it is the latest reading, and the page says Turn it to its left underneath.](../assets/readme/magnetic-grid.svg)
 
 The grid is drawn in headset axes, so the page needs a right-handed mounting and will not open a session without one
 — a wrong mounting would turn every instruction around. **Check the mounting on Tracking** leads to the three motions
@@ -626,6 +687,8 @@ a moment before another replaces it, so two nearly equal motions do not flicker.
 plane, as a headset only ever turned about one axis leaves them, the page says so: no centre can be fitted through a
 ring, and the rows that axis cannot reach stay empty. Spread is marked against 3 % and 8 %, provisional until measured
 on real headsets.
+
+![Following an instruction: the field is an arrow fixed in the room, 50° right of where the headset first faces. After turning the headset 30° to its left, as Turn it to its left asks, the field has not moved and its bearing from the headset is 80°; in the grid row below, the square has moved one column right, into the outlined cell.](../assets/readme/magnetic-turn.svg)
 
 **Nothing is saved on its own.** After an end the page says whether it was verified by readback.
 **Save current device settings…** is a separate confirmation, and a sent SAVE is not proof that it survives a power

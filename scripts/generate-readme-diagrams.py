@@ -80,6 +80,22 @@ JUMP_ARROW_HEAD_DEGREES = 32.0
 # difference in height separates anything, which is exactly the panel's subject.
 TOP_SCALE, TOP_CAMERA_HEIGHT = 495.0, 1.0
 
+# --- Transcribed from src/posebridge/coverage.rs and ui/calibration.rs ------
+# The Magnetic page's coverage grid: COLUMNS of heading, 30 degrees each and
+# counted from directly behind, over ROWS of sin(elevation) from the top, so
+# every cell holds the same 4pi/48 of the sphere. A cell's fill deepens with each
+# reading up to FULL_AT and no further, and the latest reading is a MARKER-point
+# square edged in the surface colour.
+MAG_COLUMNS, MAG_ROWS = 12, 4
+MAG_FULL_AT = 6
+MAG_MARKER = 7.0
+# The page's three line weights: the cells' own lines are theme::BORDER pushed
+# toward MUTED by params::FLOOR_GRID_CONTRAST, the forward column and the horizon
+# are the deepened MUTED the page also prints its small text in, and the frame
+# stays BORDER.
+FLOOR_GRID_CONTRAST = 0.35
+MUTED_DEEP = "#7a6b57"
+
 SANS = "-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif"
 MONO = "ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"
 # Three fills that answer "who owns this box", used by the paths diagram.
@@ -1385,6 +1401,326 @@ def build_trail_jumps():
         scene.SCALE = previous
 
 
+# --- Magnetic calibration ----------------------------------------------------
+# One moment of a sweep, shared by both pictures so the second can follow the
+# first: the latest reading 50 degrees right of forward and 15 below the
+# horizon, the nearest cell not read yet one column to its right. What the page
+# would say there is "Turn it to its left" (coverage::towards), and the second
+# picture turns the headset that way by 30 degrees to land the reading in it.
+MAG_COUNTS = [
+    [0, 0, 0, 1, 3, 6, 6, 4, 2, 0, 0, 0],
+    [0, 2, 4, 6, 6, 6, 6, 6, 6, 5, 3, 1],
+    [0, 0, 1, 3, 6, 6, 6, 4, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 2, 1, 0, 0, 0, 0, 0],
+]
+MAG_TARGET = (2, 8)
+MAG_FIELD_BEARING, MAG_FIELD_ELEVATION = radians(50), radians(-15)
+MAG_TURN = radians(-30)
+MAG_INSTRUCTION = "Turn it to its left"
+
+
+def mag_place(bearing, elevation):
+    """Where a direction relative to the headset falls on the grid, as
+    coverage::place puts it: columns from directly behind, rows from the top."""
+    return ((bearing + pi) / (2 * pi / MAG_COLUMNS),
+            (1 - sin(elevation)) / (2 / MAG_ROWS))
+
+
+def mag_fill(count):
+    """A cell's fill, as ui::calibration::fill paints it."""
+    if count == 0:
+        return STAGE
+    return blend(ACCENT_SOFT, ACCENT, min(count, MAG_FULL_AT) / MAG_FULL_AT)
+
+
+def mag_marker(x, y, *, ghost=False):
+    """The latest reading's square, or a dashed outline where it was."""
+    half = MAG_MARKER / 2
+    if ghost:
+        return rect(x - half, y - half, MAG_MARKER, MAG_MARKER, stroke=MUTED,
+                    width=1)
+    return (rect(x - half - 1, y - half - 1, MAG_MARKER + 2, MAG_MARKER + 2,
+                 fill=SURFACE)
+            + rect(x - half, y - half, MAG_MARKER, MAG_MARKER, fill=INK))
+
+
+def coverage_grid(x, y, cell, counts, *, first_row=0, target=None,
+                  marker=None, ghost=None, row_labels=True):
+    """The page's grid, as ui::calibration::grid draws it: the fills, the
+    cells' lines, the forward column and the horizon heavier, the frame, the
+    target outlined inside its cell and the latest reading's square. `counts`
+    holds rows from `first_row` on, so one row can be drawn as a strip; places
+    are the grid's own, in columns and rows."""
+    rows, width = len(counts), cell * MAG_COLUMNS
+    height = cell * rows
+    at = lambda place: (x + cell * place[0], y + cell * (place[1] - first_row))
+    parts = [rect(x + c * cell, y + r * cell, cell, cell, fill=mag_fill(count))
+             for r, row in enumerate(counts) for c, count in enumerate(row)]
+    line = blend(BORDER, MUTED, FLOOR_GRID_CONTRAST)
+    parts += [stroke_path(f"M{fmt(x + c * cell)} {fmt(y)}V{fmt(y + height)}", line)
+              for c in range(1, MAG_COLUMNS) if c != MAG_COLUMNS // 2]
+    parts += [stroke_path(f"M{fmt(x)} {fmt(y + r * cell)}H{fmt(x + width)}", line)
+              for r in range(1, rows) if first_row + r != MAG_ROWS // 2]
+    parts.append(stroke_path(f"M{fmt(x + width / 2)} {fmt(y)}V{fmt(y + height)}",
+                             MUTED_DEEP))
+    horizon = MAG_ROWS // 2 - first_row
+    if 0 < horizon < rows:
+        parts.append(stroke_path(
+            f"M{fmt(x)} {fmt(y + horizon * cell)}H{fmt(x + width)}", MUTED_DEEP))
+    parts.append(rect(x - .5, y - .5, width + 1, height + 1, stroke=BORDER))
+    if target is not None:
+        row, column = target
+        parts.append(rect(x + column * cell + 1, y + (row - first_row) * cell + 1,
+                          cell - 2, cell - 2, stroke=INK, width=2))
+    if ghost is not None:
+        parts.append(mag_marker(*at(ghost), ghost=True))
+    if marker is not None:
+        parts.append(mag_marker(*at(marker)))
+    if row_labels:
+        for line_index, label in enumerate(["+90°", "+30°", "0°", "−30°", "−90°"]):
+            row = line_index - first_row
+            if 0 <= row <= rows:
+                parts.append(text(x - 8, y + row * cell + 4, label, size=11,
+                                  fill=MUTED_DEEP, anchor="end"))
+    for column, label, anchor in [(0, "Back", None),
+                                  (MAG_COLUMNS // 4, "Left", "middle"),
+                                  (MAG_COLUMNS // 2, "Forward", "middle"),
+                                  (MAG_COLUMNS * 3 // 4, "Right", "middle"),
+                                  (MAG_COLUMNS, "Back", "end")]:
+        parts.append(text(x + column * cell, y + height + 15, label, size=11,
+                          fill=MUTED_DEEP, anchor=anchor))
+    return parts
+
+
+def build_magnetic_grid():
+    """The Magnetic page's grid enlarged, and what each of its marks says."""
+    width, height = 880, 470
+    body = card(width, height, "Magnetic coverage", "MAG / COVERAGE")
+    cell, gx, gy = 36, 66, 92
+    marker = mag_place(MAG_FIELD_BEARING, MAG_FIELD_ELEVATION)
+    body.extend(coverage_grid(gx, gy, cell, MAG_COUNTS, target=MAG_TARGET,
+                              marker=marker))
+    covered = sum(1 for row in MAG_COUNTS for count in row if count)
+
+    # The page's own lines under the grid, at the size it sets them.
+    body.append(text(22, 290, MAG_INSTRUCTION, size=17, fill=TEXT))
+    body.append(caption(22, 310, [
+        "The marker is the field as the headset sees it, so it moves against",
+        "the headset. Follow the words to bring it into the outlined cell.",
+    ], size=10, fill=TEXT, leading=13))
+    body.append(text(22, 355, f"{covered} / {MAG_COLUMNS * MAG_ROWS} directions · "
+                     "212 readings", size=12, fill=TEXT))
+    body.append(text(22, 375, "Coverage is not progress: a full grid says every "
+                     "direction was read, not that the sensor is calibrated.",
+                     size=10, fill=TEXT))
+
+    # What the marks mean, each level with the row it names.
+    notes = [
+        (gy + cell / 2, gx + MAG_COLUMNS * cell, "one cell",
+         ["1/48 of the sphere: rows split by the sine of",
+          "elevation, so a full grid is a covered sphere"]),
+        (gy + 2.5 * cell, gx + (MAG_TARGET[1] + 1) * cell, "target",
+         ["the nearest direction not read yet"]),
+    ]
+    for y, end_x, label, lines in notes:
+        body.append(text(560, y - 4, label, size=11.5, weight=600, fill=TEXT))
+        body.append(caption(560, y + 10, lines, size=10.5, leading=13))
+        body.append(leader([(552, y), (end_x + 2, y)]))
+    reading_y = gy + 3.5 * cell
+    mark_x = gx + marker[0] * cell
+    body.append(text(560, reading_y - 4, "latest reading", size=11.5, weight=600,
+                     fill=TEXT))
+    body.append(caption(560, reading_y + 10, [
+        "where the field points now, measured from",
+        "the centre the readings were fitted around",
+    ], size=10.5, leading=13))
+    body.append(leader([(552, reading_y), (mark_x + 6, reading_y),
+                        (mark_x, gy + (marker[1] - 0) * cell + MAG_MARKER / 2 + 2)]))
+
+    # The fill, as a legend rather than a leader: it is every cell at once.
+    body.append(text(560, 300, "fill", size=11.5, weight=600, fill=TEXT))
+    for index, count in enumerate([1, 2, 3, 4, 5, 6]):
+        body.append(rect(560 + index * 26, 310, 20, 20, fill=mag_fill(count),
+                         stroke=blend(BORDER, MUTED, FLOOR_GRID_CONTRAST)))
+        body.append(text(570 + index * 26, 344, f"{count}+" if count == MAG_FULL_AT
+                         else str(count), size=10, fill=MUTED, anchor="middle"))
+    body.append(caption(560, 366, [
+        f"readings in the cell; the colour stops deepening at {MAG_FULL_AT},",
+        "so a well-read grid never looks further along than it is",
+    ], size=10.5, leading=13))
+
+    body.append(text(22, height - 18, "Drawn in headset axes, through the sensor "
+                     "mounting", size=11, fill=TEXT))
+    body.append(text(width - 22, height - 18,
+                     "Every number is a reading, not a verdict on the sensor",
+                     size=11, fill=MUTED, anchor="end"))
+    return "magnetic-grid.svg", document(
+        width, height, "MacinDecode AC-4 Player — magnetic coverage grid",
+        "The Magnetic page's coverage grid, enlarged. Twelve columns of heading "
+        "run from directly behind through left, forward and right to behind "
+        "again; four rows split the sphere by the sine of elevation at plus 30, "
+        "0 and minus 30 degrees, so every cell holds the same forty-eighth of the "
+        "sphere. The forward column and the horizon are drawn heavier. Cells "
+        "deepen with readings up to six and then stop. One empty cell is "
+        "outlined as the target, the nearest direction not read yet, and a small "
+        "square marks the latest reading beside it. Under the grid the page's "
+        "instruction reads Turn it to its left, with the count of directions "
+        "read and the reminder that coverage is not progress.", body)
+
+
+def floor_arrow(bearing, start, end, colour, *, width=1.6, head=0.08,
+                spread=radians(28)):
+    """An arrow lying on the floor along one bearing, as a compass needle
+    would: the field's direction in the room."""
+    a = project(bearing_point(bearing, start), True)
+    b = project(bearing_point(bearing, end), True)
+    tip = bearing_point(bearing, end)
+    parts = [stroke_path(f"M{fmt(a[0])} {fmt(a[1])}L{fmt(b[0])} {fmt(b[1])}",
+                         colour, width)]
+    for side in (-1, 1):
+        # A bearing's own direction is its point at unit reach, so the barbs
+        # are that direction turned by the spread, laid back from the tip.
+        back = bearing_point(bearing + side * spread, head, 0)
+        barb = project((tip[0] - back[0], FLOOR_Y, tip[2] - back[2]), True)
+        parts.append(stroke_path(f"M{fmt(b[0])} {fmt(b[1])}L{fmt(barb[0])} "
+                                 f"{fmt(barb[1])}", colour, width))
+    return "".join(parts)
+
+
+def floor_turn(start, end, radius, colour, *, width=1.6, head=0.06,
+               spread=radians(30)):
+    """A short arc from one facing to the next, with its head at the end the
+    listener turned to."""
+    parts = [floor_arc(start, end, radius, colour, width)]
+    tip = bearing_point(end, radius)
+    # The way the arc runs at its end, along the floor.
+    sense = 1 if end > start else -1
+    tangent = (cos(end) * sense, 0, sin(end) * sense)
+    for side in (-1, 1):
+        c, sn = cos(side * spread), sin(side * spread)
+        barb = (tangent[0] * c - tangent[2] * sn, 0, tangent[0] * sn + tangent[2] * c)
+        end_point = project((tip[0] - head * barb[0], FLOOR_Y,
+                             tip[2] - head * barb[2]), True)
+        tip_point = project(tip, True)
+        parts.append(stroke_path(f"M{fmt(tip_point[0])} {fmt(tip_point[1])}"
+                                 f"L{fmt(end_point[0])} {fmt(end_point[1])}",
+                                 colour, width))
+    return "".join(parts)
+
+
+def field_panel(x, y, width, height, title, yaw, ghost, note):
+    """One room, one headset heading, and the field fixed in it."""
+    parts = [rect(x, y, width, height, fill=SURFACE, stroke=BORDER, radius=4),
+             text(x + 18, y + 26, title, size=12.5, weight=600, fill=TEXT)]
+    previous, scene.SCALE = scene.SCALE, 112
+    art = [floor_grid()]
+    if ghost is not None:
+        art.append(floor_ray(ghost, 0.95, blend(MUTED, STAGE, 0.6), 1.0,
+                             dash="2 3"))
+        # Out in front of the figure, where the body cannot hide it.
+        art.append(floor_turn(ghost, yaw, 0.86, ACCENT))
+    art.append(floor_ray(yaw, 0.95, blend(MUTED, STAGE, 0.35), 1.1, dash="4 3"))
+    art.append(floor_arc(yaw, MAG_FIELD_BEARING, BEARING_RADIUS, INK, 1.6))
+    art.append(floor_arrow(MAG_FIELD_BEARING, 0.08, 0.95, INK))
+    art.append(listener(yaw))
+    # The label stands clear of the arrowhead, further along the same line.
+    tip = project(bearing_point(MAG_FIELD_BEARING, 0.95), True)
+    root = project(bearing_point(MAG_FIELD_BEARING, 0.5), True)
+    reach = ((tip[0] - root[0]) ** 2 + (tip[1] - root[1]) ** 2) ** 0.5
+    label = (tip[0] + 22 * (tip[0] - root[0]) / reach,
+             tip[1] + 22 * (tip[1] - root[1]) / reach)
+    centre_x, centre_y = x + width / 2, y + 112
+    parts.append(f'<g transform="translate({fmt(centre_x)} {fmt(centre_y)})">'
+                 + "".join(art) + '</g>')
+    parts.append(text(centre_x + label[0], centre_y + label[1] + 4, "field",
+                      size=11.5, weight=600, fill=INK, anchor="middle"))
+    middle = project(bearing_point((yaw + MAG_FIELD_BEARING) / 2,
+                                   BEARING_RADIUS + 0.18), True)
+    degrees = round((MAG_FIELD_BEARING - yaw) * 180 / pi)
+    parts.append(text(centre_x + middle[0], centre_y + middle[1] + 4,
+                      f"{degrees}°", size=12, weight=600, fill=INK,
+                      anchor="middle"))
+    scene.SCALE = previous
+
+    # The one row of the grid the field is read in, as the page shows it.
+    cell = 28
+    strip_x = x + (width - cell * MAG_COLUMNS) / 2
+    strip_y = y + height - 88
+    row = MAG_TARGET[0]
+    place = mag_place(MAG_FIELD_BEARING - yaw, MAG_FIELD_ELEVATION)
+    before = mag_place(MAG_FIELD_BEARING - ghost, MAG_FIELD_ELEVATION) \
+        if ghost is not None else None
+    parts.append(text(strip_x, strip_y - 9, "The grid's row just below the horizon",
+                      size=10, fill=MUTED))
+    parts.extend(coverage_grid(strip_x, strip_y, cell, [MAG_COUNTS[row]],
+                               first_row=row, target=MAG_TARGET, marker=place,
+                               ghost=before, row_labels=False))
+    if before is not None:
+        # The way the square went, under it.
+        start = strip_x + cell * before[0] + 5
+        end = strip_x + cell * place[0] - 6
+        middle_y = strip_y + cell * (place[1] - row)
+        parts.append(stroke_path(f"M{fmt(start)} {fmt(middle_y)}H{fmt(end)}",
+                                 INK, 1.2))
+        parts.append(arrow(end - 1, middle_y, size=3, color=INK))
+    parts.append(text(x + 18, y + height - 16, note, size=10.5, fill=MUTED))
+    return "".join(parts)
+
+
+def build_magnetic_turn():
+    """Why the page's square moves against the headset."""
+    width, height = 880, 622
+    body = card(width, height, "Following the instruction", "MAG / FIELD vs HEADSET")
+    turned = round(-MAG_TURN * 180 / pi)
+    before = round(MAG_FIELD_BEARING * 180 / pi)
+    after = round((MAG_FIELD_BEARING - MAG_TURN) * 180 / pi)
+    body.append(field_panel(24, 62, 406, 350, f"The field {before}° right of forward",
+                            0.0, None,
+                            "The square sits where the page shows the field."))
+    body.append(field_panel(450, 62, 406, 350,
+                            f"“{MAG_INSTRUCTION}” · turned {turned}°", MAG_TURN,
+                            0.0, "Dashed: where the square was. It went right."))
+
+    rows = [
+        (428, INK, "field", "The field", f"room: fixed  ·  bearing: {before}° → {after}°",
+         "Keeps its place and changes its bearing —",
+         "the headset turned; the Earth's field did not."),
+        (500, ACCENT, "square", "The square", "column 7 → 8  ·  moved right",
+         "Shows that bearing, so it moves against the turn —",
+         "follow the words, not the square."),
+    ]
+    for y, ink, icon, name, facts, lead, tail in rows:
+        body.append(rect(24, y, 832, 62, fill=SURFACE, stroke=BORDER, radius=4))
+        body.append(rect(24, y, 3, 62, fill=ink))
+        if icon == "field":
+            body.append(stroke_path(f"M42 {y + 31}H62", INK, 1.6))
+            body.append(arrow(61, y + 31, size=4, color=INK))
+        else:
+            body.append(mag_marker(52, y + 31))
+        body.append(text(76, y + 26, name, size=12, weight=600, fill=ink))
+        body.append(text(76, y + 45, facts, size=10.5, mono=True, fill=TEXT))
+        body.append(text(370, y + 26, lead, size=11, weight=600, fill=TEXT))
+        body.append(text(370, y + 45, tail, size=10.5, fill=MUTED))
+
+    body.append(text(22, height - 18, "The instruction names the headset's motion",
+                     size=11, fill=TEXT))
+    body.append(text(width - 22, height - 18,
+                     "Drawn on a head for its facing; turn the headset in your hands",
+                     size=11, fill=MUTED, anchor="end"))
+    return "magnetic-turn.svg", document(
+        width, height, "MacinDecode AC-4 Player — following a magnetic instruction",
+        f"Two rooms, before and after following the instruction {MAG_INSTRUCTION}. "
+        f"The Earth's field is drawn as an arrow fixed in the room, {before} degrees "
+        f"right of where the headset first faces. Turning the headset {turned} "
+        f"degrees to its left leaves the field where it is, so its bearing from "
+        f"the headset grows from {before} to {after} degrees. Below each room is "
+        "the grid row the field is read in: the square that marks the latest "
+        "reading moves one column to the right, into the outlined cell, while "
+        "the headset turned left. The square shows the field as the headset sees "
+        "it, so it always moves against the headset; the page's words name the "
+        "motion to make.", body)
+
+
 BUILDERS = {
     "playback-paths": build_playback_paths,
     "reference-frames": build_reference_frames,
@@ -1394,6 +1730,8 @@ BUILDERS = {
     "silent-objects": build_silent_objects,
     "meter-row": build_meter_row,
     "trail-jumps": build_trail_jumps,
+    "magnetic-grid": build_magnetic_grid,
+    "magnetic-turn": build_magnetic_turn,
 }
 
 
