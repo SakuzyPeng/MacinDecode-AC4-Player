@@ -91,6 +91,20 @@ fn parse(tokens: &[String], build: &Path, windows: bool) -> Vec<Link> {
     result
 }
 
+fn coff_import_dll(member: &[u8]) -> Option<&str> {
+    // IMPORT_OBJECT_HEADER is 20 bytes, followed by NUL-terminated symbol
+    // and DLL names. SizeOfData excludes the header and archive padding.
+    let size = u32::from_le_bytes(member.get(12..16)?.try_into().ok()?);
+    let data = member.get(20..)?;
+    if data.len() != usize::try_from(size).ok()? {
+        return None;
+    }
+    let symbol_end = data.iter().position(|&byte| byte == 0)?;
+    let name = data.get(symbol_end + 1..)?;
+    let name_end = name.iter().position(|&byte| byte == 0)?;
+    std::str::from_utf8(&name[..name_end]).ok()
+}
+
 fn verify_archive(path: &Path) {
     let bytes =
         fs::read(path).unwrap_or_else(|error| panic!("Cannot read {}: {error}", path.display()));
@@ -111,11 +125,20 @@ fn verify_archive(path: &Path) {
         let name = std::str::from_utf8(&header[..16]).unwrap().trim();
         // COFF short import objects: Sig1=0, Sig2=0xffff, Version=0.
         // Bigobj uses Version=2 and remains a valid static object.
-        assert!(
-            matches!(name, "/" | "//" | "/SYM64/") || !member.starts_with(&[0, 0, 255, 255, 0, 0]),
-            "DLL import library is not a static dependency: {}",
-            path.display()
-        );
+        if !matches!(name, "/" | "//" | "/SYM64/") && member.starts_with(&[0, 0, 255, 255, 0, 0]) {
+            let dll = coff_import_dll(member)
+                .unwrap_or_else(|| panic!("Malformed COFF import object: {}", path.display()));
+            // Rust 1.98's std bundles these raw-dylib imports even with
+            // crt-static. Permit the exact system DLLs, not arbitrary import
+            // libraries or dynamic CRTs. Packaging also audits the final EXE.
+            assert!(
+                ["bcryptprimitives.dll", "api-ms-win-core-synch-l1-2-0.dll"]
+                    .iter()
+                    .any(|system| dll.eq_ignore_ascii_case(system)),
+                "DLL import library is not a static dependency: {} ({dll})",
+                path.display()
+            );
+        }
         position += 60 + length + length % 2;
     }
 }
@@ -221,6 +244,86 @@ pub fn emit(build: &Path, windows: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn import_object(dll: &str) -> Vec<u8> {
+        let data = format!("symbol\0{dll}\0");
+        let mut member = vec![0; 20];
+        member[2..4].copy_from_slice(&u16::MAX.to_le_bytes());
+        member[6..8].copy_from_slice(&0x8664_u16.to_le_bytes());
+        member[12..16].copy_from_slice(&u32::try_from(data.len()).unwrap().to_le_bytes());
+        member[18..20].copy_from_slice(&4_u16.to_le_bytes()); // IMPORT_OBJECT_NAME
+        member.extend_from_slice(data.as_bytes());
+        member
+    }
+
+    fn archive(members: &[(&str, &[u8])]) -> tempfile::NamedTempFile {
+        let mut bytes = b"!<arch>\n".to_vec();
+        for (name, member) in members {
+            let header = format!(
+                "{name:<16}{:<12}{:<6}{:<6}{:<8}{:<10}`\n",
+                0,
+                0,
+                0,
+                "100644",
+                member.len()
+            );
+            assert_eq!(header.len(), 60);
+            bytes.extend_from_slice(header.as_bytes());
+            bytes.extend_from_slice(member);
+            if member.len() % 2 != 0 {
+                bytes.push(b'\n');
+            }
+        }
+        let file = tempfile::NamedTempFile::new().unwrap();
+        fs::write(file.path(), bytes).unwrap();
+        file
+    }
+
+    #[test]
+    fn rust_static_archives_accept_only_the_known_system_dll_imports() {
+        let random = import_object("BCRYPTPRIMITIVES.dll");
+        let sync = import_object("api-ms-win-core-synch-l1-2-0.dll");
+        let file = archive(&[
+            ("/", &[0, 0, 255, 255, 0, 0]), // archive index, not an object
+            ("code.obj/", &[0x64, 0x86, 0, 0]),
+            ("big.obj/", &[0, 0, 255, 255, 2, 0]),
+            ("/123", &random), // long archive name used by Rust's imports
+            ("/456", &sync),
+        ]);
+        verify_archive(file.path());
+    }
+
+    #[test]
+    fn rust_static_archives_still_reject_non_system_and_dynamic_crt_imports() {
+        for dll in [
+            "mradm_capi.dll",
+            "libopenblas.dll",
+            "VCRUNTIME140.dll",
+            "api-ms-win-crt-runtime-l1-1-0.dll",
+            "bcryptprimitives.dll.evil",
+            r"C:\custom\bcryptprimitives.dll",
+        ] {
+            let allowed = import_object("bcryptprimitives.dll");
+            let rejected = import_object(dll);
+            let file = archive(&[("/123", &allowed), ("/456", &rejected)]);
+            assert!(
+                std::panic::catch_unwind(|| verify_archive(file.path())).is_err(),
+                "accepted {dll}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_short_import_objects_are_rejected() {
+        let valid = import_object("bcryptprimitives.dll");
+        let mut unterminated = valid[..valid.len() - 1].to_vec();
+        let size = u32::try_from(unterminated.len() - 20).unwrap();
+        unterminated[12..16].copy_from_slice(&size.to_le_bytes());
+        for member in [&valid[..6], &valid[..valid.len() - 1], &unterminated] {
+            let file = archive(&[("/123", member)]);
+            assert!(std::panic::catch_unwind(|| verify_archive(file.path())).is_err());
+        }
+    }
 
     #[test]
     fn paths_and_transitive_link_order_are_preserved() {
