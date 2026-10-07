@@ -2,15 +2,15 @@
 
 [简体中文](README.md) · **English**
 
-A desktop app for **opening, inspecting and playing Dolby AC-4 spatial audio files**. It brings its
-own AC-4 decoder — no system or third-party media decoder is involved — and sends the decoded audio
+A desktop app for **opening, inspecting and playing Dolby AC-4 and APAC spatial audio files**. It brings its
+own AC-4 and APAC decoders — no system or third-party media decoder is involved — and sends the decoded audio
 objects to system spatial audio or to a software binaural renderer, while drawing those objects live
 in a 3D scene in the middle of the window.
 
 ![Illustrative spatial scene: orange audio objects orbit the listener, leaving fading position trails.](assets/readme/spatial-orbit.svg)
 
-> This is not a general-purpose music player: it handles `.m4a`, `.mp4` and `.ac4` files that
-> **contain an AC-4 track**, and does not play MP3, AAC or FLAC.
+> This is not a general-purpose music player: it handles AC-4 / APAC `.m4a` and `.mp4`,
+> raw `.ac4`, and APAC `.caf`, and does not play MP3, AAC or FLAC.
 
 This page covers installing, getting started and building. **For what everything in the window is
 telling you and what each setting does, see the [user manual](docs/MANUAL.en.md)**
@@ -50,9 +50,10 @@ Default builds include embedded PoseBridge BLE/USB head tracking and device cont
   real time and never passes through the decoder, so it exercises the output path but says nothing
   about decoding; see [the manual](docs/MANUAL.en.md#the-built-in-demo).
 
-Supported files: `.m4a`, `.mp4` and `.ac4`, each of which must carry an AC-4 track. The current focus
-is **Full A-JOC** immersive content; other AC-4 flavors may fail to play — but you can still inspect
-them.
+Supported files: AC-4 / APAC `.m4a` and `.mp4`, raw `.ac4`, and APAC `.caf`. AC-4 focuses on **Full A-JOC**.
+APAC supports mono, stereo, 5.1, 7.1, 7.1.4, 9.1.6 and 22.2 with frame-exact seeking; HOA playback is not yet supported.
+The two 22.2 LFE channels remain separate through macOS **System spatial audio → 22.2 → Direct** output.
+See [APAC multichannel playback](docs/MANUAL.en.md#apac-multichannel-playback).
 
 ## Getting the app
 
@@ -92,7 +93,7 @@ the checksum and build information attachments do not need to be installed. You 
 
 **The 3D scene** (center of the window): drag to orbit, `Shift` + drag to pan, scroll to zoom. The
 `ISO` / `TOP` / `BACK` / `SIDE` / `RESET` buttons jump to fixed viewpoints, with a separate
-perspective/orthographic projection toggle. The scene draws at most 20 objects at once and says at
+perspective/orthographic projection toggle. The scene draws at most 22 objects at once and says at
 the bottom left how many it left out.
 
 **Visual settings**, next to **Audio settings**, decides how the scene is drawn: element numbers
@@ -220,7 +221,7 @@ current track — the app keeps using the file handle it already opened.
   guessing a timeline across rates.
 - MP4 `moov` metadata is capped at 64 MiB and a single packet at roughly 16 MiB; going over is a
   clear error rather than an allocation.
-- The 3D scene draws at most 20 objects at a time.
+- The 3D scene draws at most 22 objects at a time.
 - The spatial result ultimately depends on the content, the OS settings and the output device.
   Software binaural works with any ordinary stereo device.
 

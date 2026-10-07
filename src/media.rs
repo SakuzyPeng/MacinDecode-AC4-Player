@@ -12,6 +12,12 @@ use macindecode_ac4_mp4::reader::{MAX_METADATA_BYTES, Mp4MetadataBytes, read_mp4
 
 pub const READER_BUFFER_BYTES: usize = 256 * 1024;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaCodec {
+    Ac4,
+    Apac,
+}
+
 #[derive(Debug, Clone)]
 pub struct MediaSource(Arc<SourceInner>);
 
@@ -54,10 +60,7 @@ impl MediaSource {
                 OpenedMedia::open(self.path())
                     .map(Arc::new)
                     .map_err(|error| {
-                        format!(
-                            "Failed to open AC-4 media {}: {error}",
-                            self.path().display()
-                        )
+                        format!("Failed to open media {}: {error}", self.path().display())
                     })
             })
             .clone()
@@ -84,6 +87,8 @@ pub struct OpenedMedia {
     file: Mutex<File>,
     stamp: FileStamp,
     raw: bool,
+    caf: bool,
+    codec: OnceLock<Result<MediaCodec, String>>,
     metadata: OnceLock<Result<Arc<Mp4MetadataBytes>, String>>,
 }
 
@@ -110,13 +115,15 @@ impl OpenedMedia {
                 "Media file is empty",
             ));
         }
-        let mut prefix = [0u8; 2];
-        let count = usize::try_from(stamp.length.min(2)).expect("two-byte prefix");
+        let mut prefix = [0u8; 4];
+        let count = usize::try_from(stamp.length.min(4)).expect("four-byte prefix");
         file.read_exact(&mut prefix[..count])?;
         let opened = Self {
             file: Mutex::new(file),
             stamp,
-            raw: count == 2 && matches!(prefix, [0xac, 0x40 | 0x41]),
+            raw: count >= 2 && matches!(&prefix[..2], [0xac, 0x40 | 0x41]),
+            caf: count == 4 && &prefix == b"caff",
+            codec: OnceLock::new(),
             metadata: OnceLock::new(),
         };
         opened.check_stamp(
@@ -131,6 +138,27 @@ impl OpenedMedia {
     #[must_use]
     pub const fn is_raw(&self) -> bool {
         self.raw
+    }
+
+    /// Route by file contents, never the extension. Keep malformed AC-4 errors
+    /// on the AC-4 path; only the absence of an AC-4 track selects APAC.
+    pub fn codec(self: &Arc<Self>) -> Result<MediaCodec, String> {
+        self.codec
+            .get_or_init(|| {
+                if self.raw {
+                    return Ok(MediaCodec::Ac4);
+                }
+                if self.caf {
+                    return Ok(MediaCodec::Apac);
+                }
+                let metadata = self.mp4_metadata()?;
+                match macindecode_ac4_mp4::Ac4Mp4Metadata::parse(&metadata.bytes) {
+                    Ok(_) => Ok(MediaCodec::Ac4),
+                    Err(macindecode_ac4_mp4::Ac4Mp4Error::NoAc4Track) => Ok(MediaCodec::Apac),
+                    Err(error) => Err(error.to_string()),
+                }
+            })
+            .clone()
     }
 
     #[must_use]

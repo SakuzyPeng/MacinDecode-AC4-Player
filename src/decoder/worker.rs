@@ -20,6 +20,8 @@ use macindecode_ac4_scene::{
 };
 
 use super::demo::DemoProgram;
+#[path = "apac.rs"]
+mod apac;
 use super::{
     DecodeContainer, DecodeMetrics, DecodePhase, DecodedSceneBlock, DecoderSnapshot,
     PREBUFFER_MILLISECONDS, PlaybackKey, PlaybackSource, QueuePushError, SceneLfePcm,
@@ -146,13 +148,14 @@ fn decoder_worker(
                         let failure_path = media.path().to_path_buf();
                         loaded = loaded.filter(|held| match held {
                             LoadedSource::Media(open) => reuse_cached && open.path == media.path(),
+                            LoadedSource::Apac(open) => reuse_cached && open.path == media.path(),
                             LoadedSource::Demo(_) => false,
                         });
                         if let Some(LoadedSource::Media(open)) = loaded.as_mut() {
                             open.session = new_session();
-                        } else {
-                            loaded = match LoadedMedia::open(key, &media, event_sender) {
-                                Ok(open) => Some(LoadedSource::Media(Box::new(open))),
+                        } else if loaded.is_none() {
+                            loaded = match LoadedSource::open(key, &media, event_sender, queue) {
+                                Ok(open) => Some(open),
                                 Err(error) => {
                                     send_failure(key, Some(&failure_path), error, event_sender);
                                     None
@@ -329,6 +332,9 @@ impl SharedMediaIndex {
                     DecodeContainer::RawAc4 => build_raw_index(&source, &worker_cancel),
                     // The demo carries its own timeline and needs no index.
                     DecodeContainer::Generated => Err("The demo has no seek index".to_owned()),
+                    DecodeContainer::ApacCaf | DecodeContainer::ApacMp4 => {
+                        Err("APAC uses its own checkpoint index".to_owned())
+                    }
                 };
                 if worker_cancel.load(Ordering::Acquire) {
                     return;
@@ -563,10 +569,26 @@ fn build_raw_index(
 /// needed a line changed for it.
 enum LoadedSource {
     Media(Box<LoadedMedia>),
+    Apac(Box<apac::Stream>),
     Demo(DemoStream),
 }
 
 impl LoadedSource {
+    fn open(
+        key: PlaybackKey,
+        source: &MediaSource,
+        events: &Sender<WorkerEvent>,
+        queue: &SharedSceneQueue,
+    ) -> Result<Self, String> {
+        match source.open()?.codec()? {
+            crate::media::MediaCodec::Ac4 => {
+                LoadedMedia::open(key, source, events).map(|media| Self::Media(Box::new(media)))
+            }
+            crate::media::MediaCodec::Apac => apac::Stream::open(key, source, events, queue)
+                .map(|media| Self::Apac(Box::new(media))),
+        }
+    }
+
     fn decode_from(
         &mut self,
         key: PlaybackKey,
@@ -577,6 +599,9 @@ impl LoadedSource {
         queue: &SharedSceneQueue,
     ) -> RunControl {
         match self {
+            Self::Apac(media) => {
+                media.decode_from(key, target_frame, command_receiver, event_sender, queue)
+            }
             Self::Media(media) => media.decode_from(
                 key,
                 target_frame,
@@ -945,7 +970,7 @@ impl LoadedMedia {
         match self.container {
             // A synthesised Scene is never a LoadedMedia: it has no packets to
             // walk, so it takes the DemoStream arm of LoadedSource instead.
-            DecodeContainer::Generated => {
+            DecodeContainer::Generated | DecodeContainer::ApacCaf | DecodeContainer::ApacMp4 => {
                 return Err("The demo carries no packet stream".to_owned());
             }
             DecodeContainer::IsoBmff => {
@@ -1114,7 +1139,7 @@ fn decode_access_unit(
             metrics.presentation_index = block.presentation_index;
             metrics.presentation_id = block.presentation_id;
             metrics.object_count = block.objects.len();
-            metrics.has_lfe = block.lfe.is_some();
+            metrics.has_lfe = !block.lfes.is_empty();
             metrics.state_complete = block.state_complete;
             metrics.scene_signature = Some(super::SceneSignature::from_block(&block));
         }

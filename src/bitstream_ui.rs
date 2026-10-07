@@ -5,7 +5,9 @@ use macindecode_ac4_inspect::{
     InspectSourceKind, ReportedField,
 };
 
-use crate::inspection::{InspectionSnapshot, InspectionState, field_summary_text, field_text};
+use crate::inspection::{
+    InspectionReport, InspectionSnapshot, InspectionState, field_summary_text, field_text,
+};
 use crate::model::SelectedSource;
 use crate::theme;
 
@@ -56,7 +58,20 @@ fn draw_pending_card(ui: &mut egui::Ui) -> Option<BitstreamAction> {
 }
 
 fn draw_ready_card(ui: &mut egui::Ui, snapshot: &InspectionSnapshot) -> Option<BitstreamAction> {
-    let report = &snapshot.report;
+    let InspectionReport::Ac4(report) = &snapshot.report else {
+        let InspectionReport::Apac(report) = &snapshot.report else {
+            unreachable!()
+        };
+        summary_rows(ui, report.summary.iter().map(String::as_str));
+        ui.separator();
+        return ui
+            .with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.add_sized([76.0, 28.0], egui::Button::new("Details…"))
+                    .clicked()
+                    .then_some(BitstreamAction::OpenDetails)
+            })
+            .inner;
+    };
     let presentation = report.presentations.first();
     let values = [
         bit_rate_and_core_text(report),
@@ -257,9 +272,18 @@ pub fn draw_details(
             details_header(ui, source, state);
             ui.add_space(14.0);
             match state {
-                Some(InspectionState::Ready(snapshot)) => {
-                    draw_report(ui, &snapshot.report);
-                }
+                Some(InspectionState::Ready(snapshot)) => match &snapshot.report {
+                    InspectionReport::Ac4(report) => draw_report(ui, report),
+                    InspectionReport::Apac(report) => {
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            for (name, value) in &report.fields {
+                                ui.label(RichText::new(name).strong());
+                                ui.label(value);
+                                ui.add_space(8.0);
+                            }
+                        });
+                    }
+                },
                 Some(InspectionState::Failed(error)) => {
                     action = draw_details_error(ui, error);
                 }

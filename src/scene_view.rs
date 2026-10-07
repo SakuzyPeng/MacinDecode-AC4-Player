@@ -30,13 +30,13 @@ use std::sync::{Mutex, PoisonError};
 use crate::decoder::{ContentHeadTracking, PlaybackKey, TrackingSummary};
 use crate::scene3d::params::{TRAIL_INTERVAL_MILLISECONDS, TRAIL_SAMPLES};
 
-/// Objects the view will draw. The design budget is 20 dynamic objects plus the
-/// static LFE slot; a scene beyond it is truncated and reported, never grown,
+/// Objects the view will draw. The design budget is 22 objects plus two
+/// independent LFE slots; a scene beyond it is truncated and reported, never grown,
 /// because growing it would move the allocation onto the audio thread.
-pub const MAX_VIEW_OBJECTS: usize = 20;
+pub const MAX_VIEW_OBJECTS: usize = 22;
 /// LFE metering never consumes a dynamic-object slot or carries a position.
 pub const LFE_METER_SLOT: usize = MAX_VIEW_OBJECTS;
-pub const METER_SLOTS: usize = MAX_VIEW_OBJECTS + 1;
+pub const METER_SLOTS: usize = MAX_VIEW_OBJECTS + 2;
 
 /// Loudness bins kept per object, and the audio each one nominally covers.
 ///
@@ -159,7 +159,7 @@ pub struct LfeView {
 #[derive(Debug, Clone, Copy)]
 pub struct SceneViewFrame {
     objects: [ObjectView; MAX_VIEW_OBJECTS],
-    lfe: Option<LfeView>,
+    lfes: [Option<LfeView>; 2],
     /// Objects the render callback resolved, which may exceed the array.
     total_objects: usize,
     /// Breadcrumbs per object slot, oldest first and contiguous. Kept as a
@@ -200,7 +200,7 @@ impl Default for SceneViewFrame {
     fn default() -> Self {
         Self {
             objects: [ObjectView::default(); MAX_VIEW_OBJECTS],
-            lfe: None,
+            lfes: [None; 2],
             total_objects: 0,
             trails: [[[0.0; 3]; TRAIL_SAMPLES]; MAX_VIEW_OBJECTS],
             trail_lens: [0; MAX_VIEW_OBJECTS],
@@ -218,8 +218,13 @@ impl Default for SceneViewFrame {
 }
 
 impl SceneViewFrame {
+    #[cfg_attr(not(any(windows_spatial_output, test)), allow(dead_code))]
     pub const fn lfe(&self) -> Option<LfeView> {
-        self.lfe
+        self.lfes[0]
+    }
+
+    pub fn lfes(&self) -> impl Iterator<Item = LfeView> + '_ {
+        self.lfes.iter().copied().flatten()
     }
 
     pub const fn tracking(&self) -> TrackingSummary {
@@ -458,6 +463,7 @@ impl SceneViewMirror {
                       scene preview, and neither exists without a decoder"
         )
     )]
+    #[cfg_attr(not(any(windows_spatial_output, test)), allow(dead_code))]
     pub fn write_with_lfe<I>(
         &self,
         key: PlaybackKey,
@@ -468,6 +474,29 @@ impl SceneViewMirror {
     ) where
         I: IntoIterator<Item = ObjectView>,
     {
+        self.write_with_lfes(key, objects, lfe, timeline_frame, sample_rate);
+    }
+
+    #[cfg_attr(not(feature = "decode"), allow(dead_code))]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "publish bounded object and LFE histories under one try_lock"
+    )]
+    pub fn write_with_lfes<I, L>(
+        &self,
+        key: PlaybackKey,
+        objects: I,
+        lfes: L,
+        timeline_frame: i64,
+        sample_rate: u32,
+    ) where
+        I: IntoIterator<Item = ObjectView>,
+        L: IntoIterator<Item = LfeView>,
+    {
+        let mut staged_lfes = [None; 2];
+        for (slot, lfe) in staged_lfes.iter_mut().zip(lfes) {
+            *slot = Some(lfe);
+        }
         // Staged off-lock so the critical section stays short.
         let mut staged = [ObjectView::default(); MAX_VIEW_OBJECTS];
         let mut total = 0usize;
@@ -479,7 +508,7 @@ impl SceneViewMirror {
             }
             total = total.saturating_add(1);
         }
-        if total == 0 && lfe.is_none() {
+        if total == 0 && staged_lfes.iter().all(Option::is_none) {
             return;
         }
 
@@ -512,10 +541,12 @@ impl SceneViewMirror {
             }
         }
 
-        if frame.lfe.map(|view| view.element_id) != lfe.map(|view| view.element_id) {
-            frame.loudness_lens[LFE_METER_SLOT] = 0;
+        for (index, lfe) in staged_lfes.iter().enumerate() {
+            if frame.lfes[index].map(|view| view.element_id) != lfe.map(|view| view.element_id) {
+                frame.loudness_lens[LFE_METER_SLOT + index] = 0;
+            }
         }
-        frame.lfe = lfe;
+        frame.lfes = staged_lfes;
         frame.objects = staged;
         frame.total_objects = total;
         frame.key = Some(key);
@@ -525,10 +556,14 @@ impl SceneViewMirror {
         // sampled point, and the quantum that carries it is usually not the one
         // a breadcrumb falls on.
         let bin_frames = loudness_bin_frames(sample_rate);
-        if let Some(lfe) = lfe {
+        for (index, lfe) in staged_lfes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, lfe)| lfe.map(|lfe| (index, lfe)))
+        {
             push_energy(
-                &mut frame.loudness[LFE_METER_SLOT],
-                &mut frame.loudness_lens[LFE_METER_SLOT],
+                &mut frame.loudness[LFE_METER_SLOT + index],
+                &mut frame.loudness_lens[LFE_METER_SLOT + index],
                 lfe.energy,
                 bin_frames,
             );
@@ -606,6 +641,40 @@ impl SceneViewMirror {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn two_lfe_destinations_keep_separate_meter_history() {
+        use super::*;
+        let mirror = SceneViewMirror::default();
+        let key = PlaybackKey::new(41, 0);
+        let views = [(4, 1.0), (10, 4.0)].map(|(element_id, energy)| LfeView {
+            element_id,
+            active: true,
+            gain: 1.0,
+            energy: ObjectEnergy {
+                sum_squares: energy * 480.0,
+                frames: 480,
+                peak: 0.5,
+            },
+        });
+        mirror.write_with_lfes(key, [], views, 480, 48_000);
+        let frame = mirror.read(key).unwrap();
+        assert_eq!(
+            frame.lfes().map(|lfe| lfe.element_id).collect::<Vec<_>>(),
+            [4, 10]
+        );
+        assert_eq!(
+            frame.mean_square(LFE_METER_SLOT, 480).0.to_bits(),
+            1.0_f64.to_bits()
+        );
+        assert_eq!(
+            frame.mean_square(LFE_METER_SLOT + 1, 480).0.to_bits(),
+            4.0_f64.to_bits()
+        );
+        mirror.write_with_lfe(key, [], Some(views[0]), 960, 48_000);
+        let frame = mirror.read(key).unwrap();
+        assert_eq!(frame.lfes().count(), 1);
+        assert_eq!(frame.mean_square(LFE_METER_SLOT + 1, 480).1, 0);
+    }
     use super::*;
 
     #[test]

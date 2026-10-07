@@ -111,7 +111,7 @@ def license_report(destination):
     # Only these attribution fields belong in a distributed executable.
     require(cleaned and all(item["text"] and item["used_by"] for item in cleaned), "Incomplete license report")
     names = {used["crate"]["name"] for item in cleaned for used in item["used_by"]}
-    require({"eframe", "epaint_default_fonts", "rusqlite", "macindecode-ac4-inspect", "posebridge-core", "btleplug", "serialport"} <= names, "Missing dependency notices")
+    require({"eframe", "epaint_default_fonts", "rusqlite", "macindecode-ac4-inspect", "apac-core", "apac-container", "apac-cac", "posebridge-core", "btleplug", "serialport"} <= names, "Missing dependency notices")
     cleaned.append({"id": "SQLite-public-domain", "name": "SQLite public domain dedication",
                     "text": "SQLite is in the public domain.\nhttps://sqlite.org/copyright.html\n\n"
                             "The author disclaims copyright to this source code. In place of a legal notice, here is a blessing:\n"

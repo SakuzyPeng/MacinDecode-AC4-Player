@@ -12,8 +12,8 @@ use crate::scene_view::{
 };
 
 use super::state::{
-    KWeighting, block_offset_at, element_state_at, has_instant_update, lfe_render_state,
-    listener_render_state, validate_block,
+    KWeighting, block_offset_at, element_state_at, has_instant_update, listener_render_state,
+    validate_block,
 };
 
 pub(super) struct SceneRenderSource {
@@ -82,7 +82,12 @@ impl SceneRenderSource {
         // Per slot, not per element: the mirror's slots are the signature's
         // sorted element IDs, and so is `objects`' BTreeMap order.
         let mut jumped = [false; MAX_VIEW_OBJECTS];
-        let mut lfe = self.has_lfe.then(|| LfeQuantumAccumulator::new(requested));
+        let mut lfe = self.has_lfe.then(|| {
+            LfeQuantumAccumulator::with_channels(
+                requested,
+                self.scene_signature.lfe_element_ids().len(),
+            )
+        });
         let mut written = 0usize;
         let mut underrun = false;
 
@@ -148,6 +153,9 @@ impl SceneRenderSource {
         }
 
         let end_of_stream = self.current.is_none() && self.reader.is_end_of_stream();
+        if let Some(lfe) = lfe.as_mut() {
+            lfe.mix();
+        }
         self.publish_scene_view(&objects, lfe.as_ref(), &jumped, written);
         if let Some(pose) = self.pose.try_pose() {
             self.last_pose = pose;
@@ -161,7 +169,14 @@ impl SceneRenderSource {
         }
         Ok(RenderQuantum {
             objects: objects.into_values().map(|object| object.audio).collect(),
-            lfe: lfe.map(LfeQuantumAccumulator::finish),
+            lfe: lfe.map(|lfe| {
+                let render = lfe.finish();
+                LfeObjectRender {
+                    active: render.active,
+                    gain: render.gain,
+                    samples: render.samples,
+                }
+            }),
             frames_written: u32::try_from(written).unwrap_or(u32::MAX),
             end_of_stream,
             underrun,
@@ -175,8 +190,8 @@ impl SceneRenderSource {
         jumped: &[bool; MAX_VIEW_OBJECTS],
         frames_written: usize,
     ) {
-        // Mirror exactly what is about to be submitted rather than resolving the
-        // OAMD state a second time. A parallel derivation would drift from the
+        // Mirror the submitted object state without resolving OAMD again.
+        // LFE meters retain the separate gain-applied inputs before folding. A parallel derivation would drift from the
         // audio under ramps, and these are already in the listener space the
         // scene view draws in.
         //
@@ -200,26 +215,21 @@ impl SceneRenderSource {
 
         // A gap-only quantum has no new dynamic positions. Keep the mirror's
         // existing scene just as before, rather than replacing it with LFE alone.
-        let lfe = lfe
-            .filter(|_| {
+        let lfes: [Option<LfeView>; 2] = std::array::from_fn(|index| {
+            let lfe = lfe.filter(|_| {
                 frames_written > 0 && (self.dynamic_object_count == 0 || !objects.is_empty())
+            })?;
+            let element_id = *self.scene_signature.lfe_element_ids().get(index)?;
+            let (samples, active, gain, meter_gain) = lfe.input(index)?;
+            Some(LfeView {
+                element_id,
+                active,
+                gain,
+                energy: self.loudness[LFE_METER_SLOT + index]
+                    .measure(&samples[..frames_written.min(samples.len())], meter_gain),
             })
-            .and_then(|lfe| {
-                Some(LfeView {
-                    element_id: self.scene_signature.lfe_element_id()?,
-                    active: lfe.render.active,
-                    gain: lfe.render.gain,
-                    energy: self.loudness[LFE_METER_SLOT].measure(
-                        &lfe.render.samples[..frames_written.min(lfe.render.samples.len())],
-                        if lfe.render.active {
-                            lfe.render.gain
-                        } else {
-                            0.0
-                        },
-                    ),
-                })
-            });
-        self.mirror.write_with_lfe(
+        });
+        self.mirror.write_with_lfes(
             self.key,
             objects
                 .values()
@@ -233,7 +243,7 @@ impl SceneRenderSource {
                     jumped: jumped.get(slot).copied().unwrap_or(false),
                     energy: energy.get(slot).copied().unwrap_or_default(),
                 }),
-            lfe,
+            lfes.into_iter().flatten(),
             self.timeline_frame,
             self.sample_rate,
         );
@@ -341,29 +351,14 @@ fn copy_lfe_pcm(
     take: usize,
     destination: Option<&mut LfeQuantumAccumulator>,
 ) -> Result<(), String> {
-    let (Some(source), Some(destination)) = (cursor.block.lfe(), destination) else {
-        return Ok(());
-    };
-    if !destination.state_initialized {
-        let state = element_state_at(
+    if let Some(destination) = destination {
+        destination.copy(
             &cursor.block,
-            source.element_id(),
-            source.initial_state(),
             cursor.offset_frames,
-        );
-        (destination.render.active, destination.render.gain) = lfe_render_state(state);
-        destination.state_initialized = true;
+            destination_offset,
+            take,
+        )?;
     }
-    let source_start = usize::try_from(cursor.offset_frames)
-        .map_err(|_| "Scene LFE offset exceeds usize".to_owned())?;
-    let source_end = source_start
-        .checked_add(take)
-        .ok_or_else(|| "Scene LFE slice overflow".to_owned())?;
-    let destination_end = destination_offset
-        .checked_add(take)
-        .ok_or_else(|| "Spatial Audio LFE slice overflow".to_owned())?;
-    destination.render.samples[destination_offset..destination_end]
-        .copy_from_slice(&source.samples()[source_start..source_end]);
     Ok(())
 }
 
@@ -372,27 +367,7 @@ struct TrackedObject {
     tracking: crate::decoder::ContentHeadTracking,
 }
 
-struct LfeQuantumAccumulator {
-    render: LfeObjectRender,
-    state_initialized: bool,
-}
-
-impl LfeQuantumAccumulator {
-    fn new(frame_count: usize) -> Self {
-        Self {
-            render: LfeObjectRender {
-                active: false,
-                gain: 0.0,
-                samples: vec![0.0; frame_count],
-            },
-            state_initialized: false,
-        }
-    }
-
-    fn finish(self) -> LfeObjectRender {
-        self.render
-    }
-}
+type LfeQuantumAccumulator = super::lfe::Quantum;
 
 #[cfg(test)]
 mod tests {

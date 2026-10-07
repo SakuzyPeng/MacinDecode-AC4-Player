@@ -178,6 +178,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "apac-cac"
+version = "0.1.0"
+source = "git+https://github.com/SakuzyPeng/MacinDecode-APAC-Core.git?rev=4aefbd3eb4b3da64410b8582c3ec38eb76a1c37c#4aefbd3eb4b3da64410b8582c3ec38eb76a1c37c"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "apac-container"
+version = "0.1.0"
+source = "git+https://github.com/SakuzyPeng/MacinDecode-APAC-Core.git?rev=4aefbd3eb4b3da64410b8582c3ec38eb76a1c37c#4aefbd3eb4b3da64410b8582c3ec38eb76a1c37c"
+dependencies = [
+ "apac-core",
+ "sha2",
+]
+
+[[package]]
+name = "apac-core"
+version = "0.1.0"
+source = "git+https://github.com/SakuzyPeng/MacinDecode-APAC-Core.git?rev=4aefbd3eb4b3da64410b8582c3ec38eb76a1c37c#4aefbd3eb4b3da64410b8582c3ec38eb76a1c37c"
+dependencies = [
+ "apac-cac",
+ "libm",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "arboard"
 version = "3.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2007,6 +2037,8 @@ dependencies = [
 name = "macindecode-ac4-player"
 version = "0.1.2"
 dependencies = [
+ "apac-container",
+ "apac-core",
  "bytemuck",
  "ebur128",
  "eframe",

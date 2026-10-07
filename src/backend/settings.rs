@@ -179,7 +179,9 @@ impl OutputSettings {
     pub fn needs_rebuild(&self, other: &Self) -> bool {
         self.mode.resolved() != other.mode.resolved()
             || (self.mode.resolved() == SpatialBackendKind::SystemSpatial
-                && self.layout != other.layout)
+                && (self.layout != other.layout
+                    || (self.layout == SpeakerLayout::TwentyTwoTwo
+                        && self.split_lfe != other.split_lfe)))
             || self.native_device != other.native_device
             || self.stereo_device != other.stereo_device
     }

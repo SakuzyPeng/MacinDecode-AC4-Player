@@ -203,7 +203,7 @@ struct ObjectMeters {
     peaks: [[PeakHold; crate::scene_view::METER_SLOTS]; 2],
     /// Seconds of clip indication still owed to each slot.
     clip_held: [f32; crate::scene_view::METER_SLOTS],
-    lfe_element: Option<u64>,
+    lfe_elements: [Option<u64>; 2],
     /// The playback these levels belong to. A superseded one starts silent
     /// rather than releasing from the previous stream's last reading.
     key: Option<crate::decoder::PlaybackKey>,
@@ -332,9 +332,15 @@ impl ObjectMeters {
             .map_or(0.0, |last| now.duration_since(last).as_secs_f32());
         self.last_advanced = Some(now);
 
-        let lfe_element = frame.lfe().map(|lfe| lfe.element_id);
-        if self.lfe_element != lfe_element {
-            let slot = crate::scene_view::LFE_METER_SLOT;
+        let mut lfe_elements = [None; 2];
+        for (slot, lfe) in lfe_elements.iter_mut().zip(frame.lfes()) {
+            *slot = Some(lfe.element_id);
+        }
+        for (index, lfe_element) in lfe_elements.into_iter().enumerate() {
+            if self.lfe_elements[index] == lfe_element {
+                continue;
+            }
+            let slot = crate::scene_view::LFE_METER_SLOT + index;
             self.level[slot] = 0.0;
             self.momentary[slot] = 0.0;
             for timers in &mut self.silent_for {
@@ -344,7 +350,7 @@ impl ObjectMeters {
             for peaks in &mut self.peaks {
                 peaks[slot] = PeakHold::default();
             }
-            self.lfe_element = lfe_element;
+            self.lfe_elements[index] = lfe_element;
         }
 
         let window = window_frames(sample_rate);
@@ -904,7 +910,7 @@ impl PlayerApp {
             output,
             output_revision: 0,
             backend: SpatialBackendKind::Automatic,
-            status: StatusLine::idle("Add or drop AC-4 media files"),
+            status: StatusLine::idle("Add or drop AC-4 / APAC media files"),
             timeline_preview: 0.0,
             timeline_dragging: false,
             playback_restore_pending: false,
@@ -1426,7 +1432,7 @@ impl PlayerApp {
             output
                 .error()
                 .or_else(|| self.output.device_catalog_error())
-                .unwrap_or("Select a decoded AC-4 scene to activate")
+                .unwrap_or("Select a decoded scene to activate")
                 .to_owned()
         };
         let mut selected = preferred.clone();
@@ -1829,7 +1835,14 @@ impl PlayerApp {
                         }
                         ui.separator();
                         match page {
-                            OutputPage::Speakers => draw_speakers_page(ui, &mut settings),
+                            OutputPage::Speakers => draw_speakers_page(
+                                ui,
+                                &mut settings,
+                                self.decoder
+                                    .snapshot()
+                                    .metrics()
+                                    .map_or(0, DecodeMetrics::lfe_count),
+                            ),
                             OutputPage::Hrtf => self.draw_hrtf_page(ui, &mut settings, context),
                             OutputPage::Headphones => {
                                 self.draw_headphones_page(ui, &mut settings, context);
@@ -2176,7 +2189,10 @@ impl PlayerApp {
             return;
         }
         let readout = self.meter_readout;
-        let lfe = mirror_frame.and_then(crate::scene_view::SceneViewFrame::lfe);
+        let lfes: Vec<_> = mirror_frame
+            .into_iter()
+            .flat_map(crate::scene_view::SceneViewFrame::lfes)
+            .collect();
         egui::Panel::right("meter-bank")
             .exact_size(240.0)
             .resizable(false)
@@ -2230,7 +2246,7 @@ impl PlayerApp {
 
                 let objects =
                     mirror_frame.map_or(&[][..], crate::scene_view::SceneViewFrame::objects);
-                if objects.is_empty() && lfe.is_none() {
+                if objects.is_empty() && lfes.is_empty() {
                     ui.label(
                         RichText::new("Nothing playing")
                             .size(11.0)
@@ -2244,7 +2260,7 @@ impl PlayerApp {
                     .min_scrolled_height(0.0)
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        self.draw_meter_rows(ui, objects, lfe, readout);
+                        self.draw_meter_rows(ui, objects, &lfes, readout);
                         let hidden = mirror_frame
                             .map_or(0, crate::scene_view::SceneViewFrame::hidden_objects);
                         if hidden > 0 {
@@ -2260,11 +2276,15 @@ impl PlayerApp {
     }
 
     /// One row per object: number, track, readout.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one row draws the same reading for objects and up to two LFEs"
+    )]
     fn draw_meter_rows(
         &self,
         ui: &mut egui::Ui,
         objects: &[crate::scene_view::ObjectView],
-        lfe: Option<crate::scene_view::LfeView>,
+        lfes: &[crate::scene_view::LfeView],
         readout: MeterReadout,
     ) {
         /// Row height in points, before the theme's inter-row spacing.
@@ -2285,9 +2305,9 @@ impl PlayerApp {
         let cell = measure("0".to_owned());
         let readout_width = measure("0".repeat(scene3d::params::NAMEPLATE_CELLS));
 
-        let lfe_row = lfe.map(|lfe| {
+        let lfe_rows = lfes.iter().enumerate().map(|(index, lfe)| {
             (
-                crate::scene_view::LFE_METER_SLOT,
+                crate::scene_view::LFE_METER_SLOT + index,
                 0,
                 crate::scene_view::ObjectView {
                     element_id: lfe.element_id,
@@ -2297,14 +2317,14 @@ impl PlayerApp {
                 },
             )
         });
-        let rows = lfe_row.into_iter().chain(
+        let rows = lfe_rows.chain(
             objects
                 .iter()
                 .enumerate()
                 .map(|(slot, object)| (slot, object_display_number(slot), *object)),
         );
         for (slot, number, object) in rows {
-            let is_lfe = slot == crate::scene_view::LFE_METER_SLOT;
+            let is_lfe = slot >= crate::scene_view::LFE_METER_SLOT;
             let (level, peak, clipped) = self.object_meters.bank_row(slot, readout);
             let (rect, response) = ui.allocate_exact_size(
                 egui::vec2(ui.available_width(), ROW_HEIGHT),
@@ -2319,7 +2339,11 @@ impl PlayerApp {
             painter.text(
                 egui::pos2(rect.left() + NUMBER_CELL, rect.center().y),
                 Align2::RIGHT_CENTER,
-                number.to_string(),
+                if is_lfe && lfes.len() > 1 {
+                    format!("L{}", slot - crate::scene_view::LFE_METER_SLOT + 1)
+                } else {
+                    number.to_string()
+                },
                 font.clone(),
                 // An inactive element has metadata the renderer would not
                 // spatialize; its level is still real, its identity is not.
@@ -2372,7 +2396,10 @@ impl PlayerApp {
             }
 
             if is_lfe {
-                response.on_hover_text("LFE · channel 0");
+                response.on_hover_text(format!(
+                    "LFE {} · independent low-frequency channel",
+                    slot - crate::scene_view::LFE_METER_SLOT + 1
+                ));
             } else {
                 response.on_hover_text(meter_row_tooltip(slot, &object, peak, clipped, readout));
             }
@@ -2715,6 +2742,7 @@ impl PlayerApp {
             for (slot, object) in mirrored.objects().iter().enumerate() {
                 objects[slot] = scene3d::scene::SceneObject {
                     display_number: object_display_number(slot),
+                    lfe_slot: None,
                     position: object.position,
                     active: object.active,
                     gain: object.gain,
@@ -2737,14 +2765,20 @@ impl PlayerApp {
             }
         }
         let mut nameplate_count = object_count;
-        if let Some(lfe) = mirror_frame.and_then(crate::scene_view::SceneViewFrame::lfe) {
+        let lfe_count = mirror_frame.map_or(0, |frame| frame.lfes().count());
+        for (index, lfe) in mirror_frame
+            .into_iter()
+            .flat_map(crate::scene_view::SceneViewFrame::lfes)
+            .enumerate()
+        {
             objects[nameplate_count] = scene3d::scene::SceneObject {
                 display_number: 0,
+                lfe_slot: Some((index, lfe_count)),
                 active: lfe.active,
                 gain: lfe.gain,
-                loudness: levels[crate::scene_view::LFE_METER_SLOT],
+                loudness: levels[crate::scene_view::LFE_METER_SLOT + index],
                 presence: self.object_meters.drawn_presence(
-                    crate::scene_view::LFE_METER_SLOT,
+                    crate::scene_view::LFE_METER_SLOT + index,
                     self.fade_silent_objects,
                     self.meter_readout,
                 ),
@@ -2784,6 +2818,7 @@ impl PlayerApp {
                         // before the render callback produces a first quantum,
                         // and the slot should be drawn correctly from then on.
                         has_lfe: decoder.metrics().is_some_and(DecodeMetrics::has_lfe),
+                        lfe_count: decoder.metrics().map_or(0, DecodeMetrics::lfe_count),
                         figure: self.figure,
                         skin: self.skins.active.as_ref(),
                     },
@@ -2840,8 +2875,8 @@ impl PlayerApp {
         // at least the ordering the objects themselves have.
         let direction = self.camera.direction();
         let world_position = |object: &scene3d::scene::SceneObject<'_>| {
-            if object.display_number == 0 {
-                scene3d::scene::lfe_world_position()
+            if let Some((index, count)) = object.lfe_slot {
+                scene3d::scene::lfe_destination_position(index, count)
             } else {
                 scene3d::scene::object_world_position(object.position)
             }
@@ -2862,7 +2897,7 @@ impl PlayerApp {
                 continue;
             }
             let [x, y, z] = world_position(object);
-            let height = if object.display_number == 0 {
+            let height = if object.lfe_slot.is_some() {
                 scene3d::params::LFE_SLAB_HEIGHT
             } else {
                 scene3d::params::OBJECT_EDGE
@@ -3119,7 +3154,7 @@ impl PlayerApp {
         let remains_open = context.show_viewport_immediate(
             egui::ViewportId::from_hash_of("bitstream-details"),
             egui::ViewportBuilder::default()
-                .with_title("MacinDecode AC-4 Bitstream Details")
+                .with_title("MacinDecode Bitstream Details")
                 .with_icon(crate::app_icon::load())
                 .with_inner_size([760.0, 680.0])
                 .with_min_inner_size([560.0, 420.0]),
@@ -4051,7 +4086,7 @@ impl OutputPage {
 }
 
 /// The speakers page: the bed the system spatializer is handed.
-fn draw_speakers_page(ui: &mut egui::Ui, settings: &mut OutputSettings) {
+fn draw_speakers_page(ui: &mut egui::Ui, settings: &mut OutputSettings, lfe_count: usize) {
     ui.horizontal(|ui| {
         ui.label("Speaker layout");
         egui::ComboBox::from_id_salt("speaker-layout")
@@ -4076,6 +4111,9 @@ fn draw_speakers_page(ui: &mut egui::Ui, settings: &mut OutputSettings) {
             ui.selectable_value(&mut settings.split_lfe, true, "Equal-power copy");
             ui.selectable_value(&mut settings.split_lfe, false, "Direct");
         });
+        if lfe_count > 1 {
+            ui.label("Direct keeps both LFEs separate. Copy normalizes the sum only when both have signal.");
+        }
     }
 }
 
@@ -4576,14 +4614,14 @@ fn decoder_status_line(decoder: &DecoderSnapshot) -> StatusLine {
         .path()
         .and_then(Path::file_name)
         .and_then(|name| name.to_str())
-        .unwrap_or("AC-4 source");
+        .unwrap_or("Audio source");
     match decoder.phase() {
         DecodePhase::Unavailable => StatusLine::idle(
             decoder
                 .detail()
                 .unwrap_or("The Windows decode worker is unavailable"),
         ),
-        DecodePhase::Idle => StatusLine::idle("Add or select an AC-4 media file"),
+        DecodePhase::Idle => StatusLine::idle("Add or select an AC-4 / APAC media file"),
         DecodePhase::Opening => StatusLine::idle(format!("Opening {source} with MacinDecode Core")),
         DecodePhase::Seeking => {
             let target = decoder.metrics().map_or(0, DecodeMetrics::target_frame);
@@ -4602,7 +4640,7 @@ fn decoder_status_line(decoder: &DecoderSnapshot) -> StatusLine {
             StatusLine::ready(format!(
                 "MacinDecode Core ready: {} objects + {} LFE, {} ms buffered{}",
                 metrics.object_count(),
-                u8::from(metrics.has_lfe()),
+                metrics.lfe_count(),
                 metrics.buffered_milliseconds(),
                 seek_index_suffix(decoder)
             ))
@@ -4851,10 +4889,7 @@ fn decode_metric_values(decoder: &DecoderSnapshot) -> [(&'static str, String, St
         ),
         (
             "LFE",
-            metrics.map_or_else(
-                || "—".to_owned(),
-                |value| if value.has_lfe() { "1" } else { "0" }.to_owned(),
-            ),
+            metrics.map_or_else(|| "—".to_owned(), |value| value.lfe_count().to_string()),
             "Channel 0".to_owned(),
         ),
         (
@@ -5009,7 +5044,7 @@ fn draw_diagnostics_content(
                                     format!(
                                         "{} objects + {} LFE",
                                         value.object_count(),
-                                        u8::from(value.has_lfe())
+                                        value.lfe_count()
                                     )
                                 },
                             ),
@@ -5130,7 +5165,7 @@ fn draw_drop_overlay(context: &egui::Context) {
     painter.text(
         rect.center(),
         egui::Align2::CENTER_CENTER,
-        "Drop AC-4 media files",
+        "Drop AC-4 / APAC media files",
         egui::FontId::proportional(22.0),
         theme::TEXT,
     );
@@ -5757,7 +5792,7 @@ Filter 10: ON WAT Fc 500 Hz Gain 1 dB Q 1
         assert_eq!(object_display_number(0), 1);
         assert_eq!(
             object_display_number(crate::scene_view::MAX_VIEW_OBJECTS - 1),
-            20
+            22
         );
     }
 

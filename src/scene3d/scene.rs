@@ -30,6 +30,8 @@ pub struct SceneObject<'a> {
     /// One-based visible scene number. Core's stable element ID remains in the
     /// audio/view pipeline for identity tracking but is deliberately not shown.
     pub display_number: u64,
+    /// A nameplate-only LFE cabinet: destination index and cabinet count.
+    pub lfe_slot: Option<(usize, usize)>,
     pub position: [f32; 3],
     /// Whether the renderer is spatializing this element. An inactive one is
     /// not drawn at all — see [`build`].
@@ -70,6 +72,7 @@ pub struct SceneInput<'a> {
     /// Whether the presentation carries an LFE element. The slot is drawn either
     /// way; only its occupancy changes.
     pub has_lfe: bool,
+    pub lfe_count: usize,
     pub figure: Figure,
     pub skin: Option<&'a super::skin::Skin>,
 }
@@ -97,7 +100,16 @@ pub fn build(
     } else {
         add_figure(mesh, input.figure, &view);
     }
-    add_lfe_slot(mesh, input.has_lfe, input.show_element_numbers, &view);
+    for index in 0..input.lfe_count.max(1) {
+        add_lfe_slot(
+            mesh,
+            input.has_lfe,
+            input.show_element_numbers,
+            index,
+            input.lfe_count,
+            &view,
+        );
+    }
     // An inactive element is one whose metadata is absent or incomplete, so the
     // only coordinate available for it is the origin — the listener's own head.
     // Drawing it there would assert a position it does not have, and assert it
@@ -156,12 +168,27 @@ pub fn lfe_world_position() -> [f32; 3] {
     ]
 }
 
-fn add_lfe_slot(mesh: &mut MeshBuilder, present: bool, show_number: bool, view: &ViewContext) {
+pub fn lfe_destination_position(index: usize, count: usize) -> [f32; 3] {
+    let mut position = lfe_world_position();
+    if count > 1 {
+        position[0] = if index == 0 { -0.4 } else { 0.4 };
+    }
+    position
+}
+
+fn add_lfe_slot(
+    mesh: &mut MeshBuilder,
+    present: bool,
+    show_number: bool,
+    index: usize,
+    count: usize,
+    view: &ViewContext,
+) {
     let width = params::LFE_SLAB_WIDTH;
     let height = params::LFE_SLAB_HEIGHT;
     let depth = height * 0.65;
     let object_colour = Rgb::from_color32(theme::ACCENT);
-    let centre = lfe_world_position();
+    let centre = lfe_destination_position(index, count);
 
     let size = [width, height, depth];
     if present {
@@ -705,6 +732,7 @@ mod tests {
     fn sounding(position: [f32; 3]) -> SceneObject<'static> {
         SceneObject {
             display_number: 1,
+            lfe_slot: None,
             position,
             active: true,
             gain: 1.0,

@@ -291,6 +291,9 @@ fn copy_text(pointer: *const c_char) -> String {
 pub struct Session {
     inner: Arc<Shared>,
 }
+
+#[cfg(all(test, native_macinrender))]
+mod lfe_tests;
 #[derive(Clone)]
 pub struct Control {
     inner: Arc<Shared>,
@@ -375,6 +378,20 @@ impl Session {
         objects: &[u64],
         lfe: Option<u64>,
     ) -> Result<(), String> {
+        self.configure_lfes(epoch, generation, objects, lfe.as_slice())
+    }
+
+    /// LFE IDs are in semantic destination order (LFE1, LFE2).
+    pub fn configure_lfes(
+        &mut self,
+        epoch: u64,
+        generation: u64,
+        objects: &[u64],
+        lfes: &[u64],
+    ) -> Result<(), String> {
+        if lfes.len() > 2 {
+            return Err("The renderer supports at most two LFE destinations".into());
+        }
         let mut elements: Vec<_> = objects
             .iter()
             .map(|&id| raw::Element {
@@ -383,12 +400,12 @@ impl Session {
                 ..Default::default()
             })
             .collect();
-        if let Some(id) = lfe {
+        for (&id, label) in lfes.iter().zip([c"LFE1", c"LFE2"]) {
             elements.push(raw::Element {
                 size: size::<raw::Element>(),
                 id,
                 role: 2,
-                label: c"LFE1".as_ptr(),
+                label: label.as_ptr(),
                 ..Default::default()
             });
         }

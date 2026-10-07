@@ -50,7 +50,7 @@ impl SceneContinuity {
                 &mut continuations,
             );
         }
-        if let Some(lfe) = &mut block.lfe {
+        for lfe in &mut block.lfes {
             self.resume(lfe.element_id, &mut lfe.initial_state, &mut continuations);
         }
         // Existing offset-zero controls follow the inherited ramps, so an
@@ -65,7 +65,7 @@ impl SceneContinuity {
             .map(|object| (object.element_id, object.initial_state))
             .chain(
                 block
-                    .lfe
+                    .lfes
                     .iter()
                     .map(|lfe| (lfe.element_id, lfe.initial_state)),
             )
@@ -276,8 +276,9 @@ pub(crate) fn remaining_ramps(
         .and_then(SceneObjectPcm::initial_state)
         .or_else(|| {
             block
-                .lfe()
-                .filter(|lfe| lfe.element_id() == id)
+                .lfes()
+                .iter()
+                .find(|lfe| lfe.element_id() == id)
                 .and_then(SceneLfePcm::initial_state)
         });
     let timeline = timeline_at(block.metadata_updates(), id, initial, offset);

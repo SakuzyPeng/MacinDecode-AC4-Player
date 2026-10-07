@@ -36,6 +36,8 @@ pub const MAX_BUFFER_SECONDS: u64 = 2;
 pub enum DecodeContainer {
     RawAc4,
     IsoBmff,
+    ApacCaf,
+    ApacMp4,
     /// The built-in demo: a Scene synthesised here rather than decoded.
     ///
     /// It enters the pipeline downstream of Core, so it exercises everything
@@ -50,6 +52,8 @@ impl DecodeContainer {
         match self {
             Self::RawAc4 => "raw AC-4",
             Self::IsoBmff => "ISO BMFF",
+            Self::ApacCaf => "APAC / CAF",
+            Self::ApacMp4 => "APAC / MP4",
             Self::Generated => "built-in demo",
         }
     }
@@ -102,7 +106,7 @@ pub struct SceneSignature {
     presentation_index: u32,
     presentation_id: Option<u32>,
     object_element_ids: Vec<u64>,
-    lfe_element_id: Option<u64>,
+    lfe_element_ids: Vec<u64>,
 }
 
 impl SceneSignature {
@@ -119,7 +123,7 @@ impl SceneSignature {
             presentation_index,
             presentation_id,
             object_element_ids,
-            lfe_element_id,
+            lfe_element_ids: lfe_element_id.into_iter().collect(),
         }
     }
 
@@ -130,13 +134,15 @@ impl SceneSignature {
             .iter()
             .map(SceneObjectPcm::element_id)
             .collect::<Vec<_>>();
-        Self::new(
+        let mut signature = Self::new(
             block.configuration_generation(),
             block.presentation_index(),
             block.presentation_id(),
             object_element_ids,
-            block.lfe().map(SceneLfePcm::element_id),
-        )
+            None,
+        );
+        signature.lfe_element_ids = block.lfes().iter().map(SceneLfePcm::element_id).collect();
+        signature
     }
 
     pub const fn configuration_generation(&self) -> u32 {
@@ -155,8 +161,12 @@ impl SceneSignature {
         &self.object_element_ids
     }
 
-    pub const fn lfe_element_id(&self) -> Option<u64> {
-        self.lfe_element_id
+    pub fn lfe_element_id(&self) -> Option<u64> {
+        self.lfe_element_ids.first().copied()
+    }
+
+    pub fn lfe_element_ids(&self) -> &[u64] {
+        &self.lfe_element_ids
     }
 }
 
@@ -206,6 +216,14 @@ impl DecodeMetrics {
 
     pub const fn has_lfe(&self) -> bool {
         self.has_lfe
+    }
+
+    pub fn lfe_count(&self) -> usize {
+        self.scene_signature
+            .as_ref()
+            .map_or(usize::from(self.has_lfe), |signature| {
+                signature.lfe_element_ids().len()
+            })
     }
 
     pub const fn state_complete(&self) -> bool {
@@ -585,7 +603,7 @@ pub struct DecodedSceneBlock {
     presentation_id: Option<u32>,
     state_complete: bool,
     objects: Vec<SceneObjectPcm>,
-    lfe: Option<SceneLfePcm>,
+    lfes: Vec<SceneLfePcm>,
     metadata_updates: Vec<SceneMetadataUpdate>,
 }
 
@@ -630,7 +648,7 @@ impl DecodedSceneBlock {
             presentation_id,
             state_complete,
             objects,
-            lfe,
+            lfes: lfe.into_iter().collect(),
             metadata_updates,
         }
     }
@@ -667,8 +685,18 @@ impl DecodedSceneBlock {
         &self.objects
     }
 
-    pub const fn lfe(&self) -> Option<&SceneLfePcm> {
-        self.lfe.as_ref()
+    pub fn lfe(&self) -> Option<&SceneLfePcm> {
+        self.lfes.first()
+    }
+
+    pub fn lfes(&self) -> &[SceneLfePcm] {
+        &self.lfes
+    }
+
+    #[cfg(any(feature = "decode", test))]
+    pub(super) fn with_lfes(mut self, lfes: Vec<SceneLfePcm>) -> Self {
+        self.lfes = lfes;
+        self
     }
 
     pub fn metadata_updates(&self) -> &[SceneMetadataUpdate] {
@@ -689,7 +717,7 @@ impl DecodedSceneBlock {
             for object in &mut self.objects {
                 object.samples.truncate(length);
             }
-            if let Some(lfe) = &mut self.lfe {
+            for lfe in &mut self.lfes {
                 lfe.samples.truncate(length);
             }
             self.metadata_updates

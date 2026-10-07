@@ -2,7 +2,7 @@ use std::ffi::OsStr;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-const SUPPORTED_EXTENSIONS: [&str; 3] = ["m4a", "mp4", "ac4"];
+pub const SUPPORTED_EXTENSIONS: [&str; 4] = ["m4a", "mp4", "ac4", "caf"];
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SelectedSource {
@@ -44,7 +44,9 @@ impl fmt::Display for SourceSelectionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::MissingFileName => formatter.write_str("The selected path has no file name"),
-            Self::UnsupportedExtension => formatter.write_str("Select an .m4a, .mp4, or .ac4 file"),
+            Self::UnsupportedExtension => {
+                formatter.write_str("Select an .m4a, .mp4, .ac4, or .caf file")
+            }
         }
     }
 }
@@ -65,7 +67,7 @@ mod tests {
 
     #[test]
     fn accepts_supported_container_extensions_without_opening_the_file() {
-        for path in ["music.m4a", "movie.MP4", "stream.Ac4"] {
+        for path in ["music.m4a", "movie.MP4", "stream.Ac4", "spatial.CAF"] {
             assert!(SelectedSource::from_path(PathBuf::from(path)).is_ok());
         }
     }

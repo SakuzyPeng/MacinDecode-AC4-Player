@@ -113,6 +113,29 @@ fn verify_archive(path: &Path) {
     }
 }
 
+/// Present only static archives to linkers which otherwise prefer a stale
+/// sibling dylib in a shared `CMake` cache. Symlinks do not duplicate the cache.
+#[cfg(unix)]
+fn archive_search_path(build: &Path, path: &Path) -> PathBuf {
+    let directory = build.join("static-link");
+    fs::create_dir_all(&directory).unwrap();
+    let link = directory.join(path.file_name().unwrap());
+    let source = path.canonicalize().unwrap();
+    match fs::read_link(&link) {
+        Ok(previous) if previous == source => return directory,
+        Ok(_) => fs::remove_file(&link).unwrap(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => panic!("Cannot stage static archive {}: {error}", link.display()),
+    }
+    std::os::unix::fs::symlink(source, link).unwrap();
+    directory
+}
+
+#[cfg(not(unix))]
+fn archive_search_path(_build: &Path, path: &Path) -> PathBuf {
+    path.parent().unwrap().to_path_buf()
+}
+
 pub fn emit(build: &Path, windows: bool) {
     let reply = build.join(".cmake/api/v1/reply");
     let index = fs::read_dir(&reply)
@@ -160,7 +183,7 @@ pub fn emit(build: &Path, windows: bool) {
                 }
                 println!(
                     "cargo:rustc-link-search=native={}",
-                    path.parent().unwrap().display()
+                    archive_search_path(build, &path).display()
                 );
                 let stem = path.file_stem().unwrap().to_str().unwrap();
                 let name = if windows {

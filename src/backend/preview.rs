@@ -252,7 +252,7 @@ impl ScenePreview {
             let (_, _, gain) = listener_render_state(state);
             slot_energy.absorb(filter.measure(span, gain));
         }
-        if let Some(lfe) = cursor.block.lfe() {
+        for (index, lfe) in cursor.block.lfes().iter().enumerate() {
             let state = element_state_at(
                 &cursor.block,
                 lfe.element_id(),
@@ -266,7 +266,7 @@ impl ScenePreview {
             let to = usize::try_from(span_end)
                 .unwrap_or(usize::MAX)
                 .min(lfe.samples().len());
-            energy[LFE_METER_SLOT].absorb(loudness[LFE_METER_SLOT].measure(
+            energy[LFE_METER_SLOT + index].absorb(loudness[LFE_METER_SLOT + index].measure(
                 &lfe.samples()[from..to],
                 if active && cursor.block.state_complete() {
                     gain
@@ -362,7 +362,7 @@ impl ScenePreview {
                 })
             });
 
-        let lfe = cursor.block.lfe().map(|lfe| {
+        let lfes = cursor.block.lfes().iter().enumerate().map(|(index, lfe)| {
             let state =
                 element_state_at(&cursor.block, lfe.element_id(), lfe.initial_state(), offset);
             let (active, gain) = lfe_render_state(state);
@@ -370,11 +370,11 @@ impl ScenePreview {
                 element_id: lfe.element_id(),
                 active: active && cursor.block.state_complete(),
                 gain,
-                energy: energy[LFE_METER_SLOT],
+                energy: energy[LFE_METER_SLOT + index],
             }
         });
         self.mirror
-            .write_with_lfe(self.key, views, lfe, self.timeline_frame, self.sample_rate);
+            .write_with_lfes(self.key, views, lfes, self.timeline_frame, self.sample_rate);
     }
 }
 
@@ -854,8 +854,8 @@ mod tests {
         preview.advance(0.01);
         let frame = mirror.read(key).expect("published scene");
         assert_eq!(frame.objects().len(), MAX_VIEW_OBJECTS);
-        assert_eq!(frame.hidden_objects(), 3);
+        assert_eq!(frame.hidden_objects(), 23 - MAX_VIEW_OBJECTS);
         assert_eq!(frame.objects()[0].element_id, 1, "slots stay sorted by ID");
-        assert_eq!(frame.objects()[MAX_VIEW_OBJECTS - 1].element_id, 20);
+        assert_eq!(frame.objects()[MAX_VIEW_OBJECTS - 1].element_id, 22);
     }
 }

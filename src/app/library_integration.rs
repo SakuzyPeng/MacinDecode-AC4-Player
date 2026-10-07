@@ -242,8 +242,8 @@ impl PlayerApp {
             return;
         }
         let mut dialog = rfd::AsyncFileDialog::new()
-            .set_title("Add AC-4 media to playlist")
-            .add_filter("AC-4 media", &["m4a", "mp4", "ac4"]);
+            .set_title("Add AC-4 / APAC media to playlist")
+            .add_filter("AC-4 / APAC media", &crate::model::SUPPORTED_EXTENSIONS);
         if !self.preferences.last_directory.as_os_str().is_empty() {
             dialog = dialog.set_directory(&self.preferences.last_directory);
         }
@@ -296,8 +296,11 @@ impl PlayerApp {
                         target: PickTarget::Relocate(id),
                         future: Box::pin(async move {
                             rfd::AsyncFileDialog::new()
-                                .set_title("Locate AC-4 media")
-                                .add_filter("AC-4 media", &["m4a", "mp4", "ac4"])
+                                .set_title("Locate AC-4 / APAC media")
+                                .add_filter(
+                                    "AC-4 / APAC media",
+                                    &crate::model::SUPPORTED_EXTENSIONS,
+                                )
                                 .pick_file()
                                 .await
                                 .into_iter()

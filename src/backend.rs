@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 #[cfg(all(target_os = "macos", macinrender_output))]
 mod atmos;
 mod controller;
+#[cfg(any(feature = "decode", test))]
+mod lfe;
 #[cfg(macinrender_output)]
 mod macinrender;
 mod settings;

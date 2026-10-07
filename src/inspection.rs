@@ -8,7 +8,7 @@ use std::sync::{
 };
 use std::thread;
 
-use crate::media::MediaSource;
+use crate::media::{MediaCodec, MediaSource};
 use macindecode_ac4_inspect::{
     FieldStatus, InspectReport, ReportedField, inspect_mp4_reader, inspect_raw_reader,
 };
@@ -16,14 +16,23 @@ use serde_json::Value;
 
 #[derive(Debug)]
 pub struct InspectionSnapshot {
-    pub report: InspectReport,
+    pub report: InspectionReport,
     pub full_text: String,
+}
+
+#[derive(Debug)]
+pub enum InspectionReport {
+    Ac4(Box<InspectReport>),
+    Apac(crate::apac::Report),
 }
 
 impl InspectionSnapshot {
     fn new(report: InspectReport) -> Self {
         let full_text = report.render_text();
-        Self { report, full_text }
+        Self {
+            report: InspectionReport::Ac4(Box::new(report)),
+            full_text,
+        }
     }
 }
 
@@ -257,6 +266,18 @@ fn inspection_worker(
         }
         let path = request.source.path().to_path_buf();
         let result = request.source.open().and_then(|source| {
+            if source.codec()? == MediaCodec::Apac {
+                let cancel = Arc::clone(&request.cancel);
+                let report = crate::apac::Report::read(crate::apac::Source::new(
+                    &source,
+                    Arc::new(move || cancel.load(Ordering::Acquire)),
+                ))?;
+                let full_text = report.render_text();
+                return Ok(InspectionSnapshot {
+                    report: InspectionReport::Apac(report),
+                    full_text,
+                });
+            }
             let mut reader = CancellableReader {
                 reader: source.reader(),
                 cancel: Arc::clone(&request.cancel),

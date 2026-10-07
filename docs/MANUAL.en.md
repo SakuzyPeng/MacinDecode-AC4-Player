@@ -128,7 +128,7 @@ Below that crossover a footprint is **invisible** in `ORTHO` + `TOP`. Perspectiv
 by parallax — by more the further the object sits from the view axis — and the footprints come back.
 So when something is missing from a straight-down view, try the projection toggle first.
 
-**At most 20 objects are drawn at once.** Past that, the bottom left says how many were left out —
+**At most 22 objects are drawn at once.** Past that, the bottom left says how many were left out —
 left out of the picture, not out of the audio.
 
 **Reference frames:** with element numbers enabled, **black numbers identify scene-relative objects**
@@ -256,9 +256,9 @@ it is rather than restarting its hold.
 The only one of the four that is off by default, because it is the only one that takes width from
 the scene. It opens a strip to the right of the 3D view with one row per object.
 
-When LFE is present, **row 0** appears first with level, metadata gain, peak hold and clipping.
+When LFE is present, **row 0** appears first (dual-LFE sources use separate **L1** and **L2** rows) with level, metadata gain, peak hold and clipping.
 It follows the selected unit just like every other row. All bars and readout columns stay aligned,
-and LFE does not consume any of the 20 dynamic-object slots.
+and LFE does not consume any of the 22 object slots.
 
 ![One meter bank row's four marks: the bar is the measured level, a tick is the gain the metadata asked for on the same scale, a line is the peak marker, and a red segment at full scale means a sample clipped.](../assets/readme/meter-row.svg)
 
@@ -730,3 +730,11 @@ than how to use it:
 [playlists and persistence](PLAYLISTS.md) ·
 [data directory and SOFA](STORAGE.md) ·
 [packaging and CI](PACKAGING.md)
+
+## APAC multichannel playback
+
+Add or drop an APAC CAF, M4A or MP4 file. The player identifies the codec from its contents and uses MacinDecode-APAC-Core at commit `4aefbd3` with CAC enabled. Supported discrete layouts are mono, stereo, 5.1, 7.1, 7.1.4, 9.1.6 and 22.2. HOA and unrecognized layouts report an explicit error. DRC, loudness and scene/renderer metadata are not applied. Container restrictions follow the Core: CAF and nonfragmented single-audio-track MP4/M4A.
+
+For 9.1.6 choose **System spatial audio → 9.1.6**; for 22.2 choose **System spatial audio → 22.2**. The latter preserves two input LFE PCM planes and, with Direct selected, routes them to separate macOS output slots. Core Audio's CICP_13 calls these LFE2/LFE3; the renderer calls them LFE1/LFE2. Equal-power copy keeps unity gain when only one input has signal; when both have signal it first forms `(LFE1 + LFE2) / sqrt(2)`, then sends that bus to both outputs at `1/sqrt(2)` each. Activity is checked per audio block after gain and mute. The scene and meter bank show 22 main channels and two independent LFE meters. Smaller output layouts and binaural output render into their own output format. Windows object passthrough folds into its one LFE destination using the same active-input rule. The 22 main channels still need enough dynamic slots; system 22.2 output can use the fixed speaker bed instead. Windows system 22.2 output retains the native backend's documented final LFE fold-down.
+
+Opening reads metadata and starts playback without waiting for the background checkpoint index. Priming and remainder are trimmed by the Core. Seeking, replay, pause and playlist controls use the existing transport; seeks restore checkpoints and return PCM at the requested valid-audio frame. Source changes cancel old work.

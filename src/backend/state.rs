@@ -61,7 +61,12 @@ pub(super) fn validate_block(
     if actual_object_ids != expected_signature.object_element_ids() {
         return Err("Scene dynamic-object element IDs changed during playback".to_owned());
     }
-    if block.lfe().map(SceneLfePcm::element_id) != expected_signature.lfe_element_id() {
+    if !block
+        .lfes()
+        .iter()
+        .map(SceneLfePcm::element_id)
+        .eq(expected_signature.lfe_element_ids().iter().copied())
+    {
         return Err("Scene LFE element ID changed during playback".to_owned());
     }
     for object in block.objects() {
@@ -72,8 +77,10 @@ pub(super) fn validate_block(
             ));
         }
     }
-    if let Some(component) = block.lfe()
-        && component.samples().len() != expected
+    if block
+        .lfes()
+        .iter()
+        .any(|component| component.samples().len() != expected)
     {
         return Err("Scene LFE PCM length does not match its block".to_owned());
     }

@@ -1,6 +1,6 @@
 # MacinRender 播放集成
 
-Player 将 AC-4 Core 的 Scene 转换为 renderer-native Scene，经 MacinRender C ABI v1.42
+Player 将 AC-4 Core 的 Scene 或 APAC 离散多声道 转换为 renderer-native Scene，经 MacinRender C ABI v1.42
 进行空间渲染及设备输出。Core 类型和平台指针均不进入 GUI；FFI 封装集中在独立 crate。
 
 ## 播放策略
@@ -8,6 +8,10 @@ Player 将 AC-4 Core 的 Scene 转换为 renderer-native Scene，经 MacinRender
 - 自动模式：Windows 使用原始动态对象直通，macOS 使用系统空间音频。
 - 系统空间音频：SAF VBAP、Apple 几何；开放 7.1.4、9.1.6、22.2，默认 7.1.4。
   22.2 默认将单路 LFE 以每路 `1/sqrt(2)` 复制到双 LFE，也可选择 direct。
+  APAC 22.2 的两个输入 LFE 分别配置为 LFE1/LFE2。Direct 在 macOS CICP_13 中保留两个独立输出；等功率复制按实际有信号的输入数归一化后送入双 LFE。
+  只有一路有信号时保留电平；两路都有信号时按 `(LFE1 + LFE2) / sqrt(2)` 合成，复制到两路时各再乘 `1/sqrt(2)`。
+  检测在增益/静音之后按音频块执行（阈值 `1e-12`），不在逐采样过零点改变增益。Windows 对象直通使用相同合成规则输出一路 LFE。
+  更换 LFE 路由会准备新的输出并沿用当前播放位置，避免已排队 PCM 跨越两种归一化策略。
 - 软件双耳：SAF HRTF，默认内置 KEMAR，可选择用户 SOFA。
 - 系统模式跟随系统默认输出。Windows 的固定床超出静态槽位的位置采用所选 Apple 几何；
   静态槽位的最终角度由 Windows 的空间化器决定。

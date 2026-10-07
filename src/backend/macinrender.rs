@@ -234,6 +234,7 @@ impl Runtime {
             || self.format.device_id != format.device_id
             || self.format.renderer.binaural != format.renderer.binaural
             || self.format.renderer.layout != format.renderer.layout
+            || self.format.renderer.split_lfe != format.renderer.split_lfe
             || self.join.as_ref().is_none_or(JoinHandle::is_finished)
         {
             return false;
@@ -301,6 +302,19 @@ impl Runtime {
         self.shared.volume.store(gain.to_bits(), Ordering::Relaxed);
     }
     pub fn switch(&self, settings: native::RendererSettings) {
+        if !self.format.renderer.binaural
+            && self.format.renderer.layout == "9+10+3"
+            && settings.split_lfe != self.format.renderer.split_lfe
+        {
+            *self
+                .shared
+                .switch_result
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Err(
+                "Changing LFE routing requires preparing a new output".into(),
+            ));
+            return;
+        }
         *self
             .shared
             .switch
@@ -379,7 +393,7 @@ struct MetadataFrame {
     duration: u32,
     complete: bool,
     objects: Vec<(u64, Option<SpatialObjectState>)>,
-    lfe: Option<(u64, Option<SpatialObjectState>)>,
+    lfes: Vec<(u64, Option<SpatialObjectState>)>,
     updates: Vec<SceneMetadataUpdate>,
     /// Object-major; a final channel of K-weighted bins follows for the LFE.
     energy: Vec<LoudnessBin>,
@@ -404,7 +418,7 @@ impl MetadataFrame {
             .unwrap_or(usize::MAX)
             .max(1);
         let head = usize::try_from(offset).unwrap_or(usize::MAX);
-        let channels = objects.len() + usize::from(block.lfe().is_some());
+        let channels = objects.len() + block.lfes().len();
         let mut energy = vec![LoudnessBin::default(); channels * bins];
         for (slot, (element_id, _)) in objects.iter().enumerate().take(MAX_VIEW_OBJECTS) {
             let (Some(filter), Some(object)) = (
@@ -445,13 +459,14 @@ impl MetadataFrame {
             }
         }
 
-        if block.lfe().is_some() {
+        for (index, lfe) in block.lfes().iter().enumerate() {
             Self::measure_lfe_bins(
                 block,
+                lfe,
                 head,
                 span,
-                &mut energy[objects.len() * bins..],
-                &mut loudness[LFE_METER_SLOT],
+                &mut energy[(objects.len() + index) * bins..(objects.len() + index + 1) * bins],
+                &mut loudness[LFE_METER_SLOT + index],
             );
         }
         Self {
@@ -459,9 +474,11 @@ impl MetadataFrame {
             duration: block.duration_frames(),
             complete: block.state_complete(),
             objects,
-            lfe: block
-                .lfe()
-                .map(|lfe| (lfe.element_id(), lfe.initial_state())),
+            lfes: block
+                .lfes()
+                .iter()
+                .map(|lfe| (lfe.element_id(), lfe.initial_state()))
+                .collect(),
             updates: block.metadata_updates().to_vec(),
             energy,
             bins,
@@ -470,14 +487,12 @@ impl MetadataFrame {
 
     fn measure_lfe_bins(
         block: &DecodedSceneBlock,
+        lfe: &crate::decoder::SceneLfePcm,
         head: usize,
         span: usize,
         bins: &mut [LoudnessBin],
         filter: &mut KWeighting,
     ) {
-        let Some(lfe) = block.lfe() else {
-            return;
-        };
         for (bin, cell) in bins.iter_mut().enumerate() {
             let from = bin.saturating_mul(span).max(head);
             let to = bin
@@ -512,6 +527,7 @@ impl MetadataFrame {
     fn bytes(&self) -> usize {
         size_of::<Self>()
             + self.objects.len() * size_of::<(u64, Option<SpatialObjectState>)>()
+            + self.lfes.len() * size_of::<(u64, Option<SpatialObjectState>)>()
             + self.updates.len() * size_of::<SceneMetadataUpdate>()
             + self.energy.len() * size_of::<LoudnessBin>()
     }
@@ -564,6 +580,7 @@ fn submit_block(
     epoch: u64,
     block: &DecodedSceneBlock,
     offset: u32,
+    normalize_lfes: bool,
 ) -> Result<bool, String> {
     let from = usize::try_from(offset).map_err(|_| "Scene trim offset overflow")?;
     let mut planes: Vec<_> = block
@@ -589,10 +606,31 @@ fn submit_block(
             )
         })
         .collect();
-    if let Some(lfe) = block.lfe() {
+    let gain = if normalize_lfes {
+        super::lfe::normalization(block, offset)
+    } else {
+        1.0
+    };
+    let scaled: Vec<Vec<f32>> = if gain < 1.0 {
+        block
+            .lfes()
+            .iter()
+            .map(|lfe| {
+                lfe.samples()[from..]
+                    .iter()
+                    .map(|sample| sample * gain)
+                    .collect()
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    for (index, lfe) in block.lfes().iter().enumerate() {
         planes.push(native::Plane {
             element: lfe.element_id(),
-            samples: &lfe.samples()[from..],
+            samples: scaled
+                .get(index)
+                .map_or(&lfe.samples()[from..], Vec::as_slice),
         });
         initial.push((
             lfe.element_id(),
@@ -685,7 +723,7 @@ fn submit_gap(
         .object_element_ids()
         .iter()
         .copied()
-        .chain(signature.lfe_element_id())
+        .chain(signature.lfe_element_ids().iter().copied())
         .collect();
     let planes: Vec<_> = ids
         .iter()
@@ -738,6 +776,9 @@ fn run(
     let mut serial = 0;
     let mut holding = false;
     let native_config = native_config(settings, config.sample_rate, &config.output_device);
+    let normalize_lfes = native_config.renderer.binaural
+        || native_config.renderer.layout != "9+10+3"
+        || native_config.renderer.split_lfe;
     let mut session = match prepared {
         Some(prepared) => prepared.take(&native_config)?,
         None => native::Session::new(&native_config)?,
@@ -754,11 +795,11 @@ fn run(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(control.clone());
     let mut signature = config.scene_signature.clone();
-    session.configure(
+    session.configure_lfes(
         epoch,
         u64::from(signature.configuration_generation()),
         signature.object_element_ids(),
-        signature.lfe_element_id(),
+        signature.lfe_element_ids(),
     )?;
     let mut pending = None::<DecodedSceneBlock>;
     let mut history = VecDeque::<MetadataFrame>::new();
@@ -807,11 +848,11 @@ fn run(
                     .map_err(|_| "Scene target exceeds signed time")?;
                 signature = config.scene_signature.clone();
                 let reset = session.reset(epoch, target).and_then(|()| {
-                    session.configure(
+                    session.configure_lfes(
                         epoch,
                         u64::from(signature.configuration_generation()),
                         signature.object_element_ids(),
-                        signature.lfe_element_id(),
+                        signature.lfe_element_ids(),
                     )
                 });
                 if let Err(error) = reset {
@@ -971,21 +1012,26 @@ fn run(
                             i64::try_from(last_bin.saturating_add(1)).unwrap_or(i64::MAX),
                         ));
             }
-            let lfe = frame.lfe.map(|(id, initial)| {
-                let (active, gain) =
-                    lfe_render_state(state_at_updates(&frame.updates, id, initial, offset));
-                LfeView {
-                    element_id: id,
-                    active: active && frame.complete,
-                    gain,
-                    energy: if emitting {
-                        frame.energy_over(frame.objects.len(), first_bin, last_bin)
-                    } else {
-                        ObjectEnergy::default()
-                    },
-                }
-            });
-            mirror.write_with_lfe(
+            let lfes = frame
+                .lfes
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(index, (id, initial))| {
+                    let (active, gain) =
+                        lfe_render_state(state_at_updates(&frame.updates, id, initial, offset));
+                    LfeView {
+                        element_id: id,
+                        active: active && frame.complete,
+                        gain,
+                        energy: if emitting {
+                            frame.energy_over(frame.objects.len() + index, first_bin, last_bin)
+                        } else {
+                            ObjectEnergy::default()
+                        },
+                    }
+                });
+            mirror.write_with_lfes(
                 reader.playback_key(),
                 frame
                     .objects
@@ -1014,7 +1060,7 @@ fn run(
                             },
                         }
                     }),
-                lfe,
+                lfes,
                 view_time,
                 config.sample_rate,
             );
@@ -1090,11 +1136,11 @@ fn run(
                     if block.sample_rate() != config.sample_rate {
                         return Err("Scene sample rate changed during playback".into());
                     }
-                    session.configure(
+                    session.configure_lfes(
                         epoch,
                         u64::from(actual.configuration_generation()),
                         actual.object_element_ids(),
-                        actual.lfe_element_id(),
+                        actual.lfe_element_ids(),
                     )?;
                     // A new configuration generation can remap which element
                     // owns which slot, and a filter's memory belongs to the
@@ -1126,7 +1172,7 @@ fn run(
                         .unwrap_or(u32::MAX);
                     if offset >= block.duration_frames() {
                         pending = None;
-                    } else if submit_block(&mut session, epoch, block, offset)? {
+                    } else if submit_block(&mut session, epoch, block, offset, normalize_lfes)? {
                         let metadata = MetadataFrame::new(block, offset, &mut loudness, bin_frames);
                         history_bytes += metadata.bytes();
                         history.push_back(metadata);
@@ -1491,6 +1537,64 @@ mod tests {
     }
 
     #[test]
+    fn dual_lfe_source_supports_equal_power_copy_and_publishes_both_meters() {
+        use crate::decoder::SceneLfePcm;
+        let key = PlaybackKey::new(54, 0);
+        let (queue, reader) = scene_queue_pair(key);
+        let active = SpatialObjectState::new(true, None, Some(1.0), true);
+        let block = DecodedSceneBlock::new(48_000, 0, 4096, 0, 0, None, true, vec![], None, vec![])
+            .with_lfes(vec![
+                SceneLfePcm::new(4, Some(active), vec![0.125; 4096]),
+                SceneLfePcm::new(10, Some(active), vec![0.25; 4096]),
+            ]);
+        let signature = SceneSignature::from_block(&block);
+        queue.try_push(key, block).unwrap();
+        queue.mark_end_of_stream(key);
+        let config = OutputStreamConfig::new(
+            54,
+            0,
+            0,
+            48_000,
+            signature,
+            OutputDeviceSelection::SystemDefault,
+        )
+        .unwrap();
+        let settings = OutputSettings {
+            null_output: true,
+            mode: SpatialBackendKind::SystemSpatial,
+            layout: super::super::SpeakerLayout::TwentyTwoTwo,
+            // Two live LFE elements are normalized before the renderer copies
+            // their sum to both output destinations.
+            split_lfe: true,
+            ..Default::default()
+        };
+        let mirror = Arc::new(SceneViewMirror::new());
+        let runtime =
+            Runtime::spawn(config, settings, reader, Arc::clone(&mirror), true, 1.0).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let status = runtime.snapshot();
+            assert_ne!(status.phase, OutputPhase::Failed, "{:?}", status.error);
+            if let Some(frame) = mirror.read(key)
+                && frame.lfes().count() == 2
+                && frame.sample_peak(LFE_METER_SLOT + 1) > 0.0
+            {
+                assert_eq!(
+                    frame.lfes().map(|lfe| lfe.element_id).collect::<Vec<_>>(),
+                    [4, 10]
+                );
+                assert!(frame.sample_peak(LFE_METER_SLOT + 1) > frame.sample_peak(LFE_METER_SLOT));
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "dual-LFE output stalled: {status:?}"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
     fn reconfiguration_at_eos_remains_ended_even_when_paused() {
         let key = PlaybackKey::new(4, 2);
         let (queue, reader) = scene_queue_pair(key);
@@ -1743,7 +1847,7 @@ mod tests {
         let mut filters = [KWeighting::new(48_000); METER_SLOTS];
         let history = MetadataFrame::new(&block, 240, &mut filters, 480);
         assert!(history.objects.is_empty());
-        assert_eq!(history.lfe.unwrap().0, 99);
+        assert_eq!(history.lfes[0].0, 99);
         let first = history.energy_over(0, 0, 0);
         assert_eq!(first.frames, 240);
         let expected = KWeighting::new(48_000).measure(&[1.0; 240], 0.5);

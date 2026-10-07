@@ -23,6 +23,8 @@ eframe = { version = "=0.36.1", default-features = false, features = [
 # Already in the tree via wgpu, so taking it as a direct dependency costs no
 # extra compilation. Used only for the scene vertex cast in `scene3d::gpu`.
 bytemuck = { version = "1", features = ["derive"] }
+apac-core = { git = "https://github.com/SakuzyPeng/MacinDecode-APAC-Core.git", rev = "4aefbd3eb4b3da64410b8582c3ec38eb76a1c37c" }
+apac-container = { git = "https://github.com/SakuzyPeng/MacinDecode-APAC-Core.git", rev = "4aefbd3eb4b3da64410b8582c3ec38eb76a1c37c" }
 image = { version = "0.25", default-features = false, features = ["png"] }
 macindecode-ac4-inspect = { git = "https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git", rev = "9673e1ef445e7e2ab218cc1b7b79f484fa92135f" }
 # Core decode. Not platform-gated: these crates carry no `target_os` of their
@@ -67,6 +69,7 @@ macinrender = ["decode", "dep:macindecode-macinrender"]
 # gives the inspection-only shell, which is also the only configuration that
 # builds without the spec tables.
 decode = [
+    "apac-core/cac",
     "dep:macindecode-ac4-bitstream",
     "dep:macindecode-ac4-scene",
 ]

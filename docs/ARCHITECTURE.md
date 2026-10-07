@@ -19,7 +19,7 @@ MacinDecode scene API         └── MacinRender Scene + device output
 GUI、播放协调器和解码适配器均留在 Rust 进程内，直接依赖
 `macindecode-ac4-mp4` 与 `macindecode-ac4-scene`，不跨语言暴露 Rust 类型或 Rust ABI。
 
-平台后端只能消费播放器内部定义的窄语义：对象稳定 ID、单声道 normalized `f32` PCM、单路 LFE、
+平台后端只能消费播放器内部定义的窄语义：对象稳定 ID、单声道 normalized `f32` PCM、最多两路独立 LFE、
 整数采样时间、active、位置、增益和 ramp。后端不得接收 `Ac4SceneFrame`，也不得反向影响解码器
 的数据模型。
 
@@ -117,11 +117,11 @@ render source，共用同一个镜像才不会让视图空一拍。
 **实时约束**（每一条都是必需的，不是风格问题）：
 
 - 写侧只用 `try_lock`，抢不到就丢弃这次更新。丢一帧画面看不出来，阻塞 WASAPI 回调是真的会响。
-- 两侧都不分配。对象数组定长（`MAX_VIEW_OBJECTS`，20），`SceneViewFrame` 是 `Copy`，因此一次
+- 两侧都不分配。对象数组定长（`MAX_VIEW_OBJECTS`，22），`SceneViewFrame` 是 `Copy`，因此一次
   写入就是一次 memcpy；超出预算的场景被截断并上报，绝不扩容。
 - 读侧在锁内**只做一次结构体复制**就放锁，再拿副本去建网格。持锁跨越整个网格组装会让写侧的
-  `try_lock` 每帧全部落空，镜像会静默停止更新。帧目前约 24 KiB（20 个槽位各 40 个轨迹点和
-  40 个响度 bin 占了绝大部分），每个 UI 帧复制一次。往这个结构体上再加定长数组前先看这个数字。
+  `try_lock` 每帧全部落空，镜像会静默停止更新。帧中已有 22 个对象槽位的轨迹及响度历史，另有两路 LFE 表头，每个 UI 帧复制一次。
+  往这个结构体上再加定长数组前应检查 `size_of::<SceneViewFrame>()`。
 - 镜像写入发生在 Scene FIFO 的 `try_pop` 已返回之后，不同时持有两把锁，也就不会和 decode worker
   互锁。
 
@@ -209,7 +209,7 @@ MacinRender 路径的能量存在 `MetadataFrame` 里、**从 block 偏移 0 起
 都使用同一模式。dBFS 取 30 ms 快表和弹道，LUFS-M 取 400 ms 平均并加 −0.691 偏移，无弹道。
 LFE 与其他声道同样使用 K 加权，不设单位例外；这是独立声道诊断，计算节目总响度时仍应按标准排除 LFE。
 两种模式分别保留静音计时、峰值和历史轨迹电平，切换不重置历史。表头仅保留单位按钮与标记说明，
-不再绘制量程行或 LFE 单位标签。总计量容量仍为 20 个动态对象加一条无位置的 LFE。
+不再绘制量程行或 LFE 单位标签。总计量容量仍为 22 个主声道或动态对象加两条无位置的 LFE。
 
 `ui()` **每帧只读一次镜子**，并在任何面板绘制之前推进 `ObjectMeters`。表带和舞台共用这一帧：读两次
 可能拿到不同的发布，推进两次会把同一段墙钟时间向弹道收两遍费。表带的开关和单位都进
@@ -427,3 +427,11 @@ fixture。
 `skin_library` 在工作线程校验图片并原子复制到 `skins/`，以内容 SHA-256 去重。
 `AppPreferences::skins` 保存显示名称、选择和体型覆盖，UI 在成功加载后才切换；
 损坏或缺失的导入会显示错误并保留当前角色。`app::visual_settings` 集中提供皮肤和音频对象显示选项。
+
+## APAC 适配
+
+`media::OpenedMedia::codec` 按内容识别裸 AC-4、CAF 或 MP4；MP4 存在 AC-4 轨道时保留原处理，仅在没有 AC-4 轨道时交给 APAC 容器验证。`inspection::InspectionReport` 分别保存 AC-4 报告和 APAC 元数据，避免伪造 AC-4 字段。
+
+`decoder::worker::apac` 使用 `apac_container::Media/Playback`，复用请求内文件句柄、变更检测、取消、播放 key 和两秒 Scene FIFO。后台 Indexer 的检查点间隔由包数确定，单批最多约 256 点，暂停时也不会增长为整文件 PCM。Core 负责有效帧裁剪与精确 seek；旧 key 的读取和结果不能进入新队列。
+
+离散布局以完整 layout tag 和数值语义校验，不靠声道数量猜测；16 路 HOA 与 9.1.6 分开。普通声道按 Apple 几何成为固定位置元素，22.2 的两路 LFE 按语义目的地顺序保持独立。Scene signature 比较全部 LFE ID，metadata continuity、裁剪、渲染提交和电平历史均覆盖两路。`Session::configure_lfes` 使用 C ABI 的 LFE1/LFE2 标签；Direct 保留两路，split-power 或单 LFE 输出在输出端根据实际有信号的路数归一化；`backend::lfe` 保存这一共享算术和 Windows 量子组装，解码 PCM 不修改，电平表仍分别测量两路源。路由模式改变重建输出，避免归一化后的排队 PCM 被不同路由再次处理。HOA 未接入本轮播放。

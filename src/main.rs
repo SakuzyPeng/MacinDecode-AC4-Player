@@ -6,6 +6,7 @@ compile_error!(
     "MacinDecode AC-4 Player is a native desktop application; WebAssembly is unsupported"
 );
 
+mod apac;
 mod app;
 mod app_icon;
 mod backend;
