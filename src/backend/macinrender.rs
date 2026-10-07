@@ -92,6 +92,38 @@ fn native_config(
     }
 }
 
+fn renderer_lfes<'a>(
+    signature: &'a SceneSignature,
+    renderer: &native::RendererSettings,
+) -> Result<&'a [u64], String> {
+    let lfes = signature.lfe_element_ids();
+    if renderer.speaker_renderer == native::SpeakerRenderer::TripleBalance && lfes.len() > 1 {
+        if renderer.layout == "9+10+3" && !renderer.split_lfe {
+            return Err("Triple Balance has one LFE bus. Select Equal-power copy, or SAF VBAP for independent 22.2 Direct LFEs".into());
+        }
+        return Ok(&lfes[..1]);
+    }
+    Ok(lfes)
+}
+
+pub(super) fn validate_source(
+    settings: &OutputSettings,
+    config: &OutputStreamConfig,
+) -> Result<(), String> {
+    let renderer = settings.renderer();
+    renderer_lfes(&config.scene_signature, &renderer)?;
+    if renderer.speaker_renderer == native::SpeakerRenderer::TripleBalance
+        && !config.scene_signature.lfe_element_ids().is_empty()
+        && config.sample_rate != 48_000
+    {
+        return Err(
+            "Triple Balance's LFE bed requires 48 kHz input; use SAF VBAP for this sample rate"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 struct SourceRequest {
     config: OutputStreamConfig,
@@ -153,6 +185,7 @@ impl Runtime {
         gain: f32,
         prepared: Option<PreparedSession>,
     ) -> Result<Self, String> {
+        validate_source(&settings, &config)?;
         let mut snapshot = OutputSnapshot::idle();
         snapshot.phase = OutputPhase::Initializing;
         snapshot.device_label = settings.mode.resolved().label().into();
@@ -234,6 +267,7 @@ impl Runtime {
             || self.format.device_id != format.device_id
             || self.format.renderer.binaural != format.renderer.binaural
             || self.format.renderer.layout != format.renderer.layout
+            || self.format.renderer.speaker_renderer != format.renderer.speaker_renderer
             || self.format.renderer.split_lfe != format.renderer.split_lfe
             || self.join.as_ref().is_none_or(JoinHandle::is_finished)
         {
@@ -302,6 +336,16 @@ impl Runtime {
         self.shared.volume.store(gain.to_bits(), Ordering::Relaxed);
     }
     pub fn switch(&self, settings: native::RendererSettings) {
+        if self.format.renderer.speaker_renderer != settings.speaker_renderer {
+            *self
+                .shared
+                .switch_result
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Err(
+                "Changing speaker renderer requires preparing a new output".into(),
+            ));
+            return;
+        }
         if !self.format.renderer.binaural
             && self.format.renderer.layout == "9+10+3"
             && settings.split_lfe != self.format.renderer.split_lfe
@@ -581,6 +625,7 @@ fn submit_block(
     block: &DecodedSceneBlock,
     offset: u32,
     normalize_lfes: bool,
+    fold_lfes: bool,
 ) -> Result<bool, String> {
     let from = usize::try_from(offset).map_err(|_| "Scene trim offset overflow")?;
     let mut planes: Vec<_> = block
@@ -606,7 +651,8 @@ fn submit_block(
             )
         })
         .collect();
-    let gain = if normalize_lfes {
+    let folded = (fold_lfes && block.lfes().len() > 1).then(|| super::lfe::fold(block, offset));
+    let gain = if normalize_lfes && folded.is_none() {
         super::lfe::normalization(block, offset)
     } else {
         1.0
@@ -626,26 +672,62 @@ fn submit_block(
         Vec::new()
     };
     for (index, lfe) in block.lfes().iter().enumerate() {
+        if folded.is_some() && index > 0 {
+            break;
+        }
         planes.push(native::Plane {
             element: lfe.element_id(),
-            samples: scaled
-                .get(index)
-                .map_or(&lfe.samples()[from..], Vec::as_slice),
+            samples: folded.as_deref().unwrap_or_else(|| {
+                scaled
+                    .get(index)
+                    .map_or(&lfe.samples()[from..], Vec::as_slice)
+            }),
         });
         initial.push((
             lfe.element_id(),
-            own_state(element_state_at(
-                block,
-                lfe.element_id(),
-                lfe.initial_state(),
-                offset,
-            )),
+            if folded.is_some() {
+                native::ObjectState {
+                    active: true,
+                    gain: 1.0,
+                    position: None,
+                    head_locked: false,
+                }
+            } else {
+                own_state(element_state_at(
+                    block,
+                    lfe.element_id(),
+                    lfe.initial_state(),
+                    offset,
+                ))
+            },
         ));
     }
+    let updates = frame_updates(block, offset, &initial, folded.is_some());
+    session.submit(&native::Frame {
+        epoch,
+        generation: u64::from(block.configuration_generation()),
+        start: block.start_frame().saturating_add(i64::from(offset)),
+        duration: block.duration_frames() - offset,
+        complete: block.state_complete(),
+        planes: &planes,
+        initial: &initial,
+        updates: &updates,
+    })
+}
+
+fn frame_updates(
+    block: &DecodedSceneBlock,
+    offset: u32,
+    initial: &[(u64, native::ObjectState)],
+    folded_lfes: bool,
+) -> Vec<native::Update> {
     let mut updates = Vec::new();
     // A trimmed block can begin inside a ramp: synthesize its remaining target
     // at offset zero instead of freezing at the interpolated initial state.
-    for (id, _) in &initial {
+    for (id, _) in initial {
+        if folded_lfes && block.lfes().iter().any(|lfe| lfe.element_id() == *id) {
+            continue;
+        }
         for update in remaining_ramps(block, *id, offset).into_iter().flatten() {
             updates.push(native::Update {
                 element: *id,
@@ -661,6 +743,13 @@ fn submit_block(
             .metadata_updates()
             .iter()
             .filter(|u| u.offset_frames() >= offset)
+            .filter(|u| {
+                !folded_lfes
+                    || !block
+                        .lfes()
+                        .iter()
+                        .any(|lfe| lfe.element_id() == u.element_id())
+            })
             .map(|u| native::Update {
                 element: u.element_id(),
                 offset: u.offset_frames() - offset,
@@ -669,17 +758,8 @@ fn submit_block(
                 state: own_state(Some(u.state())),
             }),
     );
-    filter_updates(&initial, &mut updates, block.duration_frames() - offset);
-    session.submit(&native::Frame {
-        epoch,
-        generation: u64::from(block.configuration_generation()),
-        start: block.start_frame().saturating_add(i64::from(offset)),
-        duration: block.duration_frames() - offset,
-        complete: block.state_complete(),
-        planes: &planes,
-        initial: &initial,
-        updates: &updates,
-    })
+    filter_updates(initial, &mut updates, block.duration_frames() - offset);
+    updates
 }
 
 fn filter_updates(
@@ -718,12 +798,13 @@ fn submit_gap(
     signature: &SceneSignature,
     start: i64,
     duration: u32,
+    renderer: &native::RendererSettings,
 ) -> Result<bool, String> {
     let ids: Vec<_> = signature
         .object_element_ids()
         .iter()
         .copied()
-        .chain(signature.lfe_element_ids().iter().copied())
+        .chain(renderer_lfes(signature, renderer)?.iter().copied())
         .collect();
     let planes: Vec<_> = ids
         .iter()
@@ -740,7 +821,10 @@ fn submit_gap(
                 native::ObjectState {
                     active: false,
                     gain: 0.0,
-                    position: Some([0.0, 1.0, 0.0]),
+                    position: signature
+                        .object_element_ids()
+                        .contains(&id)
+                        .then_some([0.0, 1.0, 0.0]),
                     head_locked: false,
                 },
             )
@@ -799,7 +883,7 @@ fn run(
         epoch,
         u64::from(signature.configuration_generation()),
         signature.object_element_ids(),
-        signature.lfe_element_ids(),
+        renderer_lfes(&signature, &native_config.renderer)?,
     )?;
     let mut pending = None::<DecodedSceneBlock>;
     let mut history = VecDeque::<MetadataFrame>::new();
@@ -852,7 +936,7 @@ fn run(
                         epoch,
                         u64::from(signature.configuration_generation()),
                         signature.object_element_ids(),
-                        signature.lfe_element_ids(),
+                        renderer_lfes(&signature, &native_config.renderer)?,
                     )
                 });
                 if let Err(error) = reset {
@@ -962,7 +1046,7 @@ fn run(
         }
         let status = control.status()?;
         if status.phase == native::Phase::Failed {
-            return Err("MacinRender rendering or output device failed".into());
+            return Err(control.failure_message());
         }
         let media_offset =
             u64::try_from(u128::from(status.presented) * u128::from(config.sample_rate) / 48_000)
@@ -1140,7 +1224,7 @@ fn run(
                         epoch,
                         u64::from(actual.configuration_generation()),
                         actual.object_element_ids(),
-                        actual.lfe_element_ids(),
+                        renderer_lfes(&actual, &native_config.renderer)?,
                     )?;
                     // A new configuration generation can remap which element
                     // owns which slot, and a filter's memory belongs to the
@@ -1163,7 +1247,14 @@ fn run(
                 if block.start_frame() > next_sample {
                     let duration = u32::try_from((block.start_frame() - next_sample).min(4096))
                         .unwrap_or(4096);
-                    if submit_gap(&mut session, epoch, &signature, next_sample, duration)? {
+                    if submit_gap(
+                        &mut session,
+                        epoch,
+                        &signature,
+                        next_sample,
+                        duration,
+                        &native_config.renderer,
+                    )? {
                         next_sample += i64::from(duration);
                         first = false;
                     }
@@ -1172,7 +1263,15 @@ fn run(
                         .unwrap_or(u32::MAX);
                     if offset >= block.duration_frames() {
                         pending = None;
-                    } else if submit_block(&mut session, epoch, block, offset, normalize_lfes)? {
+                    } else if submit_block(
+                        &mut session,
+                        epoch,
+                        block,
+                        offset,
+                        normalize_lfes,
+                        native_config.renderer.speaker_renderer
+                            == native::SpeakerRenderer::TripleBalance,
+                    )? {
                         let metadata = MetadataFrame::new(block, offset, &mut loudness, bin_frames);
                         history_bytes += metadata.bytes();
                         history.push_back(metadata);
@@ -1199,14 +1298,29 @@ pub(super) struct DeviceCatalog {
     receive: std::sync::mpsc::Receiver<Result<Vec<OutputDeviceInfo>, String>>,
     stop: std::sync::mpsc::Sender<()>,
     join: Option<JoinHandle<()>>,
+    triple_balance: Arc<std::sync::OnceLock<[Result<(), String>; 3]>>,
 }
 impl DeviceCatalog {
     pub fn spawn() -> Self {
         let (send, receive) = std::sync::mpsc::channel();
         let (stop, wait) = std::sync::mpsc::channel();
+        let triple_balance = Arc::new(std::sync::OnceLock::new());
+        let probe = Arc::clone(&triple_balance);
         let join = thread::Builder::new()
             .name("pcm-device-catalog".into())
             .spawn(move || {
+                let _ = probe.set(super::SpeakerLayout::ALL.map(|layout| {
+                    native::probe_player_renderer(
+                        &native::RendererSettings {
+                            binaural: false,
+                            speaker_renderer: native::SpeakerRenderer::TripleBalance,
+                            layout: layout.core_id().into(),
+                            sofa: String::new(),
+                            split_lfe: false,
+                        },
+                        48_000,
+                    )
+                }));
                 loop {
                     let result = native::output_devices().map(|devices| {
                         devices
@@ -1232,14 +1346,31 @@ impl DeviceCatalog {
                 }
             })
             .ok();
+        if join.is_none() {
+            let _ = triple_balance.set(std::array::from_fn(|_| {
+                Err("Renderer capability worker is unavailable".into())
+            }));
+        }
         Self {
             receive,
             stop,
             join,
+            triple_balance,
         }
     }
     pub fn poll(&self) -> Option<Result<Vec<OutputDeviceInfo>, String>> {
         self.receive.try_iter().last()
+    }
+    pub fn triple_balance_support(&self, layout: super::SpeakerLayout) -> Option<Result<(), &str>> {
+        let index = super::SpeakerLayout::ALL
+            .iter()
+            .position(|candidate| *candidate == layout)?;
+        Some(
+            self.triple_balance.get()?[index]
+                .as_ref()
+                .copied()
+                .map_err(String::as_str),
+        )
     }
 }
 impl Drop for DeviceCatalog {
@@ -1296,6 +1427,106 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(2));
         }
+    }
+
+    #[test]
+    fn triple_balance_lfe_bed_survives_gaps_seeks_and_lfe_count_changes() {
+        use crate::decoder::SceneLfePcm;
+        for layout in super::super::SpeakerLayout::ALL {
+            let settings = OutputSettings {
+                null_output: true,
+                mode: SpatialBackendKind::SystemSpatial,
+                speaker_renderer: super::super::SpeakerRenderer::TripleBalance,
+                layout,
+                split_lfe: true,
+                ..Default::default()
+            };
+            let mirror = Arc::new(SceneViewMirror::new());
+            let mut runtime: Option<Runtime> = None;
+            for (epoch, target, gap, dual) in
+                [(1, 0, 0, false), (2, 513, 64, true), (3, 33, 0, false)]
+            {
+                let key = PlaybackKey::new(71, epoch);
+                let (queue, reader) = scene_queue_pair(key);
+                let active = Some(SpatialObjectState::new(true, None, Some(1.0), true));
+                let mut lfes = vec![SceneLfePcm::new(8, active, vec![0.01; 1024])];
+                if dual {
+                    lfes.push(SceneLfePcm::new(9, active, vec![0.02; 1024]));
+                }
+                let frame = block(i64::try_from(target + gap).unwrap(), 1024).with_lfes(lfes);
+                let config = OutputStreamConfig::new(
+                    71,
+                    epoch,
+                    target,
+                    48_000,
+                    SceneSignature::from_block(&frame),
+                    OutputDeviceSelection::SystemDefault,
+                )
+                .unwrap();
+                queue.try_push(key, frame).unwrap();
+                queue.mark_end_of_stream(key);
+                if let Some(runtime) = &runtime {
+                    assert!(runtime.replace_source(&config, &settings, reader));
+                    runtime.play(true);
+                } else {
+                    runtime = Some(
+                        Runtime::spawn(
+                            config,
+                            settings.clone(),
+                            reader,
+                            Arc::clone(&mirror),
+                            true,
+                            1.0,
+                        )
+                        .unwrap(),
+                    );
+                }
+                await_end(runtime.as_ref().unwrap(), target + gap + 1024);
+                let view = mirror.read(key).unwrap();
+                assert_eq!(
+                    view.objects().len(),
+                    1,
+                    "silent bed lanes must not appear as source objects"
+                );
+                assert_eq!(view.lfes().count(), if dual { 2 } else { 1 });
+                assert!(view.sample_peak(LFE_METER_SLOT) > 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn triple_balance_does_not_silently_fold_independent_direct_lfes() {
+        use crate::decoder::SceneLfePcm;
+        let frame = block(0, 32).with_lfes(vec![
+            SceneLfePcm::new(8, None, vec![0.0; 32]),
+            SceneLfePcm::new(9, None, vec![0.0; 32]),
+        ]);
+        let config = OutputStreamConfig::new(
+            1,
+            1,
+            0,
+            48_000,
+            SceneSignature::from_block(&frame),
+            OutputDeviceSelection::SystemDefault,
+        )
+        .unwrap();
+        let mut settings = OutputSettings {
+            mode: SpatialBackendKind::SystemSpatial,
+            speaker_renderer: super::super::SpeakerRenderer::TripleBalance,
+            layout: super::super::SpeakerLayout::TwentyTwoTwo,
+            split_lfe: false,
+            ..Default::default()
+        };
+        assert!(
+            validate_source(&settings, &config)
+                .unwrap_err()
+                .contains("independent")
+        );
+        settings.split_lfe = true;
+        assert!(validate_source(&settings, &config).is_ok());
+        settings.speaker_renderer = super::super::SpeakerRenderer::SafVbap;
+        settings.split_lfe = false;
+        assert!(validate_source(&settings, &config).is_ok());
     }
 
     fn ended_source(

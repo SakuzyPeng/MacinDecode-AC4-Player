@@ -7,6 +7,7 @@ use std::time::Duration;
 fn slow_profile_io_leaves_submission_and_output_controls_live() {
     let mut session = Session::new(&Config {
         renderer: RendererSettings {
+            speaker_renderer: SpeakerRenderer::SafVbap,
             binaural: true,
             layout: "4+7+0".into(),
             sofa: String::new(),

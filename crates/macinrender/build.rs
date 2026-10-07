@@ -15,6 +15,16 @@ fn run(command: &mut Command) {
     );
 }
 
+fn cmake_command() -> Command {
+    let mut command = Command::new("cmake");
+    // Corrosion's Cargo probes must not inherit the outer Cargo target lock
+    // or jobserver file descriptors. Core shares its own Rust target directory.
+    command
+        .env_remove("CARGO_TARGET_DIR")
+        .env_remove("CARGO_MAKEFLAGS");
+    command
+}
+
 fn main() {
     println!("cargo:rerun-if-changed=native");
     println!("cargo:rerun-if-changed=build.rs");
@@ -32,7 +42,7 @@ fn main() {
     let query = out.join(".cmake/api/v1/query");
     fs::create_dir_all(&query).unwrap();
     fs::write(query.join("codemodel-v2"), "").unwrap();
-    let mut configure = Command::new("cmake");
+    let mut configure = cmake_command();
     configure.arg("-DMACINRENDER_SOURCE_DIR=");
     // cc locates MSVC and the Windows SDK even outside a developer shell. Keep
     // CMake configure and build in the same compiler environment.
@@ -63,17 +73,19 @@ fn main() {
         ("MACINRENDER_SOURCE_DIR", "MACINRENDER_SOURCE_DIR"),
         ("MACINRENDER_FETCHCONTENT_DIR", "FETCHCONTENT_BASE_DIR"),
         ("CMAKE_TOOLCHAIN_FILE", "CMAKE_TOOLCHAIN_FILE"),
-        ("OPENBLAS_LIBRARY", "OPENBLAS_LIBRARY"),
-        ("LAPACKE_LIBRARY", "LAPACKE_LIBRARY"),
-        ("OPENBLAS_HEADER_PATH", "OPENBLAS_HEADER_PATH"),
-        ("LAPACKE_HEADER_PATH", "LAPACKE_HEADER_PATH"),
-        ("BOOST_ROOT", "BOOST_ROOT"),
     ] {
         println!("cargo:rerun-if-env-changed={variable}");
         if let Some(value) = env::var_os(variable) {
             configure.arg(format!("-D{option}={}", value.to_string_lossy()));
             if variable == "MACINRENDER_SOURCE_DIR" {
-                for directory in ["src", "include", "gui/native", "CMakeLists.txt"] {
+                for directory in [
+                    "src",
+                    "include",
+                    "gui/native",
+                    "CMakeLists.txt",
+                    "cmake",
+                    "rust",
+                ] {
                     println!(
                         "cargo:rerun-if-changed={}",
                         PathBuf::from(&value).join(directory).display()
@@ -83,7 +95,7 @@ fn main() {
         }
     }
     run(&mut configure);
-    let mut build = Command::new("cmake");
+    let mut build = cmake_command();
     if let Some(compiler) = &compiler {
         build.envs(compiler.env().iter().cloned());
     }
@@ -112,6 +124,7 @@ fn main() {
     );
     cc::Build::new()
         .file("native/abi_probe.c")
+        .std("c11")
         .include(PathBuf::from(&source).join("include"))
         .include(PathBuf::from(source).join("gui/native"))
         .compile("macinrender_abi_probe");

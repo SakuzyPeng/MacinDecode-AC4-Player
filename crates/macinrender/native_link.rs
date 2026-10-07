@@ -75,6 +75,13 @@ fn parse(tokens: &[String], build: &Path, windows: bool) -> Vec<Link> {
         } else if extension.eq_ignore_ascii_case("tbd") && token.contains(".sdk/usr/lib/") {
             let name = Path::new(token).file_stem().unwrap().to_str().unwrap();
             result.push(Link::System(name.trim_start_matches("lib").into()));
+        } else if !windows
+            && token
+                .strip_prefix("-Wl,-rpath,")
+                .is_some_and(|path| path.ends_with(".sdk/usr/lib"))
+        {
+            // Corrosion's Rust system-library probe can add an SDK rpath.
+            // Static archives/system libraries need no runtime SDK lookup.
         } else {
             panic!(
                 "Unexpected native link input (only static archives and system libraries are supported): {token}"
@@ -243,6 +250,18 @@ mod tests {
             &["/opt/homebrew/lib/libnative.dylib".into()],
             Path::new("/build"),
             false,
+        );
+    }
+
+    #[test]
+    fn rust_system_library_probe_does_not_embed_an_sdk_rpath() {
+        let tokens = words(
+            "-Wl,-rpath,/Developer/SDKs/MacOSX.sdk/usr/lib -lSystem -liconv",
+            false,
+        );
+        assert_eq!(
+            parse(&tokens, Path::new("/build"), false),
+            [Link::System("System".into()), Link::System("iconv".into())]
         );
     }
 }

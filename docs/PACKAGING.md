@@ -2,7 +2,7 @@
 
 Windows 发布当前用户 MSI，程序载荷只有一个自包含 EXE。macOS 发布 Apple Silicon PKG，安装到 `~/Applications`；`.app` 内只有主程序、Info.plist、图标和 ad-hoc 签名资源，最低系统为 **14.0**。
 
-Windows 程序安装到 `%LOCALAPPDATA%\Programs\MacinDecode AC-4 Player`。Rust 与全部自建 C/C++ 库使用静态 CRT；MacinRender、OpenBLAS 和 SQLite 编入主程序。macOS 渲染和头追代码同样静态链接，Accelerate、CoreMotion 等系统框架继续动态链接。用户数据库、播放列表、设置及自定义 SOFA 的存储格式和位置不变。
+Windows 程序安装到 `%LOCALAPPDATA%\Programs\MacinDecode AC-4 Player`。Rust 与全部自建 C/C++ 库使用静态 CRT；MacinRender（含 Rust 数值内核）和 SQLite 编入主程序。macOS 渲染和头追代码同样静态链接，Accelerate、CoreMotion 等系统框架继续动态链接。用户数据库、播放列表、设置及自定义 SOFA 的存储格式和位置不变。
 
 Windows 每次构建生成新的 ProductCode，保留固定 UpgradeCode 和组件身份；即使版本号相同，新 MSI 也能在事务内替换之前的预览构建，不要求先手动卸载。相同版本之间不区分构建先后，较低的 X.Y.Z 仍禁止覆盖较高版本；正式发布仍应递增版本号。再次打开同一份 MSI 会提供修复／卸载入口。安装界面包含准备、执行进度和完成页面，执行进度订阅 Windows Installer 的实际事件，并显示删除文件、快捷方式、注册信息等阶段；单文件载荷的进度可能跳跃，不代表剩余时间。
 
@@ -17,13 +17,13 @@ python scripts/package.py --target x86_64-pc-windows-msvc
 python3 scripts/package.py --target aarch64-apple-darwin
 ```
 
-脚本为完整默认 feature 准备构建输入：从锁定的 Core 提交取得并生成 ETSI 规范表，从锁定的 MacinRender 提交构建原生库；Boost 1.89.0、Windows OpenBLAS 0.3.34 源码及 LLVM 21.1.8 下载均校验 SHA-256。OpenBLAS 使用 clang-cl/MSVC ABI、静态 CRT 和上游自带 C LAPACK，保留 LP64、GENERIC 基线、动态 CPU 分派和最多 64 个原生工作线程；不依赖 Fortran 或 OpenMP 运行库。构建前需要 7-Zip 解包便携 LLVM 工具链。规范表和下载的 SDK 位于被忽略的 `.ci-inputs/`，不作为发布资产。
+脚本为完整默认 feature 准备构建输入：从锁定的 Core 提交取得并生成 ETSI 规范表，从锁定的 MacinRender 提交构建原生库和 Rust 数值内核。使用仓库固定的 Rust 1.98；生产构建不再需要 OpenBLAS、LAPACKE、Boost 或仅为旧 SDK 下载的 LLVM。规范表与源码位于被忽略的 `.ci-inputs/`，不作为发布资产。
 
-已有合法输入可通过 `MACINDECODE_AC4_SPEC_DIR`、`MACINRENDER_SOURCE_DIR` 和 `BOOST_ROOT` 指定。CI 使用全新锁定输入；本地覆盖只适合开发，构建清单会记录实际原生提交。
+已有合法输入可通过 `MACINDECODE_AC4_SPEC_DIR`、`MACINRENDER_SOURCE_DIR` 指定。CI 使用锁定输入；本地覆盖只适合开发，构建清单会记录实际原生提交。
 
 许可报告包括 Rust 依赖、播放器 MIT 许可、Noto CJK 字体及 MacinRender 原生第三方许可，并内嵌于 About 页面。图标沿用 `assets/icons/`，不另建一套品牌资源。
 
-打包工具与稳定许可输入放在 `.ci-tools/`，避免 Cargo 缓存清理破坏 .NET 工具结构。OpenBLAS SDK 按源码、LLVM、MSVC、SDK 和完整配置缓存，接入前运行实数／复数 BLAS、解方程、SVD 和特征分解残差检查。打包后解包核对文件和哈希，再搬移完整程序载荷运行 SQLite/设置检查、VBAP／内置双耳渲染的实际 Scene 提交、播放进度及图形窗口。运行时只允许系统组件及显卡驱动。分别采集原生渲染与窗口初始化的加载证据，拒绝应用旁边、构建目录或 Homebrew 中的动态库。检查通过才输出 `dist/` 的安装包、校验和和构建清单。失败日志保存在 `target/packaging-failures/`。
+打包工具与稳定许可输入放在 `.ci-tools/`，避免 Cargo 缓存清理破坏 .NET 工具结构。Core 的 Rust 数值内核使用其共享 `build/rust`；原生许可 bundle 同时覆盖其 Rust 依赖。打包后解包核对文件和哈希，再搬移完整程序载荷运行 SQLite/设置检查、VBAP／内置双耳渲染的实际 Scene 提交、播放进度及图形窗口。运行时只允许系统组件及显卡驱动。分别采集原生渲染与窗口初始化的加载证据，拒绝应用旁边、构建目录或 Homebrew 中的动态库。检查通过才输出 `dist/` 的安装包、校验和和构建清单。失败日志保存在 `target/packaging-failures/`。
 
 ## CI 与发布
 
@@ -33,15 +33,7 @@ Cargo 缓存仅在任务成功完成后保存，确保包含 Release 构建结�
 
 PR、main 推送和手动执行使用同一 Windows x64 / macOS ARM64 矩阵，运行 workspace 测试、Clippy、打包回归、完整构建、窗口与安装生命周期检查。硬件和真实媒体测试仍按原文档单独运行，不用空输出测试替代实际听验。
 
-Windows OpenBLAS SDK 使用独立的 GitHub Actions 缓存。`prepare_openblas.py --cache-info` 在不下载 LLVM
-或源码的情况下读取 MSVC / Windows SDK 版本，与锁定的 OpenBLAS、LLVM、CMake、完整构建选项及数值探针
-一起生成缓存身份；它不包含 MacinRender 提交或 Cargo 依赖，因此更新渲染器不会连带重建 OpenBLAS。
-恢复只接受精确的 SDK 缓存键；使用前还要核对构建清单、库哈希、头文件和数值探针验证记录。命中后直接
-使用 SDK，不再下载或解包仅用于构建它的工具链和源码。缓存缺失或校验失败时才执行完整构建与数值验证。
-
-SDK 验证完成后立即保存独立缓存，不等待播放器测试、Release 构建或安装检查完成；分支上的重试也可复用
-该分支保存的 SDK，但仍遵循 GitHub 的分支缓存可见性规则。即使 Cargo / 渲染器缓存失效或切换前缀，仍可
-单独恢复 SDK。
+Core 源码及其 Rust 构建目录随当前原生提交缓存；不再维护独立的 OpenBLAS SDK 缓存。发布清单以 `native_numerics` 记录当前数值后端，静态库和系统依赖的运行时核验继续执行。
 
 Windows 打包回归还使用独立产品 GUID、注册表键和临时安装目录复现同版本重打包的 1638 错误，并验证旧标识迁移、同版本内容替换、同包重开、修复、跨版本升级、禁止降级和卸载。实际应用的 CI 生命周期检查另外覆盖同版本替换后的用户数据保留。静默安装测试不能替代交互界面的人工验收。
 

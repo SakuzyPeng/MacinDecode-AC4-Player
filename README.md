@@ -43,7 +43,9 @@
 
 支持 AC-4 / APAC `.m4a`、`.mp4`、裸 `.ac4` 和 APAC `.caf`。AC-4 主要面向 **Full A-JOC**。
 APAC 支持单声道、立体声、5.1、7.1、7.1.4、9.1.6、22.2，以及按帧精确跳转；HOA 暂不播放。
-22.2 保留两路独立 LFE，选择 macOS 的 **系统空间音频 → 22.2 → Direct** 输出时分别路由；详见[操作手册](docs/MANUAL.md#apac-多声道)。
+22.2 保留两路独立 LFE，选择 macOS 的 **系统空间音频 → SAF VBAP → 22.2 → Direct** 输出时分别路由；详见[操作手册](docs/MANUAL.md#apac-多声道)。
+
+系统空间音频可在 **Speakers → Speaker renderer** 选择 SAF VBAP 或 Triple Balance；后者支持 7.1.4、9.1.6、22.2，LFE 与输入范围见[扬声器渲染算法](docs/MANUAL.md#扬声器渲染算法)。
 
 ## 获取应用
 
@@ -210,25 +212,22 @@ python scripts/prepare_inputs.py
 
 它按 `Cargo.toml` 和 `crates/macinrender/native/CMakeLists.txt` 里锁定的提交检出
 [MacinDecode-AC4-Core](https://github.com/SakuzyPeng/MacinDecode-AC4-Core) 与 MacinRender，
-生成规范表，并在 Windows 上准备 OpenBLAS 和 Boost，全部放进被忽略的 `.ci-inputs/`。
+生成规范表，输入放进被忽略的 `.ci-inputs/`。新 Core 的数值内核由 Rust 1.98 构建。
 然后在你的 shell 里指向它们：
 
 ```bash
 export MACINDECODE_AC4_SPEC_DIR="$PWD/.ci-inputs/ac4-core/spec"
 export MACINRENDER_SOURCE_DIR="$PWD/.ci-inputs/macinrender"
-export BOOST_ROOT="$PWD/.ci-inputs/boost_1_89_0"
 ```
 
 ```bat
 set "MACINDECODE_AC4_SPEC_DIR=%CD%\.ci-inputs\ac4-core\spec"
 set "MACINRENDER_SOURCE_DIR=%CD%\.ci-inputs\macinrender"
-set "BOOST_ROOT=%CD%\.ci-inputs\boost_1_89_0"
 ```
 
 `MACINDECODE_AC4_SPEC_DIR` 指向的目录里必须有 `generated/ts103190_pdf_tables.rs`、
-`ts_103190_tables.c` 和 `ts_103190_tables_part2.c`。Windows 的完整构建还需要 OpenBLAS 相关的
-CMake 变量，`scripts/prepare_inputs.py` 会一并准备；如果不想自己拼这些变量，直接用下面的打包脚本，
-它会在同一个进程里准备输入再构建。
+`ts_103190_tables.c` 和 `ts_103190_tables_part2.c`。完整构建使用 CMake/Ninja、C++20 编译器与 Rust 1.98。
+下面的打包脚本会在同一个进程里准备输入再构建。
 
 ### 日常命令
 

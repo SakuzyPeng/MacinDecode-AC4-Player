@@ -27,8 +27,8 @@ macro_rules! api {
                 }
                 let api = Self { $($name,)* };
                 // SAFETY: validated version entrypoints take no pointers.
-                if unsafe { (api.adm_api_version_major)() } != 1 || unsafe { (api.adm_api_version_minor)() } < 42 {
-                    return Err("MacinRender C ABI v1.42 or later is required".into());
+                if unsafe { (api.adm_api_version_major)() } != 1 || unsafe { (api.adm_api_version_minor)() } < 44 {
+                    return Err("MacinRender C ABI v1.44 or later is required".into());
                 }
                 let _ = CACHED.set(api.clone());
                 Ok(api)
@@ -47,6 +47,8 @@ api! {
     adm_create_scene_stream(*mut c_void, *const raw::StreamConfig, *mut *mut c_void) -> i32;
     adm_destroy_scene_stream(*mut c_void) -> ();
     adm_scene_stream_last_error_message(*const c_void) -> *const c_char;
+    adm_scene_stream_log_count(*mut c_void) -> u32;
+    adm_scene_stream_log_entry(*mut c_void, u32, *mut raw::Diagnostic) -> i32;
     adm_scene_stream_configure_generation(*mut c_void, u64, u64, *const raw::Element, u32) -> i32;
     adm_scene_stream_submit_frame(*mut c_void, *const raw::Frame, u32, *mut i32) -> i32;
     adm_scene_stream_signal_end(*mut c_void, u64, i64) -> i32;

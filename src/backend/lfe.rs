@@ -48,6 +48,35 @@ pub(super) fn normalization(block: &DecodedSceneBlock, offset: u32) -> f32 {
     }
 }
 
+/// Resolve the two independent source controls before folding into one bed LFE.
+/// This is pure so retrying a backpressured Scene frame cannot advance a ramp.
+#[cfg(any(macinrender_output, test))]
+pub(super) fn fold(block: &DecodedSceneBlock, offset: u32) -> Vec<f32> {
+    let gain = normalization(block, offset);
+    (offset..block.duration_frames())
+        .map(|frame| {
+            block
+                .lfes()
+                .iter()
+                .map(|lfe| {
+                    let (active, level) = lfe_render_state(element_state_at(
+                        block,
+                        lfe.element_id(),
+                        lfe.initial_state(),
+                        frame,
+                    ));
+                    if active {
+                        lfe.samples()[frame as usize] * level
+                    } else {
+                        0.0
+                    }
+                })
+                .sum::<f32>()
+                * gain
+        })
+        .collect()
+}
+
 #[cfg_attr(not(any(windows_spatial_output, test)), allow(dead_code))]
 pub(super) struct Render {
     pub active: bool,
@@ -245,5 +274,36 @@ mod tests {
         for (actual, input) in rendered.samples.iter().zip([0.5, 0.5, -0.5, -0.5]) {
             assert!((actual - input * std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6);
         }
+    }
+
+    #[test]
+    fn folded_lfe_bakes_gain_ramps_once_and_is_repeatable_after_trimming() {
+        use crate::decoder::{FIELD_GAIN, SceneMetadataUpdate};
+        let first = SpatialObjectState::new(true, None, Some(1.0), true);
+        let second = SpatialObjectState::new(true, None, Some(0.0), true);
+        let block = DecodedSceneBlock::new(
+            48_000,
+            0,
+            8,
+            1,
+            0,
+            None,
+            true,
+            vec![],
+            None,
+            vec![SceneMetadataUpdate::new(10, 2, 2, FIELD_GAIN, first)],
+        )
+        .with_lfes(vec![
+            SceneLfePcm::new(4, Some(first), vec![0.5; 8]),
+            SceneLfePcm::new(10, Some(second), vec![0.5; 8]),
+        ]);
+        let expected = [0.5, 0.5, 0.5, 0.75, 1.0, 1.0, 1.0, 1.0]
+            .map(|value| value * std::f32::consts::FRAC_1_SQRT_2);
+        let actual = fold(&block, 0);
+        for (a, b) in actual.iter().zip(expected) {
+            assert!((a - b).abs() < 1e-6);
+        }
+        assert_eq!(fold(&block, 3), fold(&block, 3));
+        assert_eq!(fold(&block, 3), actual[3..]);
     }
 }

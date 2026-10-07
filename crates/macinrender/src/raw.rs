@@ -3,6 +3,20 @@ use std::ffi::{c_char, c_void};
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
+pub struct Diagnostic {
+    pub size: u32,
+    pub level: i32,
+    pub code: i32,
+    pub reserved: u32,
+    pub epoch: u64,
+    pub generation: u64,
+    pub element: u64,
+    pub fields: u64,
+    pub message: *const c_char,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
 pub struct RendererConfig {
     pub size: u32,
     pub renderer: i32,

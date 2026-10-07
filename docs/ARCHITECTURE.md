@@ -435,3 +435,9 @@ fixture。
 `decoder::worker::apac` 使用 `apac_container::Media/Playback`，复用请求内文件句柄、变更检测、取消、播放 key 和两秒 Scene FIFO。后台 Indexer 的检查点间隔由包数确定，单批最多约 256 点，暂停时也不会增长为整文件 PCM。Core 负责有效帧裁剪与精确 seek；旧 key 的读取和结果不能进入新队列。
 
 离散布局以完整 layout tag 和数值语义校验，不靠声道数量猜测；16 路 HOA 与 9.1.6 分开。普通声道按 Apple 几何成为固定位置元素，22.2 的两路 LFE 按语义目的地顺序保持独立。Scene signature 比较全部 LFE ID，metadata continuity、裁剪、渲染提交和电平历史均覆盖两路。`Session::configure_lfes` 使用 C ABI 的 LFE1/LFE2 标签；Direct 保留两路，split-power 或单 LFE 输出在输出端根据实际有信号的路数归一化；`backend::lfe` 保存这一共享算术和 Windows 量子组装，解码 PCM 不修改，电平表仍分别测量两路源。路由模式改变重建输出，避免归一化后的排队 PCM 被不同路由再次处理。HOA 未接入本轮播放。
+
+## 渲染后端能力探测
+
+播放器的 `SpeakerRenderer` 是系统空间音频的算法偏好，和设备输出模式分开持久化。FFI 层将其映射到 C ABI 的 SAF / Triple Balance 枚举，并使 Scene renderer 与设备使用一致的几何。`probe_player_renderer` 在 null 输出中提交静音对象＋LFE，并等到 worker 完成；创建成功或异步 configure 已入队都不是能力证明。设备线程按三个布局探测，通过 `OnceLock` 发布给 UI，不打开实际设备。
+
+Triple Balance 的 LFE 在原生边界适配为只有 LFE 有信号的完整 7.1.2 bed。补齐声道使用零增益／inactive／无信号 PCM，不进入源签名和可视化；ID 避免与源冲突。需要双 LFE 合成时 `backend::lfe::fold` 按采样解析源控制再归一化，输出是已带增益的一路 PCM，提交时移除原 LFE 的 ramp／更新，避免二次施加；重试不改变状态。gap 同样保留床 LFE 无位置的语义。独立双 LFE Direct 留给 SAF VBAP，Triple Balance 的准备阶段明确拒绝该组合。

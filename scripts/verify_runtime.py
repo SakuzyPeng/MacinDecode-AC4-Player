@@ -216,7 +216,7 @@ def run_smoke(binary, data_root):
     require(check["ok"] and check["embedded_licenses"], "Installed executable lacks storage or embedded notices")
     require(check.get("decode") and check.get("macinrender"), "Installer must contain the full decoder and renderer")
     renderers = check.get("native_renderers", [])
-    require({renderer["name"] for renderer in renderers} == {"vbap", "binaural"}
+    require({renderer["name"] for renderer in renderers} == {"vbap", "binaural", "triple-balance-7.1.4", "triple-balance-9.1.6", "triple-balance-22.2"}
             and all(renderer["presented_frames"] == 4800 for renderer in renderers), "Native rendering did not consume the test scene")
     graphics_modules = observe(binary, "--smoke-test", data_root, env, data_root / "window.log")
     report = json.loads((data_root / "smoke-report.json").read_text())

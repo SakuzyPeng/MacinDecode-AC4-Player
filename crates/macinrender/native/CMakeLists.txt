@@ -24,11 +24,17 @@ else()
 endif()
 FetchContent_Declare(macinrender
     GIT_REPOSITORY https://github.com/SakuzyPeng/MacinRender-ADM-Core.git
-    GIT_TAG 88850e79fd5fc8ccd4516521d77edb8753b5d6e2
+    GIT_TAG a125ab7d1fcb2527f46265088fdf4b5c2aa3645b
     # Share downloaded sources, but isolate each Cargo build's native outputs.
     BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/macinrender-build"
 )
 FetchContent_MakeAvailable(macinrender)
+
+if(MSVC)
+    # Core now embeds Rust numerical kernels. Match the player's static CRT
+    # in that nested Cargo build as well as in its C/C++ dependencies.
+    corrosion_add_target_rustflags(mradm_ffi "-Ctarget-feature=+crt-static")
+endif()
 
 # An actual executable lets CMake resolve the static dependency closure and
 # framework ordering. Cargo reads its File API link information, never Ninja

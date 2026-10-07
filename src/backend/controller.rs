@@ -124,6 +124,21 @@ impl SpatialOutputController {
     pub fn settings(&self) -> &OutputSettings {
         &self.settings
     }
+    #[cfg_attr(
+        not(macinrender_output),
+        allow(clippy::unused_self, clippy::unnecessary_wraps)
+    )]
+    pub fn triple_balance_support(&self, layout: super::SpeakerLayout) -> Option<Result<(), &str>> {
+        #[cfg(macinrender_output)]
+        {
+            self.catalog.triple_balance_support(layout)
+        }
+        #[cfg(not(macinrender_output))]
+        {
+            let _ = layout;
+            Some(Err("Native spatial output is unavailable in this build"))
+        }
+    }
     /// The SOFA accepted by the current native binaural output. Preferences
     /// alone are not evidence: they can be selected before any output exists.
     #[cfg_attr(
@@ -304,6 +319,9 @@ impl SpatialOutputController {
     ) -> Result<(), String> {
         if self.settings_pending() {
             return Err("An audio settings change is already being prepared".into());
+        }
+        if let Some(config) = &self.config {
+            super::macinrender::validate_source(&settings, config)?;
         }
         let device = match settings.mode.resolved() {
             SpatialBackendKind::SafBinaural => match &settings.stereo_device {

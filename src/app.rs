@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::backend::{
     OutputDeviceSelection, OutputPhase, OutputSettings, OutputSnapshot, OutputStreamConfig,
-    SpatialBackendKind, SpatialOutputController, SpeakerLayout,
+    SpatialBackendKind, SpatialOutputController, SpeakerLayout, SpeakerRenderer,
 };
 use crate::bitstream_ui::{self, BitstreamAction};
 use crate::decoder::{
@@ -1767,6 +1767,19 @@ impl PlayerApp {
         }
     }
 
+    fn draw_speaker_settings(&self, ui: &mut egui::Ui, settings: &mut OutputSettings) {
+        let support = self.output.triple_balance_support(settings.layout);
+        draw_speakers_page(
+            ui,
+            settings,
+            self.decoder
+                .snapshot()
+                .metrics()
+                .map_or(0, DecodeMetrics::lfe_count),
+            support,
+        );
+    }
+
     fn draw_output_settings(&mut self, context: &egui::Context) {
         if !self.output_settings_open {
             return;
@@ -1835,14 +1848,7 @@ impl PlayerApp {
                         }
                         ui.separator();
                         match page {
-                            OutputPage::Speakers => draw_speakers_page(
-                                ui,
-                                &mut settings,
-                                self.decoder
-                                    .snapshot()
-                                    .metrics()
-                                    .map_or(0, DecodeMetrics::lfe_count),
-                            ),
+                            OutputPage::Speakers => self.draw_speaker_settings(ui, &mut settings),
                             OutputPage::Hrtf => self.draw_hrtf_page(ui, &mut settings, context),
                             OutputPage::Headphones => {
                                 self.draw_headphones_page(ui, &mut settings, context);
@@ -4086,7 +4092,44 @@ impl OutputPage {
 }
 
 /// The speakers page: the bed the system spatializer is handed.
-fn draw_speakers_page(ui: &mut egui::Ui, settings: &mut OutputSettings, lfe_count: usize) {
+fn draw_speakers_page(
+    ui: &mut egui::Ui,
+    settings: &mut OutputSettings,
+    lfe_count: usize,
+    triple_balance: Option<Result<(), &str>>,
+) {
+    ui.horizontal(|ui| {
+        ui.label("Speaker renderer");
+        egui::ComboBox::from_id_salt("speaker-renderer")
+            .selected_text(settings.speaker_renderer.label())
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut settings.speaker_renderer,
+                    SpeakerRenderer::SafVbap,
+                    SpeakerRenderer::SafVbap.label(),
+                );
+                let response = ui
+                    .add_enabled_ui(triple_balance.is_some_and(|result| result.is_ok()), |ui| {
+                        ui.selectable_value(
+                            &mut settings.speaker_renderer,
+                            SpeakerRenderer::TripleBalance,
+                            SpeakerRenderer::TripleBalance.label(),
+                        )
+                    })
+                    .inner;
+                match triple_balance {
+                    Some(Err(error)) => {
+                        response.on_hover_text(format!(
+                            "Triple Balance playback is unavailable in this Core build: {error}"
+                        ));
+                    }
+                    None => {
+                        response.on_hover_text("Checking renderer support…");
+                    }
+                    Some(Ok(())) => {}
+                }
+            });
+    });
     ui.horizontal(|ui| {
         ui.label("Speaker layout");
         egui::ComboBox::from_id_salt("speaker-layout")
@@ -4097,7 +4140,10 @@ fn draw_speakers_page(ui: &mut egui::Ui, settings: &mut OutputSettings, lfe_coun
                 }
             });
     });
-    ui.label("Apple speaker geometry · system default output");
+    ui.label(match settings.speaker_renderer {
+        SpeakerRenderer::SafVbap => "Apple speaker geometry · system default output",
+        SpeakerRenderer::TripleBalance => "Fixed room geometry · system default output",
+    });
     #[cfg(all(target_os = "macos", macinrender_output))]
     {
         let applicable = settings.atmos_label_applicable();
@@ -4109,10 +4155,17 @@ fn draw_speakers_page(ui: &mut egui::Ui, settings: &mut OutputSettings, lfe_coun
         ui.horizontal(|ui| {
             ui.label("LFE routing");
             ui.selectable_value(&mut settings.split_lfe, true, "Equal-power copy");
-            ui.selectable_value(&mut settings.split_lfe, false, "Direct");
+            ui.add_enabled_ui(
+                settings.speaker_renderer != SpeakerRenderer::TripleBalance || lfe_count < 2,
+                |ui| {
+                    ui.selectable_value(&mut settings.split_lfe, false, "Direct");
+                },
+            );
         });
         if lfe_count > 1 {
-            ui.label("Direct keeps both LFEs separate. Copy normalizes the sum only when both have signal.");
+            ui.label(if settings.speaker_renderer == SpeakerRenderer::TripleBalance {
+                "Triple Balance uses Equal-power copy for two LFE inputs. Choose SAF VBAP for independent Direct output."
+            } else { "Direct keeps both LFEs separate. Copy normalizes the sum only when both have signal." });
         }
     }
 }
@@ -5230,6 +5283,7 @@ Filter 10: ON WAT Fc 500 Hz Gain 1 dB Q 1
         .unwrap();
         let mut session = native::Session::new(&native::Config {
             renderer: native::RendererSettings {
+                speaker_renderer: native::SpeakerRenderer::SafVbap,
                 binaural: true,
                 layout: "4+7+0".into(),
                 sofa: String::new(),
@@ -5309,6 +5363,7 @@ Filter 10: ON WAT Fc 500 Hz Gain 1 dB Q 1
         .unwrap();
         let mut session = native::Session::new(&native::Config {
             renderer: native::RendererSettings {
+                speaker_renderer: native::SpeakerRenderer::SafVbap,
                 binaural: true,
                 layout: "4+7+0".into(),
                 sofa: String::new(),

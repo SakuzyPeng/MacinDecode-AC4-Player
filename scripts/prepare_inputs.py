@@ -1,15 +1,12 @@
 """Prepare checksum/revision-pinned inputs for the full default-feature player."""
-import hashlib
 import os
 from pathlib import Path
 import re
 import subprocess
 import sys
-import tarfile
 
 ROOT = Path(__file__).resolve().parents[1]
 INPUTS = ROOT / ".ci-inputs"
-BOOST_SHA = "85a33fa22621b4f314f8e85e1a5e2a9363d22e4f4992925d4bb3bc631b5a0c7a"
 
 
 def run(args, **kwargs):
@@ -31,14 +28,6 @@ def checkout(name, url, revision):
     return destination
 
 
-def download(url, destination, expected):
-    if not destination.exists():
-        run(["curl", "--fail", "--location", "--retry", "3", "--output", destination, url])
-    with destination.open("rb") as stream:
-        actual = hashlib.file_digest(stream, "sha256").hexdigest()
-    if actual != expected: raise RuntimeError(f"Input checksum mismatch: {destination}")
-
-
 def prepare():
     os.environ.setdefault("PYTHONUTF8", "1")
     os.environ.setdefault("PYTHONIOENCODING", "utf-8")
@@ -57,17 +46,6 @@ def prepare():
         run([sys.executable, core / "scripts/fetch_specs.py"])
         run([sys.executable, core / "scripts/generate_spec_tables.py"])
         settings["MACINDECODE_AC4_SPEC_DIR"] = str(core / "spec")
-    if os.name == "nt":
-        from prepare_openblas import prepare as prepare_openblas
-        settings.update(prepare_openblas(ROOT, download))
-    if not os.getenv("BOOST_ROOT"):
-        boost_archive = INPUTS / "boost.tar.bz2"
-        download("https://archives.boost.io/release/1.89.0/source/boost_1_89_0.tar.bz2", boost_archive, BOOST_SHA)
-        boost = INPUTS / "boost_1_89_0"
-        if not (boost / "boost/version.hpp").exists():
-            with tarfile.open(boost_archive) as source:
-                source.extractall(INPUTS, members=(m for m in source if m.name.startswith("boost_1_89_0/boost/")), filter="data")
-        settings["BOOST_ROOT"] = str(boost)
     os.environ.update(settings)
     if os.getenv("GITHUB_ENV"):
         with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as stream:

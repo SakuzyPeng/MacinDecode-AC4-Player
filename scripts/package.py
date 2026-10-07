@@ -121,7 +121,6 @@ def license_report(destination):
     native = Path(os.environ["MACINRENDER_SOURCE_DIR"])
     legal_files = [ROOT / "LICENSE", ROOT / "assets/fonts/OFL.txt", native / "LICENSE", native / "docs/THIRD_PARTY_LICENSES.md"]
     legal_files += sorted(path for path in (native / "third_party/licenses").rglob("*") if path.is_file())
-    if os.name == "nt": legal_files.append(ROOT / "assets/licenses/OPENBLAS.txt")
     for index, path in enumerate(legal_files):
         cleaned.append({"id":f"native-{index}", "name":path.name, "text":path.read_text(encoding="utf-8", errors="replace"),
                         "used_by":[{"crate":{"name":"MacinDecode / MacinRender native dependencies", "version":"", "repository":"https://github.com/SakuzyPeng/MacinRender-ADM-Core"}}]})
@@ -338,7 +337,7 @@ def build(target, tag):
                     "minimum_os": "Windows 10 22H2" if os.name == "nt" else "macOS " + MAC_MINIMUM,
                     "native_commit":output(["git", "-C", native["source"], "rev-parse", "HEAD"]),
                     "native_linkage": "static",
-                    "openblas": json.loads(Path(os.environ["OPENBLAS_BUILD_MANIFEST"]).read_text()) if os.name == "nt" else None,
+                    "native_numerics": "mradm-ffi (Rust)",
                     "dependencies": dependencies, "smoke_test": runtime}
         shutil.copy2(installer, dist / installer.name)
         (dist / (installer.name + ".sha256")).write_text(f"{manifest['installer_sha256']}  {installer.name}\n", encoding="utf-8")

@@ -1,19 +1,30 @@
 # MacinRender 播放集成
 
-Player 将 AC-4 Core 的 Scene 或 APAC 离散多声道 转换为 renderer-native Scene，经 MacinRender C ABI v1.42
+Player 将 AC-4 Core 的 Scene 或 APAC 离散多声道 转换为 renderer-native Scene，经 MacinRender C ABI v1.44
 进行空间渲染及设备输出。Core 类型和平台指针均不进入 GUI；FFI 封装集中在独立 crate。
+
+## 扬声器渲染后端
+
+`Audio settings → Speakers → Speaker renderer` 分别选择 SAF VBAP（默认）或 Triple Balance。
+VBAP 沿用 Apple 几何；Triple Balance 发送 C ABI 的 `ADM_RENDERER_TRIPLE_BALANCE = 7`，渲染和设备输出均使用标准房间几何。该选择只影响系统空间音频，软件双耳继续使用 SAF HRTF，Windows 对象直通保持原通路。旧设置缺少 `speaker_renderer` 时保持 VBAP；算法或几何改变会准备新输出并恢复当前播放位置。
+
+当前固定 Core `a125ab7` / C ABI 1.44。后台以 null 输出实际提交对象、LFE 和静音补齐床，检查 worker 完成后才启用对应布局，不以创建成功代替可播放。探测不打开音频设备，失败显示结构化 backend diagnostic。
+
+Triple Balance 要求完整的 7.1.2 bed。播放器在原生边界为 LFE 增加九路永久静音的 bed 通道；普通对象照常提交，虚拟声道不占用播放器的源对象和表头。静音通道使用避开源 ID 的独立 ID，随 generation 重建，PCM 标为无信号，状态关闭且增益为零。源解码数据和场景元数据不修改。
+
+该床只承载一路 LFE。单 LFE 直接送入；双 LFE 在 7.1.4 / 9.1.6 或 22.2 等功率复制模式下，先解析各自增益与静音，再按有信号路数归一化合成。合成结果不会再次应用源 LFE 增益更新。22.2 双 LFE 的独立 Direct 使用 SAF VBAP；Triple Balance 下明确阻止这个不支持的组合。LFE 床及 22.2 要求 48 kHz 输入；无 LFE 的 7.1.4 / 9.1.6 点源沿用 Core 的输入采样率范围。Core 的坐标、headLocked 等限制会保留具体错误。
 
 ## 播放策略
 
 - 自动模式：Windows 使用原始动态对象直通，macOS 使用系统空间音频。
-- 系统空间音频：SAF VBAP、Apple 几何；开放 7.1.4、9.1.6、22.2，默认 7.1.4。
+- 系统空间音频：默认 SAF VBAP / Apple 几何，可选 Triple Balance / 固定房间几何；开放 7.1.4、9.1.6、22.2，默认 7.1.4。
   22.2 默认将单路 LFE 以每路 `1/sqrt(2)` 复制到双 LFE，也可选择 direct。
   APAC 22.2 的两个输入 LFE 分别配置为 LFE1/LFE2。Direct 在 macOS CICP_13 中保留两个独立输出；等功率复制按实际有信号的输入数归一化后送入双 LFE。
   只有一路有信号时保留电平；两路都有信号时按 `(LFE1 + LFE2) / sqrt(2)` 合成，复制到两路时各再乘 `1/sqrt(2)`。
   检测在增益/静音之后按音频块执行（阈值 `1e-12`），不在逐采样过零点改变增益。Windows 对象直通使用相同合成规则输出一路 LFE。
   更换 LFE 路由会准备新的输出并沿用当前播放位置，避免已排队 PCM 跨越两种归一化策略。
 - 软件双耳：SAF HRTF，默认内置 KEMAR，可选择用户 SOFA。
-- 系统模式跟随系统默认输出。Windows 的固定床超出静态槽位的位置采用所选 Apple 几何；
+- 系统模式跟随系统默认输出。Windows 的固定床超出静态槽位的位置采用所选后端的几何；
   静态槽位的最终角度由 Windows 的空间化器决定。
 - 软件朝向在 Mac 优先使用 AirPods，缺失或权限不可用时使用手动朝向；Windows 使用手动朝向。
   系统空间音频模式保持上游中性姿态，macOS 的系统头追由系统负责。
@@ -333,8 +344,8 @@ FFT 工作区、卷积尾部及对象状态仍由每个渲染器独立持有。
 ## 原生源码构建
 
 默认 feature 包含 `decode` 和 `macinrender`。Cargo 调用 CMake/Ninja 构建固定提交的源代码；
-原生库使用 Release，开启 SOFA，关闭 CLI、测试和 IAMF。macOS 使用 Accelerate；Windows
-需要 MSVC、Boost 头文件及 OpenBLAS/LAPACKE，沿用 MacinRender 的 Windows 工具链。
+原生库使用 Release，开启 SOFA，关闭 CLI、测试和 IAMF。数值内核由 Core 的 Rust 1.98
+workspace 构建并静态链接；Windows 使用 MSVC，不再准备 OpenBLAS/LAPACKE 或 Boost。
 
 可设置以下开发覆盖，避免修改锁定版本：
 
@@ -343,8 +354,8 @@ MACINRENDER_SOURCE_DIR=<本地 MacinRender 源码目录>
 MACINRENDER_FETCHCONTENT_DIR=<Cargo target 内的依赖缓存目录>
 ```
 
-Windows 的 `CMAKE_TOOLCHAIN_FILE`、`OPENBLAS_LIBRARY`、`LAPACKE_LIBRARY`、
-`OPENBLAS_HEADER_PATH`、`LAPACKE_HEADER_PATH` 会传入 CMake。配置缓存与产物位于 Cargo 构建目录。
+`CMAKE_TOOLCHAIN_FILE` 会传入 CMake。C++ 产物位于播放器的 Cargo 构建目录；Core 的 Rust
+数值内核复用其 `build/rust`，Cargo 区分平台与 profile。源覆盖会跟踪 C++、头文件、CMake 和 Rust 的变化。
 没有 `macinrender` 时不需要 C++ 依赖：`cargo run --no-default-features --features decode` 保留
 Windows 对象直通以及 macOS/Linux 场景预览。`--no-default-features` 为纯检查构建。
 

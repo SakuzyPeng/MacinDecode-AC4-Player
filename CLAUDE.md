@@ -4,8 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Native desktop player and inspector for AC-4 spatial audio (`.m4a`, `.mp4`, `.ac4`), built on
-egui/eframe. All decoding comes from `MacinDecode-AC4-Core` — the app never calls a system media
+Native desktop player and inspector for AC-4 and APAC spatial audio (`.m4a`, `.mp4`, `.ac4`, `.caf`), built on
+egui/eframe. Decoding comes from `MacinDecode-AC4-Core` and `MacinDecode-APAC-Core` — the app never calls a system media
 decoder. Decode runs on every platform: Core's crates carry no `target_os` of their own.
 
 One thing in the pipeline is not decoded: `decoder::demo`, the built-in demo track, synthesises a
@@ -79,7 +79,7 @@ features, not on the platform:
 | Feature | Input | Env |
 | --- | --- | --- |
 | `decode` | three ETSI TS 103 190 tables generated from the official spec | `MACINDECODE_AC4_SPEC_DIR` |
-| `macinrender` | MacinRender sources built through CMake/Ninja with a C++20 toolchain (macOS/Windows only), plus Boost, and OpenBLAS/LAPACKE on Windows | `MACINRENDER_SOURCE_DIR`, `MACINRENDER_FETCHCONTENT_DIR`, `BOOST_ROOT`, `OPENBLAS_*` / `LAPACKE_*` / `CMAKE_TOOLCHAIN_FILE` |
+| `macinrender` | MacinRender sources built through CMake/Ninja with a C++20 toolchain and Rust 1.98 (macOS/Windows only) | `MACINRENDER_SOURCE_DIR`, `MACINRENDER_FETCHCONTENT_DIR`, `CMAKE_TOOLCHAIN_FILE` |
 
 The demo score is neither: `scripts/generate-demo-score.py` fetches checksum-pinned `LilyPond`
 sources, transcribes them, and the result is committed, so no build or test reaches the network for
@@ -88,7 +88,7 @@ it.
 `python scripts/prepare_inputs.py` produces all of it under the gitignored `.ci-inputs/`: it checks
 out Core at the `rev` pinned in `Cargo.toml` and MacinRender at the `GIT_TAG` pinned in
 `crates/macinrender/native/CMakeLists.txt`, runs Core's `fetch_specs.py` / `generate_spec_tables.py`,
-and prepares Boost and (on Windows) OpenBLAS. It only exports into the calling process and
+and uses Core’s Rust numerical kernels without the legacy OpenBLAS/Boost SDKs. It only exports into the calling process and
 `GITHUB_ENV`, so for an interactive build either point the variables at `.ci-inputs/` yourself or run
 `scripts/package.py`, which prepares and builds in one process.
 

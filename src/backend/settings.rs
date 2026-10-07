@@ -3,6 +3,23 @@ use crate::head_tracking::HeadSource;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum SpeakerRenderer {
+    #[default]
+    #[serde(rename = "saf-vbap")]
+    SafVbap,
+    #[serde(rename = "triple-balance")]
+    TripleBalance,
+}
+impl SpeakerRenderer {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::SafVbap => "SAF VBAP",
+            Self::TripleBalance => "Triple Balance",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum SpeakerLayout {
     #[default]
     #[serde(rename = "7.1.4")]
@@ -51,6 +68,7 @@ pub struct OutputSettings {
     #[serde(skip)]
     pub null_output: bool,
     pub mode: SpatialBackendKind,
+    pub speaker_renderer: SpeakerRenderer,
     pub layout: SpeakerLayout,
     pub split_lfe: bool,
     pub atmos_label_assist: bool,
@@ -74,6 +92,7 @@ impl Default for OutputSettings {
             #[cfg(test)]
             null_output: false,
             mode: SpatialBackendKind::Automatic,
+            speaker_renderer: SpeakerRenderer::default(),
             layout: SpeakerLayout::default(),
             split_lfe: true,
             atmos_label_assist: true,
@@ -180,6 +199,7 @@ impl OutputSettings {
         self.mode.resolved() != other.mode.resolved()
             || (self.mode.resolved() == SpatialBackendKind::SystemSpatial
                 && (self.layout != other.layout
+                    || self.speaker_renderer != other.speaker_renderer
                     || (self.layout == SpeakerLayout::TwentyTwoTwo
                         && self.split_lfe != other.split_lfe)))
             || self.native_device != other.native_device
@@ -189,6 +209,13 @@ impl OutputSettings {
     pub fn renderer(&self) -> macindecode_macinrender::RendererSettings {
         macindecode_macinrender::RendererSettings {
             binaural: self.mode.resolved() == SpatialBackendKind::SafBinaural,
+            speaker_renderer: if self.mode.resolved() == SpatialBackendKind::SystemSpatial
+                && self.speaker_renderer == SpeakerRenderer::TripleBalance
+            {
+                macindecode_macinrender::SpeakerRenderer::TripleBalance
+            } else {
+                macindecode_macinrender::SpeakerRenderer::SafVbap
+            },
             layout: self.layout.core_id().into(),
             sofa: if self.mode.resolved() == SpatialBackendKind::SafBinaural {
                 self.sofa.clone()
@@ -203,6 +230,31 @@ impl OutputSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn speaker_renderer_preference_migrates_and_only_rebuilds_speaker_output() {
+        let old: OutputSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.speaker_renderer, SpeakerRenderer::SafVbap);
+        let mut before = OutputSettings {
+            mode: SpatialBackendKind::SystemSpatial,
+            ..old
+        };
+        let mut after = before.clone();
+        after.speaker_renderer = SpeakerRenderer::TripleBalance;
+        let reloaded: OutputSettings =
+            serde_json::from_str(&serde_json::to_string(&after).unwrap()).unwrap();
+        assert_eq!(reloaded.speaker_renderer, SpeakerRenderer::TripleBalance);
+        assert!(before.needs_rebuild(&after) && after.needs_rebuild(&before));
+        before.mode = SpatialBackendKind::SafBinaural;
+        after.mode = SpatialBackendKind::SafBinaural;
+        assert!(!before.needs_rebuild(&after));
+        #[cfg(macinrender_output)]
+        assert_eq!(
+            before.renderer(),
+            after.renderer(),
+            "a saved speaker choice must not change headphone rendering"
+        );
+    }
     #[test]
     fn defaults_and_layout_catalog_are_fixed() {
         let settings = OutputSettings::default();

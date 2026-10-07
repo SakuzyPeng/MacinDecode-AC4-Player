@@ -3,9 +3,11 @@
 #include "adm/c_api.h"
 #include "mr_headmotion.h"
 
-#if ADM_API_VERSION < 14200
-#error MacinDecode requires MacinRender C ABI v1.42 or later
+#if ADM_API_VERSION < 14400
+#error MacinDecode requires MacinRender C ABI v1.44 or later
 #endif
+
+_Static_assert(ADM_RENDERER_TRIPLE_BALANCE == 7, "Triple Balance renderer value changed");
 
 size_t macinrender_abi_size(uint32_t type) {
     switch (type) {
@@ -24,6 +26,7 @@ size_t macinrender_abi_size(uint32_t type) {
     case 12: return sizeof(adm_hptf_info_t);
     case 13: return sizeof(adm_hptf_band_t);
     case 14: return sizeof(adm_hptf_parameters_t);
+    case 15: return sizeof(adm_scene_diagnostic_t);
     default: return 0;
     }
 }
@@ -56,6 +59,8 @@ size_t macinrender_abi_offset(uint32_t field) {
     case 23: return offsetof(adm_hptf_band_t, q);
     case 24: return offsetof(adm_hptf_parameters_t, bands);
     case 25: return offsetof(adm_hptf_parameters_t, revision);
+    case 26: return offsetof(adm_scene_diagnostic_t, message);
+    case 27: return offsetof(adm_scene_diagnostic_t, code);
     default: return (size_t)-1;
     }
 }

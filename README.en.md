@@ -52,8 +52,10 @@ Default builds include embedded PoseBridge BLE/USB head tracking and device cont
 
 Supported files: AC-4 / APAC `.m4a` and `.mp4`, raw `.ac4`, and APAC `.caf`. AC-4 focuses on **Full A-JOC**.
 APAC supports mono, stereo, 5.1, 7.1, 7.1.4, 9.1.6 and 22.2 with frame-exact seeking; HOA playback is not yet supported.
-The two 22.2 LFE channels remain separate through macOS **System spatial audio → 22.2 → Direct** output.
+The two 22.2 LFE channels remain separate through macOS **System spatial audio → SAF VBAP → 22.2 → Direct** output.
 See [APAC multichannel playback](docs/MANUAL.en.md#apac-multichannel-playback).
+
+Choose SAF VBAP or Triple Balance under **Speakers → Speaker renderer** in system spatial mode. Triple Balance supports 7.1.4, 9.1.6 and 22.2; see the [input and LFE limits](docs/MANUAL.en.md#speaker-renderer).
 
 ## Getting the app
 
@@ -256,25 +258,22 @@ python scripts/prepare_inputs.py
 
 This checks out [MacinDecode-AC4-Core](https://github.com/SakuzyPeng/MacinDecode-AC4-Core) and
 MacinRender at the commits pinned in `Cargo.toml` and
-`crates/macinrender/native/CMakeLists.txt`, generates the spec tables, and on Windows prepares
-OpenBLAS and Boost — all under the gitignored `.ci-inputs/`. Then point your shell at them:
+`crates/macinrender/native/CMakeLists.txt` and generates the spec tables under the gitignored `.ci-inputs/`.
+The new Core builds its numerical kernels with Rust 1.98. Then point your shell at the inputs:
 
 ```bash
 export MACINDECODE_AC4_SPEC_DIR="$PWD/.ci-inputs/ac4-core/spec"
 export MACINRENDER_SOURCE_DIR="$PWD/.ci-inputs/macinrender"
-export BOOST_ROOT="$PWD/.ci-inputs/boost_1_89_0"
 ```
 
 ```bat
 set "MACINDECODE_AC4_SPEC_DIR=%CD%\.ci-inputs\ac4-core\spec"
 set "MACINRENDER_SOURCE_DIR=%CD%\.ci-inputs\macinrender"
-set "BOOST_ROOT=%CD%\.ci-inputs\boost_1_89_0"
 ```
 
 `MACINDECODE_AC4_SPEC_DIR` must contain `generated/ts103190_pdf_tables.rs`, `ts_103190_tables.c` and
-`ts_103190_tables_part2.c`. A full Windows build also needs the OpenBLAS CMake variables that
-`scripts/prepare_inputs.py` prepares; rather than assembling those by hand, use the packaging script
-below — it prepares the inputs and builds in the same process.
+`ts_103190_tables_part2.c`. A full build uses CMake/Ninja, a C++20 compiler and Rust 1.98.
+The packaging script below prepares the inputs and builds in the same process.
 
 ### Everyday commands
 

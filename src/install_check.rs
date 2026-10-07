@@ -96,17 +96,45 @@ pub fn check(directory: &Arc<DataDirectory>) -> Result<(), String> {
 }
 
 #[cfg(macinrender_output)]
+const RENDERER_CHECKS: [(&str, bool, macindecode_macinrender::SpeakerRenderer, &str); 5] = {
+    use macindecode_macinrender::SpeakerRenderer;
+    [
+        ("vbap", false, SpeakerRenderer::SafVbap, "4+7+0"),
+        ("binaural", true, SpeakerRenderer::SafVbap, "4+7+0"),
+        (
+            "triple-balance-7.1.4",
+            false,
+            SpeakerRenderer::TripleBalance,
+            "4+7+0",
+        ),
+        (
+            "triple-balance-9.1.6",
+            false,
+            SpeakerRenderer::TripleBalance,
+            "9.1.6",
+        ),
+        (
+            "triple-balance-22.2",
+            false,
+            SpeakerRenderer::TripleBalance,
+            "9+10+3",
+        ),
+    ]
+};
+
+#[cfg(macinrender_output)]
 fn check_renderers() -> Result<Vec<serde_json::Value>, String> {
     use macindecode_macinrender::{
         Config, Frame, ObjectState, OutputKind, Phase, Plane, RendererSettings, Session,
     };
     let mut reports = Vec::new();
-    for (name, binaural) in [("vbap", false), ("binaural", true)] {
+    for (name, binaural, speaker_renderer, layout) in RENDERER_CHECKS {
         let started = Instant::now();
         let mut session = Session::new(&Config {
             renderer: RendererSettings {
+                speaker_renderer,
                 binaural,
-                layout: "4+7+0".into(),
+                layout: layout.into(),
                 sofa: String::new(),
                 split_lfe: true,
             },
@@ -115,7 +143,7 @@ fn check_renderers() -> Result<Vec<serde_json::Value>, String> {
             input_rate: 48_000,
         })?;
         session.reset(1, 0)?;
-        session.configure(1, 1, &[7], None)?;
+        session.configure(1, 1, &[7], Some(8))?;
         let control = session.control();
         control.orientation([15.0, 0.0, 0.0])?;
         let samples = vec![0.01; 4800];
@@ -125,19 +153,36 @@ fn check_renderers() -> Result<Vec<serde_json::Value>, String> {
             start: 0,
             duration: 4800,
             complete: true,
-            planes: &[Plane {
-                element: 7,
-                samples: &samples,
-            }],
-            initial: &[(
-                7,
-                ObjectState {
-                    head_locked: false,
-                    active: true,
-                    gain: 1.0,
-                    position: Some([0.0, 1.0, 0.0]),
+            planes: &[
+                Plane {
+                    element: 7,
+                    samples: &samples,
                 },
-            )],
+                Plane {
+                    element: 8,
+                    samples: &samples,
+                },
+            ],
+            initial: &[
+                (
+                    7,
+                    ObjectState {
+                        head_locked: false,
+                        active: true,
+                        gain: 1.0,
+                        position: Some([0.0, 1.0, 0.0]),
+                    },
+                ),
+                (
+                    8,
+                    ObjectState {
+                        active: true,
+                        gain: 1.0,
+                        position: None,
+                        head_locked: false,
+                    },
+                ),
+            ],
             updates: &[],
         })?;
         if !accepted {

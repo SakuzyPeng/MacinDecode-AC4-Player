@@ -33,15 +33,31 @@ fn string(value: &str) -> Result<CString, String> {
     CString::new(value).map_err(|_| "Native text contains NUL".into())
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SpeakerRenderer {
+    #[default]
+    SafVbap,
+    TripleBalance,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RendererSettings {
     pub binaural: bool,
+    pub speaker_renderer: SpeakerRenderer,
     pub layout: String,
     pub sofa: String,
     pub split_lfe: bool,
 }
 
 impl RendererSettings {
+    const fn geometry(&self) -> i32 {
+        if !self.binaural && matches!(self.speaker_renderer, SpeakerRenderer::TripleBalance) {
+            0
+        } else {
+            1
+        }
+    }
+
     fn with_raw<T>(&self, action: impl FnOnce(&raw::RendererConfig) -> T) -> Result<T, String> {
         let layout = string(if self.binaural {
             "binaural"
@@ -51,10 +67,17 @@ impl RendererSettings {
         let sofa = string(&self.sofa)?;
         Ok(action(&raw::RendererConfig {
             size: size::<raw::RendererConfig>(),
-            renderer: if self.binaural { 6 } else { 2 },
+            renderer: if self.binaural {
+                6
+            } else {
+                match self.speaker_renderer {
+                    SpeakerRenderer::SafVbap => 2,
+                    SpeakerRenderer::TripleBalance => 7,
+                }
+            },
             layout: layout.as_ptr(),
             sofa: sofa.as_ptr(),
-            geometry: 1, // Player's fixed Apple geometry, on both operating systems.
+            geometry: self.geometry(),
             lfe: i32::from(self.split_lfe && self.layout == "9+10+3" && !self.binaural),
             ..Default::default()
         }))
@@ -257,6 +280,36 @@ impl Drop for Shared {
     }
 }
 impl Shared {
+    fn create_stream(settings: &RendererSettings, sample_rate: u32) -> Result<Self, String> {
+        let api = Api::load()?;
+        // SAFETY: validated no-argument constructor.
+        let context = unsafe { (api.adm_create_context)() };
+        if context.is_null() {
+            return Err("Cannot create MacinRender context".into());
+        }
+        let mut owned = Shared {
+            api,
+            context,
+            stream: std::ptr::null_mut(),
+            output: std::ptr::null_mut(),
+            gate: Mutex::new(()),
+        };
+        let code = settings.with_raw(|rendering| {
+            let raw = raw::StreamConfig {
+                size: size::<raw::StreamConfig>(),
+                rendering: *rendering,
+                input_rate: sample_rate,
+                output_rate: 48_000,
+                ..Default::default()
+            };
+            // SAFETY: every borrowed string/config lives until this synchronous call returns.
+            unsafe {
+                (owned.api.adm_create_scene_stream)(context, &raw const raw, &raw mut owned.stream)
+            }
+        })?;
+        owned.error(code, 0)?;
+        Ok(owned)
+    }
     fn error(&self, code: i32, domain: u8) -> Result<(), String> {
         if code == 0 {
             return Ok(());
@@ -288,8 +341,84 @@ fn copy_text(pointer: *const c_char) -> String {
         .into_owned()
 }
 
+/// Check the incremental Scene entry point without creating an audio device.
+/// A file-monitor renderer may exist while this entry point still rejects it.
+pub fn probe_renderer(settings: &RendererSettings, sample_rate: u32) -> Result<(), String> {
+    Shared::create_stream(settings, sample_rate).map(|_| ())
+}
+
+/// Exercise the player's object + LFE contract through the worker, using only
+/// the timer-driven null output. Creating a stream alone cannot catch an
+/// asynchronously rejected generation or effective initial state.
+pub fn probe_player_renderer(settings: &RendererSettings, sample_rate: u32) -> Result<(), String> {
+    use std::time::{Duration, Instant};
+    let mut session = Session::new(&Config {
+        renderer: settings.clone(),
+        output: OutputKind::Null,
+        device_id: String::new(),
+        input_rate: sample_rate,
+    })?;
+    session.reset(1, 0)?;
+    session.configure_lfes(1, 1, &[0], &[1])?;
+    let state = ObjectState {
+        active: true,
+        gain: 1.0,
+        position: None,
+        head_locked: false,
+    };
+    if !session.submit(&Frame {
+        epoch: 1,
+        generation: 1,
+        start: 0,
+        duration: 64,
+        complete: true,
+        planes: &[
+            Plane {
+                element: 0,
+                samples: &[],
+            },
+            Plane {
+                element: 1,
+                samples: &[],
+            },
+        ],
+        initial: &[
+            (
+                0,
+                ObjectState {
+                    position: Some([0.0, 1.0, 0.0]),
+                    ..state
+                },
+            ),
+            (1, state),
+        ],
+        updates: &[],
+    })? {
+        return Err("Renderer capability probe could not submit its Scene".into());
+    }
+    session.end(1, 64)?;
+    let control = session.control();
+    control.play(true)?;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let status = control.status()?;
+        if status.phase == Phase::Failed {
+            return Err(control.failure_message());
+        }
+        if status.phase == Phase::Ended && status.presented == 64 {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err("Renderer capability probe timed out".into());
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
 pub struct Session {
     inner: Arc<Shared>,
+    speaker_renderer: SpeakerRenderer,
+    silent_bed: Vec<u64>,
 }
 
 #[cfg(all(test, native_macinrender))]
@@ -301,33 +430,7 @@ pub struct Control {
 
 impl Session {
     pub fn new(config: &Config) -> Result<Self, String> {
-        let api = Api::load()?;
-        // SAFETY: validated no-argument constructor.
-        let context = unsafe { (api.adm_create_context)() };
-        if context.is_null() {
-            return Err("Cannot create MacinRender context".into());
-        }
-        let mut owned = Shared {
-            api,
-            context,
-            stream: std::ptr::null_mut(),
-            output: std::ptr::null_mut(),
-            gate: Mutex::new(()),
-        };
-        let code = config.renderer.with_raw(|rendering| {
-            let raw = raw::StreamConfig {
-                size: size::<raw::StreamConfig>(),
-                rendering: *rendering,
-                input_rate: config.input_rate,
-                output_rate: 48_000,
-                ..Default::default()
-            };
-            // SAFETY: every borrowed string/config lives until this synchronous call returns.
-            unsafe {
-                (owned.api.adm_create_scene_stream)(context, &raw const raw, &raw mut owned.stream)
-            }
-        })?;
-        owned.error(code, 0)?;
+        let mut owned = Shared::create_stream(&config.renderer, config.input_rate)?;
         let layout = string(&config.renderer.layout)?;
         let device = string(&config.device_id)?;
         let raw = raw::OutputConfig {
@@ -339,13 +442,13 @@ impl Session {
             },
             layout: layout.as_ptr(),
             device: device.as_ptr(),
-            geometry: 1,
+            geometry: config.renderer.geometry(),
             reserved: 0,
         };
         // SAFETY: stream/config are live; ownership of the result passes to Shared.
         let code = unsafe {
             (owned.api.adm_create_scene_output)(
-                context,
+                owned.context,
                 owned.stream,
                 &raw const raw,
                 &raw mut owned.output,
@@ -354,6 +457,12 @@ impl Session {
         owned.error(code, 0)?;
         Ok(Self {
             inner: Arc::new(owned),
+            speaker_renderer: if config.renderer.binaural {
+                SpeakerRenderer::SafVbap
+            } else {
+                config.renderer.speaker_renderer
+            },
+            silent_bed: Vec::new(),
         })
     }
     #[must_use]
@@ -392,6 +501,12 @@ impl Session {
         if lfes.len() > 2 {
             return Err("The renderer supports at most two LFE destinations".into());
         }
+        let pad_bed = self.speaker_renderer == SpeakerRenderer::TripleBalance && !lfes.is_empty();
+        if pad_bed && lfes.len() != 1 {
+            return Err(
+                "Triple Balance accepts one LFE bus; fold multiple inputs before submission".into(),
+            );
+        }
         let mut elements: Vec<_> = objects
             .iter()
             .map(|&id| raw::Element {
@@ -409,6 +524,28 @@ impl Session {
                 ..Default::default()
             });
         }
+        let mut silent_bed = Vec::new();
+        if pad_bed {
+            // The Core's fixed-bed route requires a complete 7.1.2 descriptor
+            // group. Only its LFE carries input; these other lanes stay silent.
+            let mut id = u64::MAX;
+            for label in [
+                c"M+030", c"M-030", c"M+000", c"M+090", c"M-090", c"M+135", c"M-135", c"U+090",
+                c"U-090",
+            ] {
+                while elements.iter().any(|element| element.id == id) {
+                    id = id.checked_sub(1).ok_or("No free Scene ID for silent bed")?;
+                }
+                silent_bed.push(id);
+                elements.push(raw::Element {
+                    size: size::<raw::Element>(),
+                    id,
+                    role: 1,
+                    label: label.as_ptr(),
+                    ..Default::default()
+                });
+            }
+        }
         let count = u32::try_from(elements.len()).map_err(|_| "Too many Scene elements")?;
         let s = &self.inner;
         let _guard = s.gate.lock().unwrap();
@@ -424,11 +561,13 @@ impl Session {
                 )
             },
             1,
-        )
+        )?;
+        self.silent_bed = silent_bed;
+        Ok(())
     }
     /// Returns false for backpressure. The caller retains and retries that frame.
     pub fn submit(&mut self, frame: &Frame<'_>) -> Result<bool, String> {
-        let planes: Vec<_> = frame
+        let mut planes: Vec<_> = frame
             .planes
             .iter()
             .map(|plane| {
@@ -447,7 +586,7 @@ impl Session {
                 })
             })
             .collect::<Result<_, &str>>()?;
-        let initial: Vec<_> = frame
+        let mut initial: Vec<_> = frame
             .initial
             .iter()
             .map(|(id, state)| raw::Initial {
@@ -457,6 +596,27 @@ impl Session {
                 reserved: 0,
             })
             .collect();
+        for &id in &self.silent_bed {
+            planes.push(raw::Plane {
+                size: size::<raw::Plane>(),
+                id,
+                count: frame.duration,
+                stride: 1,
+                ..Default::default()
+            });
+            initial.push(raw::Initial {
+                size: size::<raw::Initial>(),
+                id,
+                state: ObjectState {
+                    active: false,
+                    gain: 0.0,
+                    position: None,
+                    head_locked: false,
+                }
+                .raw(),
+                ..Default::default()
+            });
+        }
         let updates: Vec<_> = frame
             .updates
             .iter()
@@ -721,6 +881,35 @@ impl Control {
             recovering: raw.recovering != 0,
         })
     }
+
+    #[must_use]
+    pub fn failure_message(&self) -> String {
+        let s = &self.inner;
+        let _guard = s.gate.lock().unwrap();
+        // SAFETY: the handles are retained and all borrowed messages are copied
+        // while the gate excludes another non-pull call from this binding.
+        let count = unsafe { (s.api.adm_scene_stream_log_count)(s.stream) };
+        for index in (count.saturating_sub(32)..count).rev() {
+            let mut diagnostic = raw::Diagnostic {
+                size: size::<raw::Diagnostic>(),
+                ..Default::default()
+            };
+            // SAFETY: the initialized POD has the C header's verified layout.
+            if unsafe { (s.api.adm_scene_stream_log_entry)(s.stream, index, &raw mut diagnostic) }
+                != 0
+                && diagnostic.code == 6
+            {
+                return copy_text(diagnostic.message);
+            }
+        }
+        // SAFETY: output is retained; copy precedes the next control call.
+        let message = copy_text(unsafe { (s.api.adm_scene_output_last_error_message)(s.output) });
+        if message.is_empty() {
+            "MacinRender rendering or output device failed".into()
+        } else {
+            message
+        }
+    }
 }
 
 /// What the renderer's own parser makes of `ParametricEQ` text.
@@ -854,6 +1043,27 @@ pub fn output_devices() -> Result<Vec<(String, String, bool)>, String> {
 #[cfg(all(test, native_macinrender))]
 mod tests {
     use super::*;
+    #[test]
+    fn scene_capability_probe_opens_no_output_and_checks_the_requested_layout() {
+        let mut renderer = RendererSettings {
+            binaural: false,
+            speaker_renderer: SpeakerRenderer::SafVbap,
+            layout: "4+7+0".into(),
+            sofa: String::new(),
+            split_lfe: false,
+        };
+        let stream = Shared::create_stream(&renderer, 48_000).unwrap();
+        assert!(stream.output.is_null());
+        assert!(!stream.stream.is_null());
+        drop(stream);
+        renderer.layout = "invalid-layout".into();
+        assert!(probe_renderer(&renderer, 48_000).is_err());
+        renderer.layout = "4+7+0".into();
+        assert!(
+            probe_renderer(&renderer, 48_000).is_ok(),
+            "a failed probe must not poison the next stream"
+        );
+    }
     unsafe extern "C" {
         fn macinrender_abi_size(index: u32) -> usize;
         fn macinrender_abi_offset(index: u32) -> usize;
@@ -876,6 +1086,7 @@ mod tests {
             size_of::<raw::HptfInfo>(),
             size_of::<raw::HptfBand>(),
             size_of::<raw::HptfParameters>(),
+            size_of::<raw::Diagnostic>(),
         ];
         for (index, size) in sizes.into_iter().enumerate() {
             // SAFETY: probe is built from the upstream header and returns a scalar.
@@ -912,6 +1123,8 @@ mod tests {
             std::mem::offset_of!(raw::HptfBand, q),
             std::mem::offset_of!(raw::HptfParameters, bands),
             std::mem::offset_of!(raw::HptfParameters, revision),
+            std::mem::offset_of!(raw::Diagnostic, message),
+            std::mem::offset_of!(raw::Diagnostic, code),
         ];
         for (index, offset) in offsets.into_iter().enumerate() {
             // SAFETY: C's offsetof probe returns a scalar from the pinned headers.
@@ -1002,6 +1215,7 @@ mod tests {
         use std::time::{Duration, Instant};
         let mut session = Session::new(&Config {
             renderer: RendererSettings {
+                speaker_renderer: SpeakerRenderer::SafVbap,
                 binaural: true,
                 layout: "4+7+0".into(),
                 sofa: String::new(),
@@ -1088,6 +1302,7 @@ mod tests {
         use std::time::{Duration, Instant};
         let path = std::env::var("MACINDECODE_AC4_TEST_SOFA").expect("set SOFA path");
         let settings = RendererSettings {
+            speaker_renderer: SpeakerRenderer::SafVbap,
             binaural: true,
             layout: "4+7+0".into(),
             sofa: String::new(),

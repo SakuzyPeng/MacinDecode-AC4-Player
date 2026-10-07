@@ -13,7 +13,7 @@ mod lfe;
 mod macinrender;
 mod settings;
 pub use controller::SpatialOutputController;
-pub use settings::{OutputSettings, SpeakerLayout};
+pub use settings::{OutputSettings, SpeakerLayout, SpeakerRenderer};
 
 #[cfg(feature = "decode")]
 #[cfg_attr(
