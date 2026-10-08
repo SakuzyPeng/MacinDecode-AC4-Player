@@ -20,7 +20,11 @@ from verify_runtime import require, run_smoke
 def install(package, log, *, repair=False, uninstall=False, downgrade=False):
     if os.name == "nt":
         mode = "/x" if uninstall else ("/fa" if repair else "/i")
-        arguments = ["msiexec", mode, str(package), "/qn", "/norestart", "/l*v", str(log)]
+        # CI has already closed the test application. Keep Restart Manager's
+        # lock detection, but do not let it shut down the runner or its parent
+        # processes; /norestart only suppresses a machine reboot.
+        arguments = ["msiexec", mode, str(package), "/qn", "/norestart",
+                     "MSIRESTARTMANAGERCONTROL=DisableShutdown", "/l*v", str(log)]
     else:
         arguments = ["installer", "-pkg", str(package), "-target", "CurrentUserHomeDirectory"]
     print("+", " ".join(arguments), flush=True)
