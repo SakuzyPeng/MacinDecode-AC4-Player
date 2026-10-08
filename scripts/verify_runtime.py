@@ -184,6 +184,7 @@ def verify_modules(modules, binary, env, windows):
 
 def observe(binary, option, data_root, env, log):
     modules = set()
+    print("+", binary, option, "--data-dir", data_root, flush=True)
     with log.open("w", encoding="utf-8") as output:
         process = subprocess.Popen([str(binary), option, "--data-dir", str(data_root)],
                                    cwd=data_root, env=env, stdout=output, stderr=output)

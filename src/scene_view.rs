@@ -7,7 +7,7 @@
 //! Three rules keep it out of the audio thread's way, and all three are load
 //! bearing rather than stylistic:
 //!
-//! * **The writer never blocks.** [`SceneViewMirror::write_with_lfe`] takes the lock with
+//! * **The writer never blocks.** [`SceneViewMirror::write_with_lfes`] takes the lock with
 //!   `try_lock` and drops the update if the UI happens to hold it. A missed
 //!   frame is invisible; a late WASAPI callback is a glitch.
 //! * **Neither side allocates.** The object array is fixed at
@@ -70,7 +70,7 @@ pub fn loudness_bin_frames(sample_rate: u32) -> u32 {
 /// Energy rather than a finished meter reading, and that is the load-bearing
 /// choice in this module. The three consumers publish at cadences that differ
 /// by orders of magnitude, so any value advanced one step per publication would
-/// behave differently on each; and [`SceneViewMirror::write_with_lfe`] deliberately holds
+/// behave differently on each; and [`SceneViewMirror::write_with_lfes`] deliberately holds
 /// the previous frame when an update carries no objects, so a decaying value
 /// stored here would freeze rather than fall. Ballistics therefore belong where
 /// the picture is drawn, applied to what these bins accumulated.
@@ -218,7 +218,7 @@ impl Default for SceneViewFrame {
 }
 
 impl SceneViewFrame {
-    #[cfg_attr(not(any(windows_spatial_output, test)), allow(dead_code))]
+    #[cfg(test)]
     pub const fn lfe(&self) -> Option<LfeView> {
         self.lfes[0]
     }
@@ -455,28 +455,6 @@ impl SceneViewMirror {
     /// Stale positions cannot leak across a seek or a source change this way,
     /// because a held frame keeps the key it was written under and `read`
     /// rejects it.
-    #[cfg_attr(
-        not(feature = "decode"),
-        allow(
-            dead_code,
-            reason = "object positions come from the render callback or the \
-                      scene preview, and neither exists without a decoder"
-        )
-    )]
-    #[cfg_attr(not(any(windows_spatial_output, test)), allow(dead_code))]
-    pub fn write_with_lfe<I>(
-        &self,
-        key: PlaybackKey,
-        objects: I,
-        lfe: Option<LfeView>,
-        timeline_frame: i64,
-        sample_rate: u32,
-    ) where
-        I: IntoIterator<Item = ObjectView>,
-    {
-        self.write_with_lfes(key, objects, lfe, timeline_frame, sample_rate);
-    }
-
     #[cfg_attr(not(feature = "decode"), allow(dead_code))]
     #[allow(
         clippy::too_many_lines,
@@ -628,6 +606,20 @@ impl SceneViewMirror {
     pub fn read(&self, key: PlaybackKey) -> Option<SceneViewFrame> {
         let frame = *self.frame.lock().unwrap_or_else(PoisonError::into_inner);
         (frame.key == Some(key)).then_some(frame)
+    }
+
+    #[cfg(test)]
+    pub fn write_with_lfe<I>(
+        &self,
+        key: PlaybackKey,
+        objects: I,
+        lfe: Option<LfeView>,
+        timeline_frame: i64,
+        sample_rate: u32,
+    ) where
+        I: IntoIterator<Item = ObjectView>,
+    {
+        self.write_with_lfes(key, objects, lfe, timeline_frame, sample_rate);
     }
 
     #[cfg(test)]

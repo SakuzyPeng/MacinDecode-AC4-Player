@@ -11,6 +11,13 @@ members = ["crates/windows-spatial-audio", "crates/macinrender"]
 default-members = [".", "crates/windows-spatial-audio"]
 resolver = "3"
 
+# Match ADM Core's patched DSP dependencies when its Rust kernels are linked
+# through Cargo. Keep these revisions aligned with the native CMake source pin.
+[patch.crates-io]
+sofar = { git = "https://github.com/SakuzyPeng/MacinRender-ADM-Core.git", rev = "a125ab7d1fcb2527f46265088fdf4b5c2aa3645b" }
+rubato = { git = "https://github.com/SakuzyPeng/MacinRender-ADM-Core.git", rev = "a125ab7d1fcb2527f46265088fdf4b5c2aa3645b" }
+rustfft = { git = "https://github.com/SakuzyPeng/MacinRender-ADM-Core.git", rev = "a125ab7d1fcb2527f46265088fdf4b5c2aa3645b" }
+
 [dependencies]
 eframe = { version = "=0.36.1", default-features = false, features = [
     "accesskit",

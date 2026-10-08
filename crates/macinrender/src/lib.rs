@@ -2,6 +2,11 @@
 //! cloned controls retain its handles and serialize calls/error-string borrowing.
 #![allow(clippy::missing_errors_doc, clippy::missing_panics_doc)]
 
+// Native C++ calls these C exports. Link the kernels as a Rust crate so Cargo
+// and ThinLTO share their standard library with the rest of the application.
+#[cfg(native_macinrender)]
+extern crate mradm_ffi as _;
+
 mod api;
 #[cfg(target_os = "macos")]
 pub mod atmos;

@@ -109,10 +109,24 @@ fn drain(controller: &mut DecoderController, channels: usize) -> (Vec<f32>, Opti
             assert_eq!(block.objects().len() + block.lfes().len(), channels);
             pcm.extend(interleave(&block, channels));
         }
-        if controller.snapshot().phase() == DecodePhase::EndOfStream {
+        // Decoding and checkpoint indexing finish independently. Callers seek
+        // immediately after draining, so EOS alone is not enough to proceed.
+        if controller.snapshot().phase() == DecodePhase::EndOfStream
+            && let Some(metrics) = controller.snapshot().metrics()
+            && !metrics.is_indexing()
+        {
+            assert!(
+                metrics.index_error().is_none(),
+                "APAC index failed: {:?}",
+                metrics.index_error()
+            );
             return (pcm, first);
         }
-        assert!(Instant::now() < deadline, "APAC worker stalled");
+        assert!(
+            Instant::now() < deadline,
+            "APAC worker or seek index stalled: {:?}",
+            controller.snapshot()
+        );
         thread::sleep(Duration::from_millis(2));
     }
 }

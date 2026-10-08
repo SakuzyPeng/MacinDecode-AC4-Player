@@ -46,8 +46,22 @@ jobs:
         run: |
           rustup show
           rustup target add "$TARGET"
+      - name: Use a short Windows build path
+        if: runner.os == 'Windows'
+        run: |
+          python - <<'PYTHON'
+          import os
+          from pathlib import Path
+          # Cargo's nested CMake objects exceed MAX_PATH under github.workspace.
+          # rust-cache joins the target path to the workspace, so keep it relative.
+          target = Path(os.environ["RUNNER_TEMP"]) / "target"
+          target_dir = os.path.relpath(target, Path.cwd())
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
+              print(f"CARGO_TARGET_DIR={target_dir}", file=output)
+          PYTHON
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
+          workspaces: . -> ${{ env.CARGO_TARGET_DIR || 'target' }}
           # Cargo/native outputs and the Core Rust kernels follow the renderer
           # revision. The license tool has an independent cache below.
           key: ${{ matrix.target }}-static-v1-xcode26.3-${{ hashFiles('crates/macinrender/native/CMakeLists.txt') }}
@@ -104,9 +118,9 @@ jobs:
         run: python -m unittest discover -s scripts -p 'test_*.py'
       - name: Build and verify installer, relocated executable and window
         run: python scripts/package.py --target "$TARGET" --release-tag "$RELEASE_TAG"
-      - name: Install, repair, upgrade, downgrade, uninstall and reinstall
-        run: python scripts/check_lifecycle.py --target "$TARGET"
-      - name: Upload verified installers
+      # Preserve the tested payload even if a later installer/runner check is
+      # interrupted. Release publication still requires this whole job to pass.
+      - name: Upload built installers
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: installer-${{ matrix.target }}
@@ -118,11 +132,18 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
+      - name: Install, repair, upgrade, downgrade, uninstall and reinstall
+        timeout-minutes: 10
+        run: python scripts/check_lifecycle.py --target "$TARGET"
       - name: Upload failure diagnostics
-        if: failure()
+        if: failure() || cancelled()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: diagnostics-${{ matrix.target }}
-          path: target/packaging-failures
+          path: |
+            target/packaging-failures
+            target/package-work/**/*.log
+            target/package-work/**/*report.json
+            target/package-work/**/install-check.json
           if-no-files-found: ignore
           retention-days: 7
