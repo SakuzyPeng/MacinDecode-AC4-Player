@@ -46,8 +46,22 @@ jobs:
         run: |
           rustup show
           rustup target add "$TARGET"
+      - name: Use a short Windows build path
+        if: runner.os == 'Windows'
+        run: |
+          python - <<'PYTHON'
+          import os
+          from pathlib import Path
+          # Cargo's nested CMake objects exceed MAX_PATH under github.workspace.
+          # rust-cache joins the target path to the workspace, so keep it relative.
+          target = Path(os.environ["RUNNER_TEMP"]) / "target"
+          target_dir = os.path.relpath(target, Path.cwd())
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
+              print(f"CARGO_TARGET_DIR={target_dir}", file=output)
+          PYTHON
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
+          workspaces: . -> ${{ env.CARGO_TARGET_DIR || 'target' }}
           # Cargo/native outputs and the Core Rust kernels follow the renderer
           # revision. The license tool has an independent cache below.
           key: ${{ matrix.target }}-static-v1-xcode26.3-${{ hashFiles('crates/macinrender/native/CMakeLists.txt') }}
