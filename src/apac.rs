@@ -276,7 +276,7 @@ impl Report {
             ("Priming / remainder".into(), format!("{} / {} frames", track.table.priming_frames, track.table.remainder_frames)),
             ("Packets".into(), track.packet_count.to_string()),
             ("Playback".into(), playback),
-            ("22.2 LFE".into(), "CICP_13 LFE2 / LFE3 → renderer LFE1 / LFE2; 22.2 Direct preserves both; equal-power copy normalizes the sum when both have signal".into()),
+            ("22.2 LFE".into(), "CICP_13 LFE2 / LFE3 → renderer LFE1 / LFE2; 22.2 Direct preserves both; equal-power copy duplicates only a lone audible LFE; two audible LFEs pass through independently".into()),
             ("Metadata processing".into(), "DRC, loudness and scene/renderer metadata are not applied".into()),
         ];
         Ok(Self {

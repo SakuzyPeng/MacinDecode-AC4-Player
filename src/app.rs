@@ -4109,7 +4109,8 @@ fn draw_speakers_page(
                     SpeakerRenderer::SafVbap.label(),
                 );
                 let response = ui
-                    .add_enabled_ui(triple_balance.is_some_and(|result| result.is_ok()), |ui| {
+                    .add_enabled_ui(triple_balance.is_some_and(|result| result.is_ok())
+                        && !(settings.layout == SpeakerLayout::TwentyTwoTwo && lfe_count > 1), |ui| {
                         ui.selectable_value(
                             &mut settings.speaker_renderer,
                             SpeakerRenderer::TripleBalance,
@@ -4125,6 +4126,9 @@ fn draw_speakers_page(
                     }
                     None => {
                         response.on_hover_text("Checking renderer support…");
+                    }
+                    Some(Ok(())) if settings.layout == SpeakerLayout::TwentyTwoTwo && lfe_count > 1 => {
+                        response.on_hover_text("Dual-LFE 22.2 input requires SAF VBAP to preserve both independent channels.");
                     }
                     Some(Ok(())) => {}
                 }
@@ -4155,17 +4159,12 @@ fn draw_speakers_page(
         ui.horizontal(|ui| {
             ui.label("LFE routing");
             ui.selectable_value(&mut settings.split_lfe, true, "Equal-power copy");
-            ui.add_enabled_ui(
-                settings.speaker_renderer != SpeakerRenderer::TripleBalance || lfe_count < 2,
-                |ui| {
-                    ui.selectable_value(&mut settings.split_lfe, false, "Direct");
-                },
-            );
+            ui.selectable_value(&mut settings.split_lfe, false, "Direct");
         });
         if lfe_count > 1 {
             ui.label(if settings.speaker_renderer == SpeakerRenderer::TripleBalance {
-                "Triple Balance uses Equal-power copy for two LFE inputs. Choose SAF VBAP for independent Direct output."
-            } else { "Direct keeps both LFEs separate. Copy normalizes the sum only when both have signal." });
+                "Dual-LFE 22.2 input requires SAF VBAP to preserve both independent channels."
+            } else { "Equal-power copy duplicates only one audible LFE. When both have signal, each passes through at its original level." });
         }
     }
 }

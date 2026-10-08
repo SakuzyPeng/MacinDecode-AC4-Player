@@ -52,7 +52,7 @@ Default builds include embedded PoseBridge BLE/USB head tracking and device cont
 
 Supported files: AC-4 / APAC `.m4a` and `.mp4`, raw `.ac4`, and APAC `.caf`. AC-4 focuses on **Full A-JOC**.
 APAC supports mono, stereo, 5.1, 7.1, 7.1.4, 9.1.6 and 22.2 with frame-exact seeking; HOA playback is not yet supported.
-The two 22.2 LFE channels remain separate through macOS **System spatial audio → SAF VBAP → 22.2 → Direct** output.
+With macOS **System spatial audio → SAF VBAP → 22.2**, equal-power copy duplicates only a lone audible LFE; two audible LFEs pass through separately at their original levels.
 See [APAC multichannel playback](docs/MANUAL.en.md#apac-multichannel-playback).
 
 Choose SAF VBAP or Triple Balance under **Speakers → Speaker renderer** in system spatial mode. Triple Balance supports 7.1.4, 9.1.6 and 22.2; see the [input and LFE limits](docs/MANUAL.en.md#speaker-renderer).

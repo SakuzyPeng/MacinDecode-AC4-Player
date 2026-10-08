@@ -43,7 +43,7 @@
 
 支持 AC-4 / APAC `.m4a`、`.mp4`、裸 `.ac4` 和 APAC `.caf`。AC-4 主要面向 **Full A-JOC**。
 APAC 支持单声道、立体声、5.1、7.1、7.1.4、9.1.6、22.2，以及按帧精确跳转；HOA 暂不播放。
-22.2 保留两路独立 LFE，选择 macOS 的 **系统空间音频 → SAF VBAP → 22.2 → Direct** 输出时分别路由；详见[操作手册](docs/MANUAL.md#apac-多声道)。
+22.2 保留两路独立 LFE。在 macOS 的 **系统空间音频 → SAF VBAP → 22.2** 下，等功率复制仅在一路有信号时生效，两路都有信号时各自原电平直通；详见[操作手册](docs/MANUAL.md#apac-多声道)。
 
 系统空间音频可在 **Speakers → Speaker renderer** 选择 SAF VBAP 或 Triple Balance；后者支持 7.1.4、9.1.6、22.2，LFE 与输入范围见[扬声器渲染算法](docs/MANUAL.md#扬声器渲染算法)。
 

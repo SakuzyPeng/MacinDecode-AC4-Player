@@ -35,7 +35,7 @@ impl PreparedSession {
         device: &OutputDeviceSelection,
     ) -> Result<Self, String> {
         let config = native_config(settings, sample_rate, device);
-        let session = native::Session::new(&config)?;
+        let session = create_session(&config)?;
         Ok(Self {
             config,
             session: Some(session),
@@ -92,18 +92,49 @@ fn native_config(
     }
 }
 
-fn renderer_lfes<'a>(
-    signature: &'a SceneSignature,
+fn adaptive_lfe_copy(renderer: &native::RendererSettings) -> bool {
+    !renderer.binaural
+        && renderer.layout == "9+10+3"
+        && renderer.split_lfe
+        && renderer.speaker_renderer == native::SpeakerRenderer::SafVbap
+}
+
+fn session_renderer(renderer: &native::RendererSettings) -> native::RendererSettings {
+    let mut native = renderer.clone();
+    if adaptive_lfe_copy(renderer) {
+        // The player supplies both destinations. Core's unconditional split
+        // would sum them again and erase independent dual-LFE content.
+        native.split_lfe = false;
+    }
+    native
+}
+
+fn create_session(config: &native::Config) -> Result<native::Session, String> {
+    let mut native = config.clone();
+    native.renderer = session_renderer(&config.renderer);
+    native::Session::new(&native)
+}
+
+fn renderer_lfes(
+    signature: &SceneSignature,
     renderer: &native::RendererSettings,
-) -> Result<&'a [u64], String> {
+) -> Result<Vec<u64>, String> {
     let lfes = signature.lfe_element_ids();
     if renderer.speaker_renderer == native::SpeakerRenderer::TripleBalance && lfes.len() > 1 {
-        if renderer.layout == "9+10+3" && !renderer.split_lfe {
-            return Err("Triple Balance has one LFE bus. Select Equal-power copy, or SAF VBAP for independent 22.2 Direct LFEs".into());
+        if renderer.layout == "9+10+3" {
+            return Err("Triple Balance has one LFE bus and cannot preserve independent 22.2 LFEs. Select SAF VBAP for dual-LFE input, including Equal-power copy".into());
         }
-        return Ok(&lfes[..1]);
+        return Ok(lfes[..1].to_vec());
     }
-    Ok(lfes)
+    let mut ids = lfes.to_vec();
+    if adaptive_lfe_copy(renderer) && lfes.len() == 1 {
+        let mut id = u64::MAX;
+        while signature.object_element_ids().contains(&id) || lfes.contains(&id) {
+            id = id.checked_sub(1).ok_or("No free Scene ID for second LFE")?;
+        }
+        ids.push(id);
+    }
+    Ok(ids)
 }
 
 pub(super) fn validate_source(
@@ -624,9 +655,20 @@ fn submit_block(
     epoch: u64,
     block: &DecodedSceneBlock,
     offset: u32,
-    normalize_lfes: bool,
-    fold_lfes: bool,
+    renderer: &native::RendererSettings,
 ) -> Result<bool, String> {
+    with_scene_frame(epoch, block, offset, renderer, |frame| {
+        session.submit(frame)
+    })
+}
+
+fn with_scene_frame<T>(
+    epoch: u64,
+    block: &DecodedSceneBlock,
+    offset: u32,
+    renderer: &native::RendererSettings,
+    submit: impl FnOnce(&native::Frame<'_>) -> Result<T, String>,
+) -> Result<T, String> {
     let from = usize::try_from(offset).map_err(|_| "Scene trim offset overflow")?;
     let mut planes: Vec<_> = block
         .objects()
@@ -651,8 +693,18 @@ fn submit_block(
             )
         })
         .collect();
-    let folded = (fold_lfes && block.lfes().len() > 1).then(|| super::lfe::fold(block, offset));
-    let gain = if normalize_lfes && folded.is_none() {
+    let lfes = renderer_lfes(&SceneSignature::from_block(block), renderer)?;
+    let routed = if adaptive_lfe_copy(renderer) && !lfes.is_empty() {
+        Some(Vec::from(super::lfe::copy_or_direct(block, offset)))
+    } else if renderer.speaker_renderer == native::SpeakerRenderer::TripleBalance
+        && block.lfes().len() > 1
+    {
+        Some(vec![super::lfe::fold(block, offset)])
+    } else {
+        None
+    };
+    let normalize_lfes = renderer.binaural || renderer.layout != "9+10+3";
+    let gain = if normalize_lfes && routed.is_none() {
         super::lfe::normalization(block, offset)
     } else {
         1.0
@@ -671,21 +723,21 @@ fn submit_block(
     } else {
         Vec::new()
     };
-    for (index, lfe) in block.lfes().iter().enumerate() {
-        if folded.is_some() && index > 0 {
-            break;
-        }
+    for (index, &element) in lfes.iter().enumerate() {
         planes.push(native::Plane {
-            element: lfe.element_id(),
-            samples: folded.as_deref().unwrap_or_else(|| {
-                scaled
-                    .get(index)
-                    .map_or(&lfe.samples()[from..], Vec::as_slice)
-            }),
+            element,
+            samples: routed.as_ref().map_or_else(
+                || {
+                    scaled
+                        .get(index)
+                        .map_or(&block.lfes()[index].samples()[from..], Vec::as_slice)
+                },
+                |pcm| pcm[index].as_slice(),
+            ),
         });
         initial.push((
-            lfe.element_id(),
-            if folded.is_some() {
+            element,
+            if routed.is_some() {
                 native::ObjectState {
                     active: true,
                     gain: 1.0,
@@ -695,15 +747,15 @@ fn submit_block(
             } else {
                 own_state(element_state_at(
                     block,
-                    lfe.element_id(),
-                    lfe.initial_state(),
+                    element,
+                    block.lfes()[index].initial_state(),
                     offset,
                 ))
             },
         ));
     }
-    let updates = frame_updates(block, offset, &initial, folded.is_some());
-    session.submit(&native::Frame {
+    let updates = frame_updates(block, offset, &initial, routed.is_some());
+    submit(&native::Frame {
         epoch,
         generation: u64::from(block.configuration_generation()),
         start: block.start_frame().saturating_add(i64::from(offset)),
@@ -719,13 +771,18 @@ fn frame_updates(
     block: &DecodedSceneBlock,
     offset: u32,
     initial: &[(u64, native::ObjectState)],
-    folded_lfes: bool,
+    resolved_lfes: bool,
 ) -> Vec<native::Update> {
     let mut updates = Vec::new();
     // A trimmed block can begin inside a ramp: synthesize its remaining target
     // at offset zero instead of freezing at the interpolated initial state.
     for (id, _) in initial {
-        if folded_lfes && block.lfes().iter().any(|lfe| lfe.element_id() == *id) {
+        if resolved_lfes
+            && !block
+                .objects()
+                .iter()
+                .any(|object| object.element_id() == *id)
+        {
             continue;
         }
         for update in remaining_ramps(block, *id, offset).into_iter().flatten() {
@@ -744,7 +801,7 @@ fn frame_updates(
             .iter()
             .filter(|u| u.offset_frames() >= offset)
             .filter(|u| {
-                !folded_lfes
+                !resolved_lfes
                     || !block
                         .lfes()
                         .iter()
@@ -860,12 +917,9 @@ fn run(
     let mut serial = 0;
     let mut holding = false;
     let native_config = native_config(settings, config.sample_rate, &config.output_device);
-    let normalize_lfes = native_config.renderer.binaural
-        || native_config.renderer.layout != "9+10+3"
-        || native_config.renderer.split_lfe;
     let mut session = match prepared {
         Some(prepared) => prepared.take(&native_config)?,
-        None => native::Session::new(&native_config)?,
+        None => create_session(&native_config)?,
     };
     if shared.stop.load(Ordering::Relaxed) {
         return Ok(());
@@ -883,7 +937,7 @@ fn run(
         epoch,
         u64::from(signature.configuration_generation()),
         signature.object_element_ids(),
-        renderer_lfes(&signature, &native_config.renderer)?,
+        &renderer_lfes(&signature, &native_config.renderer)?,
     )?;
     let mut pending = None::<DecodedSceneBlock>;
     let mut history = VecDeque::<MetadataFrame>::new();
@@ -936,7 +990,7 @@ fn run(
                         epoch,
                         u64::from(signature.configuration_generation()),
                         signature.object_element_ids(),
-                        renderer_lfes(&signature, &native_config.renderer)?,
+                        &renderer_lfes(&signature, &native_config.renderer)?,
                     )
                 });
                 if let Err(error) = reset {
@@ -977,7 +1031,7 @@ fn run(
             let spawned = thread::Builder::new()
                 .name("hrtf-preparation".into())
                 .spawn(move || {
-                    let result = loader.switch_renderer(&settings);
+                    let result = loader.switch_renderer(&session_renderer(&settings));
                     *reply
                         .switch_result
                         .lock()
@@ -1224,7 +1278,7 @@ fn run(
                         epoch,
                         u64::from(actual.configuration_generation()),
                         actual.object_element_ids(),
-                        renderer_lfes(&actual, &native_config.renderer)?,
+                        &renderer_lfes(&actual, &native_config.renderer)?,
                     )?;
                     // A new configuration generation can remap which element
                     // owns which slot, and a filter's memory belongs to the
@@ -1268,9 +1322,7 @@ fn run(
                         epoch,
                         block,
                         offset,
-                        normalize_lfes,
-                        native_config.renderer.speaker_renderer
-                            == native::SpeakerRenderer::TripleBalance,
+                        &native_config.renderer,
                     )? {
                         let metadata = MetadataFrame::new(block, offset, &mut loudness, bin_frames);
                         history_bytes += metadata.bytes();
@@ -1430,72 +1482,80 @@ mod tests {
     }
 
     #[test]
-    fn triple_balance_lfe_bed_survives_gaps_seeks_and_lfe_count_changes() {
+    fn lfe_routing_survives_gaps_seeks_and_lfe_count_changes() {
         use crate::decoder::SceneLfePcm;
-        for layout in super::super::SpeakerLayout::ALL {
-            let settings = OutputSettings {
-                null_output: true,
-                mode: SpatialBackendKind::SystemSpatial,
-                speaker_renderer: super::super::SpeakerRenderer::TripleBalance,
-                layout,
-                split_lfe: true,
-                ..Default::default()
-            };
-            let mirror = Arc::new(SceneViewMirror::new());
-            let mut runtime: Option<Runtime> = None;
-            for (epoch, target, gap, dual) in
-                [(1, 0, 0, false), (2, 513, 64, true), (3, 33, 0, false)]
-            {
-                let key = PlaybackKey::new(71, epoch);
-                let (queue, reader) = scene_queue_pair(key);
-                let active = Some(SpatialObjectState::new(true, None, Some(1.0), true));
-                let mut lfes = vec![SceneLfePcm::new(8, active, vec![0.01; 1024])];
-                if dual {
-                    lfes.push(SceneLfePcm::new(9, active, vec![0.02; 1024]));
-                }
-                let frame = block(i64::try_from(target + gap).unwrap(), 1024).with_lfes(lfes);
-                let config = OutputStreamConfig::new(
-                    71,
-                    epoch,
-                    target,
-                    48_000,
-                    SceneSignature::from_block(&frame),
-                    OutputDeviceSelection::SystemDefault,
-                )
-                .unwrap();
-                queue.try_push(key, frame).unwrap();
-                queue.mark_end_of_stream(key);
-                if let Some(runtime) = &runtime {
-                    assert!(runtime.replace_source(&config, &settings, reader));
-                    runtime.play(true);
-                } else {
-                    runtime = Some(
-                        Runtime::spawn(
-                            config,
-                            settings.clone(),
-                            reader,
-                            Arc::clone(&mirror),
-                            true,
-                            1.0,
-                        )
-                        .unwrap(),
+        for speaker_renderer in [
+            super::super::SpeakerRenderer::SafVbap,
+            super::super::SpeakerRenderer::TripleBalance,
+        ] {
+            for layout in super::super::SpeakerLayout::ALL {
+                let settings = OutputSettings {
+                    null_output: true,
+                    mode: SpatialBackendKind::SystemSpatial,
+                    speaker_renderer,
+                    layout,
+                    split_lfe: true,
+                    ..Default::default()
+                };
+                let mirror = Arc::new(SceneViewMirror::new());
+                let mut runtime: Option<Runtime> = None;
+                for (epoch, target, gap, dual) in
+                    [(1, 0, 0, false), (2, 513, 64, true), (3, 33, 0, false)]
+                {
+                    let dual = dual
+                        && !(speaker_renderer == super::super::SpeakerRenderer::TripleBalance
+                            && layout == super::super::SpeakerLayout::TwentyTwoTwo);
+                    let key = PlaybackKey::new(71, epoch);
+                    let (queue, reader) = scene_queue_pair(key);
+                    let active = Some(SpatialObjectState::new(true, None, Some(1.0), true));
+                    let mut lfes = vec![SceneLfePcm::new(8, active, vec![0.01; 1024])];
+                    if dual {
+                        lfes.push(SceneLfePcm::new(9, active, vec![0.02; 1024]));
+                    }
+                    let frame = block(i64::try_from(target + gap).unwrap(), 1024).with_lfes(lfes);
+                    let config = OutputStreamConfig::new(
+                        71,
+                        epoch,
+                        target,
+                        48_000,
+                        SceneSignature::from_block(&frame),
+                        OutputDeviceSelection::SystemDefault,
+                    )
+                    .unwrap();
+                    queue.try_push(key, frame).unwrap();
+                    queue.mark_end_of_stream(key);
+                    if let Some(runtime) = &runtime {
+                        assert!(runtime.replace_source(&config, &settings, reader));
+                        runtime.play(true);
+                    } else {
+                        runtime = Some(
+                            Runtime::spawn(
+                                config,
+                                settings.clone(),
+                                reader,
+                                Arc::clone(&mirror),
+                                true,
+                                1.0,
+                            )
+                            .unwrap(),
+                        );
+                    }
+                    await_end(runtime.as_ref().unwrap(), target + gap + 1024);
+                    let view = mirror.read(key).unwrap();
+                    assert_eq!(
+                        view.objects().len(),
+                        1,
+                        "silent bed lanes must not appear as source objects"
                     );
+                    assert_eq!(view.lfes().count(), if dual { 2 } else { 1 });
+                    assert!(view.sample_peak(LFE_METER_SLOT) > 0.0);
                 }
-                await_end(runtime.as_ref().unwrap(), target + gap + 1024);
-                let view = mirror.read(key).unwrap();
-                assert_eq!(
-                    view.objects().len(),
-                    1,
-                    "silent bed lanes must not appear as source objects"
-                );
-                assert_eq!(view.lfes().count(), if dual { 2 } else { 1 });
-                assert!(view.sample_peak(LFE_METER_SLOT) > 0.0);
             }
         }
     }
 
     #[test]
-    fn triple_balance_does_not_silently_fold_independent_direct_lfes() {
+    fn triple_balance_does_not_fold_dual_lfes_in_either_22_2_routing_mode() {
         use crate::decoder::SceneLfePcm;
         let frame = block(0, 32).with_lfes(vec![
             SceneLfePcm::new(8, None, vec![0.0; 32]),
@@ -1523,10 +1583,125 @@ mod tests {
                 .contains("independent")
         );
         settings.split_lfe = true;
-        assert!(validate_source(&settings, &config).is_ok());
+        assert!(
+            validate_source(&settings, &config)
+                .unwrap_err()
+                .contains("independent")
+        );
         settings.speaker_renderer = super::super::SpeakerRenderer::SafVbap;
+        assert!(validate_source(&settings, &config).is_ok());
         settings.split_lfe = false;
         assert!(validate_source(&settings, &config).is_ok());
+    }
+
+    #[test]
+    fn equal_power_scene_submission_preserves_two_audible_lfes() {
+        use crate::decoder::{FIELD_GAIN, SceneLfePcm};
+        let active = SpatialObjectState::new(true, None, Some(1.0), true);
+        let frame = DecodedSceneBlock::new(
+            48_000,
+            0,
+            8,
+            1,
+            0,
+            None,
+            true,
+            vec![],
+            None,
+            vec![SceneMetadataUpdate::new(
+                9,
+                2,
+                2,
+                FIELD_GAIN,
+                SpatialObjectState::new(true, None, Some(0.0), true),
+            )],
+        )
+        .with_lfes(vec![
+            SceneLfePcm::new(8, Some(active), vec![0.125; 8]),
+            SceneLfePcm::new(9, Some(active), vec![-0.25; 8]),
+        ]);
+        let renderer = OutputSettings {
+            mode: SpatialBackendKind::SystemSpatial,
+            layout: super::super::SpeakerLayout::TwentyTwoTwo,
+            split_lfe: true,
+            ..Default::default()
+        }
+        .renderer();
+        assert!(
+            !session_renderer(&renderer).split_lfe,
+            "native routing must not sum the two outputs again"
+        );
+        with_scene_frame(1, &frame, 0, &renderer, |submitted| {
+            assert_eq!(submitted.planes.len(), 2);
+            assert_eq!(submitted.planes[0].element, 8);
+            assert_eq!(submitted.planes[1].element, 9);
+            assert_eq!(submitted.planes[0].samples, [0.125; 8]);
+            assert_eq!(
+                submitted.planes[1].samples,
+                [-0.25, -0.25, -0.25, -0.125, 0.0, 0.0, 0.0, 0.0]
+            );
+            assert!(
+                submitted
+                    .initial
+                    .iter()
+                    .all(|(_, state)| state.active && (state.gain - 1.0).abs() < f32::EPSILON)
+            );
+            assert!(
+                submitted.updates.is_empty(),
+                "resolved gain must not be applied twice"
+            );
+            Ok(())
+        })
+        .unwrap();
+        with_scene_frame(1, &frame, 4, &renderer, |submitted| {
+            let expected = [0.125 * std::f32::consts::FRAC_1_SQRT_2; 4];
+            assert_eq!(submitted.planes[0].samples, expected);
+            assert_eq!(submitted.planes[1].samples, expected);
+            assert!(submitted.updates.is_empty());
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn single_lfe_copy_uses_a_distinct_output_id_without_changing_source_topology() {
+        use crate::decoder::{SceneLfePcm, SceneObjectPcm};
+        let active = Some(SpatialObjectState::new(true, None, Some(0.5), true));
+        let frame = DecodedSceneBlock::new(
+            48_000,
+            0,
+            8,
+            1,
+            0,
+            None,
+            true,
+            vec![SceneObjectPcm::new(u64::MAX, active, vec![0.0; 8])],
+            Some(SceneLfePcm::new(u64::MAX - 1, active, vec![0.5; 8])),
+            vec![],
+        );
+        let renderer = OutputSettings {
+            mode: SpatialBackendKind::SystemSpatial,
+            layout: super::super::SpeakerLayout::TwentyTwoTwo,
+            split_lfe: true,
+            ..Default::default()
+        }
+        .renderer();
+        let signature = SceneSignature::from_block(&frame);
+        assert_eq!(
+            renderer_lfes(&signature, &renderer).unwrap(),
+            [u64::MAX - 1, u64::MAX - 2]
+        );
+        with_scene_frame(1, &frame, 0, &renderer, |submitted| {
+            assert_eq!(submitted.planes.len(), 3);
+            for plane in &submitted.planes[1..] {
+                assert_eq!(plane.samples, [0.25 * std::f32::consts::FRAC_1_SQRT_2; 8]);
+            }
+            assert_eq!(submitted.planes[2].element, u64::MAX - 2);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(signature.lfe_element_ids(), [u64::MAX - 1]);
+        assert_eq!(frame.lfes()[0].samples(), [0.5; 8]);
     }
 
     fn ended_source(

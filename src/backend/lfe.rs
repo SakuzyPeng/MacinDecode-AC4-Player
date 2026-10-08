@@ -1,6 +1,6 @@
-//! LFE folding is an output policy; source planes and meters stay independent.
+//! LFE routing is an output policy; source planes and meters stay independent.
 use super::state::{element_state_at, lfe_render_state};
-use crate::decoder::DecodedSceneBlock;
+use crate::decoder::{DecodedSceneBlock, SceneLfePcm};
 
 const ACTIVE_EPSILON: f32 = 1.0e-12;
 
@@ -17,6 +17,20 @@ fn pair_gain(first: &[f32], second: &[f32]) -> f32 {
     }
 }
 
+fn resolved_sample(block: &DecodedSceneBlock, lfe: &SceneLfePcm, frame: u32) -> f32 {
+    let (active, gain) = lfe_render_state(element_state_at(
+        block,
+        lfe.element_id(),
+        lfe.initial_state(),
+        frame,
+    ));
+    if block.state_complete() && active {
+        lfe.samples()[frame as usize] * gain
+    } else {
+        0.0
+    }
+}
+
 #[cfg_attr(not(macinrender_output), allow(dead_code))]
 pub(super) fn normalization(block: &DecodedSceneBlock, offset: u32) -> f32 {
     if block.lfes().len() < 2 {
@@ -26,19 +40,8 @@ pub(super) fn normalization(block: &DecodedSceneBlock, offset: u32) -> f32 {
         .lfes()
         .iter()
         .filter(|lfe| {
-            lfe.samples()
-                .iter()
-                .enumerate()
-                .skip(offset as usize)
-                .any(|(frame, sample)| {
-                    let (active, gain) = lfe_render_state(element_state_at(
-                        block,
-                        lfe.element_id(),
-                        lfe.initial_state(),
-                        u32::try_from(frame).unwrap_or(u32::MAX),
-                    ));
-                    block.state_complete() && active && (sample * gain).abs() > ACTIVE_EPSILON
-                })
+            (offset..block.duration_frames())
+                .any(|frame| resolved_sample(block, lfe, frame).abs() > ACTIVE_EPSILON)
         })
         .count();
     if active > 1 {
@@ -46,6 +49,40 @@ pub(super) fn normalization(block: &DecodedSceneBlock, offset: u32) -> f32 {
     } else {
         1.0
     }
+}
+
+/// Two output slots: copy only a lone audible input, otherwise keep both
+/// independent. Resolve controls once into PCM, including after a seek/trim.
+#[cfg(any(macinrender_output, test))]
+pub(super) fn copy_or_direct(block: &DecodedSceneBlock, offset: u32) -> [Vec<f32>; 2] {
+    let mut outputs = std::array::from_fn(|index| {
+        (offset..block.duration_frames())
+            .map(|frame| {
+                block
+                    .lfes()
+                    .get(index)
+                    .map_or(0.0, |lfe| resolved_sample(block, lfe, frame))
+            })
+            .collect::<Vec<_>>()
+    });
+    let source = match [has_signal(&outputs[0]), has_signal(&outputs[1])] {
+        [true, false] => Some(0),
+        [false, true] => Some(1),
+        _ => None,
+    };
+    if let Some(source) = source {
+        let [first, second] = &mut outputs;
+        let (source, destination) = if source == 0 {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        for sample in source.iter_mut() {
+            *sample *= std::f32::consts::FRAC_1_SQRT_2;
+        }
+        destination.copy_from_slice(source);
+    }
+    outputs
 }
 
 /// Resolve the two independent source controls before folding into one bed LFE.
@@ -58,19 +95,7 @@ pub(super) fn fold(block: &DecodedSceneBlock, offset: u32) -> Vec<f32> {
             block
                 .lfes()
                 .iter()
-                .map(|lfe| {
-                    let (active, level) = lfe_render_state(element_state_at(
-                        block,
-                        lfe.element_id(),
-                        lfe.initial_state(),
-                        frame,
-                    ));
-                    if active {
-                        lfe.samples()[frame as usize] * level
-                    } else {
-                        0.0
-                    }
-                })
+                .map(|lfe| resolved_sample(block, lfe, frame))
                 .sum::<f32>()
                 * gain
         })
@@ -241,7 +266,7 @@ mod tests {
     }
 
     #[test]
-    fn one_active_lfe_keeps_unity_and_two_active_lfes_use_equal_power() {
+    fn single_output_keeps_one_active_lfe_at_unity_and_normalizes_two() {
         for (first, second, second_gain, expected) in [
             (0.5, 0.0, 1.0, 0.5),
             (0.0, 0.5, 1.0, 0.5),
@@ -262,6 +287,87 @@ mod tests {
             let native_fold = (first + second * second_gain) * normalization(&block, 0);
             assert!((native_fold - expected).abs() < 1e-6);
         }
+    }
+
+    #[test]
+    fn dual_output_copies_only_one_audible_input_and_never_sums_two() {
+        let half_power = std::f32::consts::FRAC_1_SQRT_2;
+        for (first, second, second_gain, expected) in [
+            (0.125, 0.0, 1.0, [0.125 * half_power; 2]),
+            (0.0, -0.25, 1.0, [-0.25 * half_power; 2]),
+            (0.125, -0.25, 1.0, [0.125, -0.25]),
+            (0.125, -0.125, 1.0, [0.125, -0.125]),
+            (0.125, -0.25, 0.0, [0.125 * half_power; 2]),
+            (0.125, -0.25, 0.5, [0.125, -0.125]),
+            (0.0, 0.0, 1.0, [0.0; 2]),
+        ] {
+            let block = block(&[first; 8], &[second; 8], second_gain);
+            let actual = copy_or_direct(&block, 0);
+            for (output, expected) in actual.iter().zip(expected) {
+                assert!(output.iter().all(|sample| (sample - expected).abs() < 1e-6));
+            }
+            assert_eq!(block.lfes()[0].samples(), &[first; 8]);
+            assert_eq!(block.lfes()[1].samples(), &[second; 8]);
+        }
+    }
+
+    #[test]
+    fn dual_output_routes_one_source_or_one_unmuted_source_at_equal_power() {
+        let active = Some(SpatialObjectState::new(true, None, Some(0.5), true));
+        let muted = Some(SpatialObjectState::new(false, None, Some(1.0), true));
+        for lfes in [
+            vec![SceneLfePcm::new(4, active, vec![0.5; 8])],
+            vec![
+                SceneLfePcm::new(4, muted, vec![0.5; 8]),
+                SceneLfePcm::new(10, active, vec![0.5; 8]),
+            ],
+        ] {
+            let input = block(&[0.0; 8], &[0.0; 8], 1.0).with_lfes(lfes);
+            for output in copy_or_direct(&input, 0) {
+                assert_eq!(output, vec![0.25 * std::f32::consts::FRAC_1_SQRT_2; 8]);
+            }
+        }
+    }
+
+    #[test]
+    fn dual_output_does_not_toggle_copy_at_waveform_zero_crossings() {
+        let block = block(&[0.5, 0.0, -0.5, 0.0], &[0.0, 0.5, 0.0, -0.5], 1.0);
+        let actual = copy_or_direct(&block, 0);
+        assert_eq!(actual[0], block.lfes()[0].samples());
+        assert_eq!(actual[1], block.lfes()[1].samples());
+    }
+
+    #[test]
+    fn dual_output_resolves_ramps_before_activity_and_retries_are_repeatable() {
+        use crate::decoder::{FIELD_GAIN, SceneMetadataUpdate};
+        let active = SpatialObjectState::new(true, None, Some(1.0), true);
+        let zero_gain = SpatialObjectState::new(true, None, Some(0.0), true);
+        let block = DecodedSceneBlock::new(
+            48_000,
+            0,
+            8,
+            1,
+            0,
+            None,
+            true,
+            vec![],
+            None,
+            vec![SceneMetadataUpdate::new(10, 2, 2, FIELD_GAIN, zero_gain)],
+        )
+        .with_lfes(vec![
+            SceneLfePcm::new(4, Some(active), vec![0.5; 8]),
+            SceneLfePcm::new(10, Some(active), vec![-0.5; 8]),
+        ]);
+        let actual = copy_or_direct(&block, 0);
+        assert_eq!(actual[0], [0.5; 8]);
+        assert_eq!(actual[1], [-0.5, -0.5, -0.5, -0.25, 0.0, 0.0, 0.0, 0.0]);
+        let trimmed = copy_or_direct(&block, 4);
+        assert_eq!(trimmed, copy_or_direct(&block, 4));
+        assert!(
+            trimmed
+                .iter()
+                .all(|output| output == &vec![0.5 * std::f32::consts::FRAC_1_SQRT_2; 4])
+        );
     }
 
     #[test]

@@ -27,12 +27,15 @@ fn apple_22_2_keeps_two_lfe_inputs_in_separate_output_channels() {
 }
 
 #[test]
-fn apple_equal_power_copy_handles_one_or_two_audible_inputs() {
+fn native_equal_power_copy_splits_a_single_lfe_bus() {
     let half_power = std::f32::consts::FRAC_1_SQRT_2;
-    check_lfe_output(true, 0.125, 0.0, [0.125 * half_power; 2]);
-    check_lfe_output(true, 0.0, -0.25, [-0.25 * half_power; 2]);
-    // The player normalizes the two audible inputs before native split-power.
-    check_lfe_output(true, 0.125 * half_power, -0.25 * half_power, [-0.0625; 2]);
+    check_renderer_lfe_output(
+        SpeakerRenderer::SafVbap,
+        "9+10+3",
+        true,
+        &[0.125],
+        [0.125 * half_power; 2],
+    );
 }
 
 #[test]
