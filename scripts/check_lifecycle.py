@@ -23,13 +23,19 @@ def install(package, log, *, repair=False, uninstall=False, downgrade=False):
         arguments = ["msiexec", mode, str(package), "/qn", "/norestart", "/l*v", str(log)]
     else:
         arguments = ["installer", "-pkg", str(package), "-target", "CurrentUserHomeDirectory"]
-    result = subprocess.run(arguments, capture_output=True, text=True, timeout=120)
+    print("+", " ".join(arguments), flush=True)
+    if os.name == "nt":
+        # msiexec writes its full diagnostics through /l*v. Avoid captured pipes
+        # that descendants can keep open after a timeout kills the client.
+        result = subprocess.run(arguments, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
+    else:
+        result = subprocess.run(arguments, capture_output=True, text=True, timeout=120)
     if os.name != "nt":
         log.write_text(result.stdout + result.stderr)
     if downgrade and os.name == "nt":
         require(result.returncode not in (0, 3010), "Windows allowed a downgrade")
     else:
-        require(result.returncode in (0, 3010), f"Installer failed: {result.returncode}; see {log}\n{result.stderr}")
+        require(result.returncode in (0, 3010), f"Installer failed: {result.returncode}; see {log}\n{result.stderr or ''}")
 
 
 def check_state(data, expected_hash):

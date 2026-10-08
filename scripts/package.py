@@ -37,7 +37,9 @@ def diagnostic_workspace(prefix):
         work = Path(temporary)
         try:
             yield work
-        except Exception:
+        except BaseException:
+            # Preserve diagnostics before TemporaryDirectory cleans up, including
+            # interrupted CI checks and explicit subprocess timeouts.
             destination = ROOT / "target/packaging-failures" / work.name
             destination.mkdir(parents=True, exist_ok=True)
             for pattern in ("*.log", "*report.json", "install-check.json"):
@@ -54,8 +56,8 @@ def run(arguments, **kwargs):
     return subprocess.run(list(map(str, arguments)), cwd=ROOT, check=True, **kwargs)
 
 
-def output(arguments):
-    return subprocess.check_output(list(map(str, arguments)), cwd=ROOT, text=True).strip()
+def output(arguments, **kwargs):
+    return subprocess.check_output(list(map(str, arguments)), cwd=ROOT, text=True, **kwargs).strip()
 
 
 def sha256(path):
@@ -201,14 +203,14 @@ def verify_pkg(package, work, version):
 def wix_tool():
     tool = TOOLS / "wix/wix.exe"
     if tool.is_file():
-        probe = subprocess.run([str(tool), "--version"], text=True, capture_output=True)
+        probe = subprocess.run([str(tool), "--version"], text=True, capture_output=True, timeout=60)
         if probe.returncode == 0 and (probe.stdout.strip() == WIX_VERSION or probe.stdout.strip().startswith((WIX_VERSION + ".", WIX_VERSION + "+"))):
             return tool
     # The directory is owned by this script. A partially pruned .NET tool store
     # cannot be repaired by `dotnet tool install` in place.
     if tool.parent.exists(): shutil.rmtree(tool.parent)
-    run(["dotnet", "tool", "install", "wix", "--version", WIX_VERSION, "--tool-path", tool.parent])
-    reported = output([tool, "--version"])
+    run(["dotnet", "tool", "install", "wix", "--version", WIX_VERSION, "--tool-path", tool.parent], timeout=180)
+    reported = output([tool, "--version"], timeout=60)
     require(reported == WIX_VERSION or reported.startswith((WIX_VERSION + ".", WIX_VERSION + "+")), "WiX version mismatch")
     return tool
 
@@ -220,13 +222,13 @@ def build_msi(binary, version, destination):
     # native MSI dialogs/text are linked; no executable custom action is used.
     extension = TOOLS / ".wix/extensions/WixToolset.UI.wixext" / WIX_VERSION / "wixext5/WixToolset.UI.wixext.dll"
     if not extension.is_file():
-        subprocess.run([str(wix), "extension", "add", f"WixToolset.UI.wixext/{WIX_VERSION}"], cwd=TOOLS, check=True)
+        subprocess.run([str(wix), "extension", "add", f"WixToolset.UI.wixext/{WIX_VERSION}"], cwd=TOOLS, check=True, timeout=180)
     require(extension.is_file(), "Missing pinned WiX UI extension")
     run([wix, "build", ROOT / "packaging/windows/player.wxs", ROOT / "packaging/windows/ui.wxs",
          "-ext", extension, "-culture", "en-us", "-arch", "x64",
          "-d", f"Version={version}",
          "-d", f"UpgradeCode={guid('upgrade')}", "-d", f"ComponentCode={guid('executable')}",
-         "-d", f"Executable={binary}", "-d", f"Icon={ROOT / 'assets/icons/app-windows.ico'}", "-o", destination])
+         "-d", f"Executable={binary}", "-d", f"Icon={ROOT / 'assets/icons/app-windows.ico'}", "-o", destination], timeout=300)
 
 
 def msi_rows(database, query, columns):
