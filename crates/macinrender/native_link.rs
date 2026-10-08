@@ -208,6 +208,15 @@ pub fn emit(build: &Path, windows: bool) {
     for link in links {
         match link {
             Link::Archive(path) => {
+                // The CMake probe needs a standalone Rust staticlib, but the
+                // player links these exports through its mradm-ffi Cargo
+                // dependency. Linking both copies duplicates std under ThinLTO.
+                if matches!(
+                    path.file_name().and_then(|name| name.to_str()),
+                    Some("mradm_ffi.lib" | "libmradm_ffi.a")
+                ) {
+                    continue;
+                }
                 if checked.insert(path.clone()) {
                     verify_archive(&path);
                 }
@@ -235,6 +244,7 @@ pub fn emit(build: &Path, windows: bool) {
         build.join("native-link.json"),
         serde_json::to_vec_pretty(&serde_json::json!({
             "linkage": "static", "link_inputs": tokens,
+            "rust_kernels": "cargo",
         }))
         .unwrap(),
     )
