@@ -29,7 +29,7 @@ python3 scripts/package.py --target aarch64-apple-darwin
 
 Cargo 缓存仅在任务成功完成后保存，确保包含 Release 构建结果；`v2-shared-native` 前缀用于共享原生构建目录的新布局。首次运行需重新填充，后续主线、PR 和发布构建可以复用 GitHub 允许其访问的缓存，成功的 PR 运行也会保存本 PR 的缓存。
 
-测试、Clippy 和 Release 复用 `.ci-inputs/macinrender/build/player-native` 下的同一份原生 Release 产物，按源码路径、目标平台和工具链配置区分目录并加文件锁。目录放在 Cargo target 外，避免 rust-cache 的清理误删 CMake 产物。Cargo 并行数按运行器 CPU 数量设置，上限为 4；嵌套 CMake／Rust 编译上限为 2，避免两层并发耗尽内存。并行度在缓存恢复后设置，不参与构建缓存身份。
+测试、Clippy 和 Release 复用 `.ci-inputs/macinrender/build/player-native` 下的同一份原生 Release 产物，按源码路径、目标平台和工具链配置区分目录并加文件锁。目录放在 Cargo target 外，避免 rust-cache 的清理误删 CMake 产物。Cargo 并行数按运行器 CPU 数量设置，上限为 4；嵌套 CMake／Rust 编译上限为 2，避免两层并发耗尽内存。Windows 精确命中 Rust 缓存时，发布阶段使用 2 路并行：依赖已编译，此时主要剩下播放器的 ThinLTO，实测 4 路反而更慢。冷构建仍使用最多 4 路并行编译依赖。并行度在缓存恢复后设置，不参与构建缓存身份。
 
 AC-4 规范表随固定 Core 提交缓存，复用前核对提交号和三个表文件的 SHA-256；缺失、变化或生成失败都会失效。缓存命中时保留文件时间，避免相同表数据触发解码器重编译。Core 的构建脚本仍校验锁定的表摘要。UI 字体保存在 `.ci-tools/fonts`，各 Cargo profile 复制校验通过的字体，并发下载由文件锁协调。
 

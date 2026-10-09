@@ -59,6 +59,7 @@ jobs:
               print(f"CARGO_TARGET_DIR={target_dir}", file=output)
           PYTHON
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        id: rust_cache
         with:
           workspaces: . -> ${{ env.CARGO_TARGET_DIR || 'target' }}
           # Cargo/native outputs and the Core Rust kernels follow the renderer
@@ -135,6 +136,10 @@ jobs:
       - name: Packaging regression tests
         run: python -m unittest discover -s scripts -p 'test_*.py'
       - name: Build and verify installer, relocated executable and window
+        env:
+          # With dependencies restored, the player's ThinLTO dominates this
+          # step. Four workers regressed warm Windows builds; keep two there.
+          CARGO_BUILD_JOBS: ${{ runner.os == 'Windows' && steps.rust_cache.outputs.cache-hit == 'true' && '2' || env.CARGO_BUILD_JOBS }}
         run: python scripts/package.py --target "$TARGET" --release-tag "$RELEASE_TAG"
       # Preserve the tested payload even if a later installer/runner check is
       # interrupted. Release publication still requires this whole job to pass.
