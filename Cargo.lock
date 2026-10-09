@@ -180,7 +180,7 @@ dependencies = [
 [[package]]
 name = "apac-cac"
 version = "0.1.0"
-source = "git+https://github.com/SakuzyPeng/MacinDecode-APAC-Core.git?rev=4aefbd3eb4b3da64410b8582c3ec38eb76a1c37c#4aefbd3eb4b3da64410b8582c3ec38eb76a1c37c"
+source = "git+https://github.com/SakuzyPeng/MacinDecode-APAC-Core.git?rev=b1ba6fa2fd82aaac7731f1a6cc74cc1ad24181b2#b1ba6fa2fd82aaac7731f1a6cc74cc1ad24181b2"
 dependencies = [
  "serde",
  "serde_json",
@@ -189,7 +189,7 @@ dependencies = [
 [[package]]
 name = "apac-container"
 version = "0.1.0"
-source = "git+https://github.com/SakuzyPeng/MacinDecode-APAC-Core.git?rev=4aefbd3eb4b3da64410b8582c3ec38eb76a1c37c#4aefbd3eb4b3da64410b8582c3ec38eb76a1c37c"
+source = "git+https://github.com/SakuzyPeng/MacinDecode-APAC-Core.git?rev=b1ba6fa2fd82aaac7731f1a6cc74cc1ad24181b2#b1ba6fa2fd82aaac7731f1a6cc74cc1ad24181b2"
 dependencies = [
  "apac-core",
  "sha2",
@@ -198,7 +198,7 @@ dependencies = [
 [[package]]
 name = "apac-core"
 version = "0.1.0"
-source = "git+https://github.com/SakuzyPeng/MacinDecode-APAC-Core.git?rev=4aefbd3eb4b3da64410b8582c3ec38eb76a1c37c#4aefbd3eb4b3da64410b8582c3ec38eb76a1c37c"
+source = "git+https://github.com/SakuzyPeng/MacinDecode-APAC-Core.git?rev=b1ba6fa2fd82aaac7731f1a6cc74cc1ad24181b2#b1ba6fa2fd82aaac7731f1a6cc74cc1ad24181b2"
 dependencies = [
  "apac-cac",
  "libm",
