@@ -27,7 +27,11 @@ python3 scripts/package.py --target aarch64-apple-darwin
 
 ## CI 与发布
 
-Cargo 缓存仅在任务成功完成后保存，确保包含 Release 构建结果；`v1-complete-rust` 前缀隔离过去可能在失败时保存的不完整缓存。首次运行需重新填充，后续主线和发布构建可以复用。
+Cargo 缓存仅在任务成功完成后保存，确保包含 Release 构建结果；`v2-shared-native` 前缀用于共享原生构建目录的新布局。首次运行需重新填充，后续主线、PR 和发布构建可以复用 GitHub 允许其访问的缓存，成功的 PR 运行也会保存本 PR 的缓存。
+
+测试、Clippy 和 Release 复用 `.ci-inputs/macinrender/build/player-native` 下的同一份原生 Release 产物，按源码路径、目标平台和工具链配置区分目录并加文件锁。目录放在 Cargo target 外，避免 rust-cache 的清理误删 CMake 产物。Cargo 并行数按运行器 CPU 数量设置，上限为 4；嵌套 CMake／Rust 编译上限为 2，避免两层并发耗尽内存。并行度在缓存恢复后设置，不参与构建缓存身份。
+
+AC-4 规范表随固定 Core 提交缓存，复用前核对提交号和三个表文件的 SHA-256；缺失、变化或生成失败都会失效。缓存命中时保留文件时间，避免相同表数据触发解码器重编译。Core 的构建脚本仍校验锁定的表摘要。UI 字体保存在 `.ci-tools/fonts`，各 Cargo profile 复制校验通过的字体，并发下载由文件锁协调。
 
 许可证工具 `cargo-about` 按运行器平台、目标架构和脚本中的锁定版本独立缓存，版本校验通过后立即保存，不等待播放器构建结束。缓存只包含工具二进制，许可证清单每次重新生成。工具准备单列为 CI 步骤，避免其首次编译时间混入安装包构建。
 

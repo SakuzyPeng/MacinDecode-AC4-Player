@@ -28,7 +28,6 @@ jobs:
         shell: bash
     env:
       CARGO_TERM_COLOR: always
-      CARGO_BUILD_JOBS: '2'
       PYTHONUTF8: '1'
       PYTHONIOENCODING: utf-8
       MACOSX_DEPLOYMENT_TARGET: '14.0'
@@ -65,15 +64,34 @@ jobs:
           # Cargo/native outputs and the Core Rust kernels follow the renderer
           # revision. The license tool has an independent cache below.
           key: ${{ matrix.target }}-static-v1-xcode26.3-${{ hashFiles('crates/macinrender/native/CMakeLists.txt') }}
-          # Retire entries that may have been saved before Release compilation.
-          prefix-key: v1-complete-rust
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          # Native Release outputs are shared across Cargo profiles in v2.
+          prefix-key: v2-shared-native
           cache-workspace-crates: true
           cache-on-failure: false
           cache-directories: |
             .ci-tools
             .ci-inputs/native-dependencies
             .ci-inputs/macinrender
+            .ci-inputs/ac4-core
+      - name: Configure build reuse and parallelism
+        run: |
+          python - <<'PYTHON'
+          import os
+          from pathlib import Path
+          root = Path.cwd()
+          jobs = min(4, os.cpu_count() or 2)
+          settings = {
+              "CARGO_BUILD_JOBS": jobs,
+              "MACINRENDER_BUILD_JOBS": min(2, jobs),
+              # Keep CMake outputs outside Cargo's target cache cleanup.
+              "MACINRENDER_BUILD_DIR": root / ".ci-inputs/macinrender/build/player-native",
+              "MACINDECODE_UI_FONT_CACHE_DIR": root / ".ci-tools/fonts",
+          }
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
+              for key, value in settings.items():
+                  print(f"{key}={value}", file=output)
+                  print(f"{key}={value}")
+          PYTHON
       - name: Compute license tool cache identity
         id: license_tool
         run: |

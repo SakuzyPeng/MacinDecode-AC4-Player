@@ -352,9 +352,13 @@ workspace 构建并静态链接；Windows 使用 MSVC，不再准备 OpenBLAS/LA
 ```text
 MACINRENDER_SOURCE_DIR=<本地 MacinRender 源码目录>
 MACINRENDER_FETCHCONTENT_DIR=<Cargo target 内的依赖缓存目录>
+MACINRENDER_BUILD_DIR=<可选，跨 Cargo profile 共享原生产物的绝对路径>
+MACINRENDER_BUILD_JOBS=<可选，CMake 及其嵌套 Cargo 的并行上限>
 ```
 
-`CMAKE_TOOLCHAIN_FILE` 会传入 CMake。C++ 产物位于播放器的 Cargo 构建目录；Core 的 Rust
+`CMAKE_TOOLCHAIN_FILE` 会传入 CMake。C++ 产物默认位于播放器的 Cargo 构建目录；设置
+`MACINRENDER_BUILD_DIR` 后按源码路径、目标和工具链配置选择共享子目录，构建期间加文件锁。
+各 Cargo profile 都使用同一原生 Release 配置，无需重复编译。Core 的 Rust
 数值内核复用其 `build/rust`，Cargo 区分平台与 profile。源覆盖会跟踪 C++、头文件、CMake 和 Rust 的变化。
 没有 `macinrender` 时不需要 C++ 依赖：`cargo run --no-default-features --features decode` 保留
 Windows 对象直通以及 macOS/Linux 场景预览。`--no-default-features` 为纯检查构建。

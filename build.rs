@@ -8,12 +8,14 @@ use sha2::{Digest, Sha256};
 
 const FONT_FILE_NAME: &str = "NotoSansCJKsc-Regular.otf";
 const FONT_OVERRIDE_ENV: &str = "MACINDECODE_UI_FONT_PATH";
+const FONT_CACHE_ENV: &str = "MACINDECODE_UI_FONT_CACHE_DIR";
 const FONT_SHA256: &str = "2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b";
 const FONT_URL: &str = "https://cdn.jsdelivr.net/gh/notofonts/noto-cjk@165c01b46ea533872e002e0785ff17e44f6d97d8c/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf";
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed={FONT_OVERRIDE_ENV}");
+    println!("cargo:rerun-if-env-changed={FONT_CACHE_ENV}");
 
     declare_spatial_output();
     embed_windows_icon();
@@ -103,6 +105,34 @@ fn prepare_ui_font() -> Result<(), String> {
         return Ok(());
     }
 
+    if let Some(cache) = env::var_os(FONT_CACHE_ENV).map(PathBuf::from) {
+        if !cache.is_absolute() {
+            return Err(format!("{FONT_CACHE_ENV} must be absolute"));
+        }
+        fs::create_dir_all(&cache)
+            .map_err(|error| format!("could not create {}: {error}", cache.display()))?;
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(cache.join(".font.lock"))
+            .map_err(|error| format!("could not open the font cache lock: {error}"))?;
+        lock.lock()
+            .map_err(|error| format!("could not lock the font cache: {error}"))?;
+        let bytes = ensure_ui_font(&cache.join(FONT_FILE_NAME))?;
+        fs::write(&destination, bytes)
+            .map_err(|error| format!("could not write {}: {error}", destination.display()))?;
+    } else {
+        ensure_ui_font(&destination)?;
+    }
+    Ok(())
+}
+
+fn ensure_ui_font(destination: &Path) -> Result<Vec<u8>, String> {
+    if let Ok(bytes) = read_verified_font(destination) {
+        return Ok(bytes);
+    }
     let partial = destination.with_extension("otf.part");
     if partial.exists() {
         fs::remove_file(&partial)
@@ -137,23 +167,23 @@ fn prepare_ui_font() -> Result<(), String> {
         ));
     }
 
-    read_verified_font(&partial)?;
+    let bytes = read_verified_font(&partial)?;
     if destination.exists() {
-        fs::remove_file(&destination).map_err(|error| {
+        fs::remove_file(destination).map_err(|error| {
             format!(
                 "could not replace invalid {}: {error}",
                 destination.display()
             )
         })?;
     }
-    fs::rename(&partial, &destination).map_err(|error| {
+    fs::rename(&partial, destination).map_err(|error| {
         format!(
             "could not move {} to {}: {error}",
             partial.display(),
             destination.display()
         )
     })?;
-    Ok(())
+    Ok(bytes)
 }
 
 fn read_verified_font(path: &Path) -> Result<Vec<u8>, String> {

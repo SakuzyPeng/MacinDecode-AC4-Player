@@ -1,4 +1,6 @@
 """Prepare checksum/revision-pinned inputs for the full default-feature player."""
+import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -7,6 +9,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 INPUTS = ROOT / ".ci-inputs"
+SPEC_TABLES = ("generated/ts103190_pdf_tables.rs", "ts_103190_tables.c", "ts_103190_tables_part2.c")
 
 
 def run(args, **kwargs):
@@ -28,6 +31,31 @@ def checkout(name, url, revision):
     return destination
 
 
+def spec_identity(core, revision):
+    return {"revision": revision, "sha256": {
+        name: hashlib.sha256((core / "spec" / name).read_bytes()).hexdigest()
+        for name in SPEC_TABLES
+    }}
+
+
+def prepare_spec_tables(core, revision):
+    # Preserve table mtimes on cache hits: regenerating identical files forces
+    # the decoder and all its dependants to compile again in every profile.
+    stamp = core / ".git/player-spec-inputs.json"
+    try:
+        if json.loads(stamp.read_text(encoding="utf-8")) == spec_identity(core, revision):
+            print(f"Reusing verified decoder inputs for {revision}", flush=True)
+            return
+    except (OSError, ValueError):
+        pass
+    stamp.unlink(missing_ok=True)
+    run([sys.executable, "-m", "pip", "install", "-r", core / "scripts/requirements-spec.txt"])
+    run([sys.executable, core / "scripts/fetch_specs.py"])
+    run([sys.executable, core / "scripts/generate_spec_tables.py"])
+    # Core's build script also checks these tables against its pinned hashes.
+    stamp.write_text(json.dumps(spec_identity(core, revision)), encoding="utf-8")
+
+
 def prepare():
     os.environ.setdefault("PYTHONUTF8", "1")
     os.environ.setdefault("PYTHONIOENCODING", "utf-8")
@@ -42,9 +70,7 @@ def prepare():
     if not os.getenv("MACINDECODE_AC4_SPEC_DIR"):
         revision = re.search(r'MacinDecode-AC4-Core\.git", rev = "([0-9a-f]{40})"', (ROOT / "Cargo.toml").read_text())[1]
         core = checkout("ac4-core", "https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git", revision)
-        run([sys.executable, "-m", "pip", "install", "-r", core / "scripts/requirements-spec.txt"])
-        run([sys.executable, core / "scripts/fetch_specs.py"])
-        run([sys.executable, core / "scripts/generate_spec_tables.py"])
+        prepare_spec_tables(core, revision)
         settings["MACINDECODE_AC4_SPEC_DIR"] = str(core / "spec")
     os.environ.update(settings)
     if os.getenv("GITHUB_ENV"):
