@@ -31,6 +31,7 @@ telling you and what each setting does, see the [user manual](docs/MANUAL.en.md)
 - [FAQ](#faq)
 - [Known limits](#known-limits)
 - [Building from source](#building-from-source)
+- [Decoding and rendering components](#decoding-and-rendering-components)
 - [Documentation](#documentation)
 - [License](#license)
 
@@ -350,6 +351,8 @@ The design docs, which describe how the code is organised, are written in Chines
 [data directory and SOFA](docs/STORAGE.md) ·
 [packaging and CI](docs/PACKAGING.md)
 
+## Decoding and rendering components
+
 The player holds no decoding or rendering algorithms of its own. They come from four separate
 repositories, each pinned in `Cargo.toml` and `crates/macinrender/native/CMakeLists.txt`:
 
@@ -359,6 +362,28 @@ repositories, each pinned in `Cargo.toml` and `crates/macinrender/native/CMakeLi
 | [MacinDecode-APAC-Core](https://github.com/SakuzyPeng/MacinDecode-APAC-Core) | APAC decoding, CAF / MP4 containers, frame-exact seeking |
 | [MacinRender-ADM-Core](https://github.com/SakuzyPeng/MacinRender-ADM-Core) | SAF VBAP, Triple Balance, SAF HRTF binaural rendering and device output |
 | [PoseBridge](https://github.com/SakuzyPeng/PoseBridge) | BLE/USB head-tracking sensors |
+
+### Bit-identical rendering across platforms
+
+When MacinRender's numerical code moved to Rust, the sources that made results depend on the machine
+were removed one by one: the FFT always takes the scalar path instead of picking AVX or NEON by CPU,
+resampling uses a patched scalar implementation with its own sin/cos, and the OM spreader uses a
+pure-Rust libm with a fixed group count. At the pinned commit, Core's consistency CI gates 150 PCM
+cases as **bit-identical** on macOS arm64, Linux x64 and Windows x64. They cover binaural, VBAP,
+Triple Balance in all three layouts, device-side DSP (volume, headphone compensation, peak
+protection), and resampling between 44.1, 48 and 96 kHz.
+
+For the player, with the same input, settings and device block size, the software binaural feed and
+the speaker bed come out as the same bits **before** they reach the device, whether you are on a Mac
+or a PC. It does not mean two machines record identical playback:
+
+- how many frames a device asks for at a time, and when head-tracking poses arrive, differ by machine;
+- everything after the hand-off to system spatial audio, and Windows object passthrough, is rendered
+  by the operating system;
+- external SOFA files and AC-4 / APAC decoding are outside this matrix.
+
+`scripts/test_render_determinism.py` keeps the conditions the player has to preserve when it links
+this code. Scope and evidence are in Core's [phase-two closeout](https://github.com/SakuzyPeng/MacinRender-ADM-Core/blob/d75d46028b85a84394ffaad32726e68c89549ae3/docs/architecture/RUST_PHASE2_CLOSEOUT.md) (in Chinese).
 
 ## License
 

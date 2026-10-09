@@ -319,6 +319,14 @@ The picture settles something that otherwise takes several sentences: **the firs
 to the operating system before two channels exist**, so anything that acts on the final two channels
 — [headphone compensation](#headphone-compensation-hptf) does — can only exist in the third.
 
+**Sounds different on a Mac and a PC?** The part of the picture rendered inside the player comes out
+as the same bits on all three platforms (scope and conditions: the README's
+[bit-identical rendering across platforms](../README.en.md#bit-identical-rendering-across-platforms)).
+So with the same file, the same settings and the built-in KEMAR, any difference between two machines
+in software binaural lies after that point: the sound card, its driver, system volume processing and
+the headphones themselves. System spatial audio adds the system spatializer on top; Windows object
+passthrough is rendered by the system from end to end.
+
 ### The four modes
 
 | Mode | Available on | What it does |

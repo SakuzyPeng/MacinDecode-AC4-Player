@@ -349,6 +349,23 @@ FFT 工作区、卷积尾部及对象状态仍由每个渲染器独立持有。
 两份 std；CMake 为探针生成的独立 `mradm_ffi` staticlib 在链接时被跳过。Windows 使用 MSVC，不再准备
 OpenBLAS/LAPACKE 或 Boost。
 
+### 跨平台逐位一致的前提
+
+Core 的一致性 CI 把锁定提交的 150 个 PCM 用例（离线矩阵，Scene 双耳 / VBAP / Triple Balance / 设备 DSP，
+44.1–96 kHz 重采样）设为 macOS arm64、Linux x64、Windows x64 逐位相同的门禁，依据是 ADR 0015–0017。
+每种分块方式分别比较，跨分块的位相等不是契约。外部 SOFA、Apple 系统渲染器和真实设备不在范围内。
+播放器把 Core 的 Rust 链进自己的依赖图，因此要自己守住这些前提，`scripts/test_render_determinism.py`
+对两个打包目标逐项检查：
+
+- `rustfft` / `realfft` / `rubato` 不启用任何特性。Cargo 在整张依赖图里合并特性，任何依赖只要请求
+  rustfft 的默认特性，就会恢复运行时 AVX/SSE/NEON 分派与 FMA，结果因 CPU 而异；
+- `rustfft` 与 `rubato` 取自 Core 的补丁版本（标量插值、可移植 sin/cos），与 `mradm-ffi` 同一提交；
+- `nalgebra` 启用 `libm-force`，OM spreader 的 SVD 不走平台 C 库；
+- `.cargo/config.toml` 不设 `target-cpu` 或 `+fma` / `+avx`。
+
+ThinLTO 和 `codegen-units = 1` 不改变 Rust 的浮点语义，不在此列。这些检查不等于让播放器的安装包跑一遍
+一致性矩阵；它们只保证链进来的是 Core 验收过的那份代码路径。
+
 **升级 Core 要同时改三处同一个提交**：`crates/macinrender/native/CMakeLists.txt` 的 `GIT_TAG`、
 `crates/macinrender/Cargo.toml` 的 `mradm-ffi`，以及根 `Cargo.toml` `[patch.crates-io]` 里 Core 打过补丁的
 `sofar` / `rubato` / `rustfft`（重采样与 FFT 的逐位一致依赖这些补丁）。三处不一致时 C++ 与 Rust 半边会来自
