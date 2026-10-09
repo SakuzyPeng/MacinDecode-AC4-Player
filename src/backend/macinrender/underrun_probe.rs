@@ -161,7 +161,10 @@ fn current_player_saf_pose_underrun_probe() {
         if elapsed >= next_log {
             let metrics = decoder.snapshot().metrics().unwrap();
             let pose = tracker.snapshot();
-            active_snapshots += usize::from(pose.status == HeadStatus::BridgeActive);
+            active_snapshots += usize::from(
+                pose.status == HeadStatus::BridgeActive
+                    || (head == "held" && pose.status == HeadStatus::Held),
+            );
             let bridge = tracker.bridge.view();
             let sequence = tracker
                 .bridge
