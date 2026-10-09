@@ -2242,7 +2242,7 @@ dependencies = [
 [[package]]
 name = "mradm-adm"
 version = "0.1.0"
-source = "git+https://github.com/SakuzyPeng/MacinRender-ADM-Core.git?rev=d9d9086e3be2681fc950918e8888806c2f77ba6a#d9d9086e3be2681fc950918e8888806c2f77ba6a"
+source = "git+https://github.com/SakuzyPeng/MacinRender-ADM-Core.git?rev=d75d46028b85a84394ffaad32726e68c89549ae3#d75d46028b85a84394ffaad32726e68c89549ae3"
 dependencies = [
  "quick-xml",
 ]
@@ -2250,7 +2250,7 @@ dependencies = [
 [[package]]
 name = "mradm-dsp"
 version = "0.1.0"
-source = "git+https://github.com/SakuzyPeng/MacinRender-ADM-Core.git?rev=d9d9086e3be2681fc950918e8888806c2f77ba6a#d9d9086e3be2681fc950918e8888806c2f77ba6a"
+source = "git+https://github.com/SakuzyPeng/MacinRender-ADM-Core.git?rev=d75d46028b85a84394ffaad32726e68c89549ae3#d75d46028b85a84394ffaad32726e68c89549ae3"
 dependencies = [
  "ebur128",
  "libm",
@@ -2264,7 +2264,7 @@ dependencies = [
 [[package]]
 name = "mradm-ear"
 version = "0.1.0"
-source = "git+https://github.com/SakuzyPeng/MacinRender-ADM-Core.git?rev=d9d9086e3be2681fc950918e8888806c2f77ba6a#d9d9086e3be2681fc950918e8888806c2f77ba6a"
+source = "git+https://github.com/SakuzyPeng/MacinRender-ADM-Core.git?rev=d75d46028b85a84394ffaad32726e68c89549ae3#d75d46028b85a84394ffaad32726e68c89549ae3"
 dependencies = [
  "nalgebra",
  "rustfft",
@@ -2273,23 +2273,33 @@ dependencies = [
 [[package]]
 name = "mradm-ffi"
 version = "0.1.0"
-source = "git+https://github.com/SakuzyPeng/MacinRender-ADM-Core.git?rev=d9d9086e3be2681fc950918e8888806c2f77ba6a#d9d9086e3be2681fc950918e8888806c2f77ba6a"
+source = "git+https://github.com/SakuzyPeng/MacinRender-ADM-Core.git?rev=d75d46028b85a84394ffaad32726e68c89549ae3#d75d46028b85a84394ffaad32726e68c89549ae3"
 dependencies = [
  "mradm-adm",
  "mradm-dsp",
  "mradm-ear",
+ "mradm-osc",
  "mradm-wav",
 ]
 
 [[package]]
 name = "mradm-math"
 version = "0.1.0"
-source = "git+https://github.com/SakuzyPeng/MacinRender-ADM-Core.git?rev=d9d9086e3be2681fc950918e8888806c2f77ba6a#d9d9086e3be2681fc950918e8888806c2f77ba6a"
+source = "git+https://github.com/SakuzyPeng/MacinRender-ADM-Core.git?rev=d75d46028b85a84394ffaad32726e68c89549ae3#d75d46028b85a84394ffaad32726e68c89549ae3"
+
+[[package]]
+name = "mradm-osc"
+version = "0.1.0"
+source = "git+https://github.com/SakuzyPeng/MacinRender-ADM-Core.git?rev=d75d46028b85a84394ffaad32726e68c89549ae3#d75d46028b85a84394ffaad32726e68c89549ae3"
+dependencies = [
+ "mradm-dsp",
+ "serde_json",
+]
 
 [[package]]
 name = "mradm-wav"
 version = "0.1.0"
-source = "git+https://github.com/SakuzyPeng/MacinRender-ADM-Core.git?rev=d9d9086e3be2681fc950918e8888806c2f77ba6a#d9d9086e3be2681fc950918e8888806c2f77ba6a"
+source = "git+https://github.com/SakuzyPeng/MacinRender-ADM-Core.git?rev=d75d46028b85a84394ffaad32726e68c89549ae3#d75d46028b85a84394ffaad32726e68c89549ae3"
 
 [[package]]
 name = "naga"
@@ -3306,7 +3316,7 @@ dependencies = [
 [[package]]
 name = "rubato"
 version = "5.0.1"
-source = "git+https://github.com/SakuzyPeng/MacinRender-ADM-Core.git?rev=d9d9086e3be2681fc950918e8888806c2f77ba6a#d9d9086e3be2681fc950918e8888806c2f77ba6a"
+source = "git+https://github.com/SakuzyPeng/MacinRender-ADM-Core.git?rev=d75d46028b85a84394ffaad32726e68c89549ae3#d75d46028b85a84394ffaad32726e68c89549ae3"
 dependencies = [
  "audioadapter",
  "audioadapter-buffers",
@@ -3355,7 +3365,7 @@ dependencies = [
 [[package]]
 name = "rustfft"
 version = "6.4.1"
-source = "git+https://github.com/SakuzyPeng/MacinRender-ADM-Core.git?rev=d9d9086e3be2681fc950918e8888806c2f77ba6a#d9d9086e3be2681fc950918e8888806c2f77ba6a"
+source = "git+https://github.com/SakuzyPeng/MacinRender-ADM-Core.git?rev=d75d46028b85a84394ffaad32726e68c89549ae3#d75d46028b85a84394ffaad32726e68c89549ae3"
 dependencies = [
  "num-complex",
  "num-integer",
@@ -3396,6 +3406,12 @@ name = "rustversion"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
+
+[[package]]
+name = "ryu"
+version = "1.0.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "safe_arch"
@@ -3483,15 +3499,14 @@ dependencies = [
 
 [[package]]
 name = "serde_json"
-version = "1.0.151"
+version = "1.0.140"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
+checksum = "20068b6e96dc6c9bd23e01df8827e6c7e1f2fddd43c21810382803c136b99373"
 dependencies = [
  "itoa",
  "memchr",
+ "ryu",
  "serde",
- "serde_core",
- "zmij",
 ]
 
 [[package]]
@@ -3719,7 +3734,7 @@ dependencies = [
 [[package]]
 name = "sofar"
 version = "0.3.0"
-source = "git+https://github.com/SakuzyPeng/MacinRender-ADM-Core.git?rev=d9d9086e3be2681fc950918e8888806c2f77ba6a#d9d9086e3be2681fc950918e8888806c2f77ba6a"
+source = "git+https://github.com/SakuzyPeng/MacinRender-ADM-Core.git?rev=d75d46028b85a84394ffaad32726e68c89549ae3#d75d46028b85a84394ffaad32726e68c89549ae3"
 dependencies = [
  "arrayvec",
  "bitflags 2.13.1",
@@ -5282,12 +5297,6 @@ dependencies = [
  "quote",
  "syn 2.0.119",
 ]
-
-[[package]]
-name = "zmij"
-version = "1.0.23"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zune-core"
