@@ -8,7 +8,7 @@ Player 将 AC-4 Core 的 Scene 或 APAC 离散多声道 转换为 renderer-nativ
 `Audio settings → Speakers → Speaker renderer` 分别选择 SAF VBAP（默认）或 Triple Balance。
 VBAP 沿用 Apple 几何；Triple Balance 发送 C ABI 的 `ADM_RENDERER_TRIPLE_BALANCE = 7`，渲染和设备输出均使用标准房间几何。该选择只影响系统空间音频，软件双耳继续使用 SAF HRTF，Windows 对象直通保持原通路。旧设置缺少 `speaker_renderer` 时保持 VBAP；算法或几何改变会准备新输出并恢复当前播放位置。
 
-当前固定 Core `a125ab7` / C ABI 1.44。后台以 null 输出实际提交对象、LFE 和静音补齐床，检查 worker 完成后才启用对应布局，不以创建成功代替可播放。探测不打开音频设备，失败显示结构化 backend diagnostic。
+当前固定 Core `d9d9086` / C ABI 1.44。后台以 null 输出实际提交对象、LFE 和静音补齐床，检查 worker 完成后才启用对应布局，不以创建成功代替可播放。探测不打开音频设备，失败显示结构化 backend diagnostic。
 
 Triple Balance 要求完整的 7.1.2 bed。播放器在原生边界为 LFE 增加九路永久静音的 bed 通道；普通对象照常提交，虚拟声道不占用播放器的源对象和表头。静音通道使用避开源 ID 的独立 ID，随 generation 重建，PCM 标为无信号，状态关闭且增益为零。源解码数据和场景元数据不修改。
 

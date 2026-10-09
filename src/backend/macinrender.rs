@@ -22,6 +22,10 @@ use crate::scene_view::{
 };
 use macindecode_macinrender as native;
 
+#[cfg(all(test, posebridge_input))]
+#[path = "macinrender/underrun_probe.rs"]
+mod underrun_probe;
+
 const HISTORY_BYTES: usize = 16 * 1024 * 1024;
 
 pub(super) struct PreparedSession {
