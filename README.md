@@ -1,10 +1,13 @@
-# MacinDecode AC-4 Player
+# MacinDecode Spatial Player
 
 **简体中文** · [English](README.en.md)
 
 一个用来**打开、查看和播放 Dolby AC-4 与 APAC 空间音频文件**的桌面应用。它自带 AC-4 和 APAC 解码器，
 不调用系统或第三方媒体解码器；解码出的音频对象既可以送到系统空间音频或耳机双耳渲染，
 也会实时画在窗口中央的三维场景里。
+
+本项目原名 **MacinDecode AC-4 Player**；支持 APAC 之后不再只播 AC-4，因此改名。旧版的播放列表和设置会在
+第一次启动时自动带过来，见[从旧版升级](#从-macindecode-ac-4-player-升级)。
 
 ![空间视图示意：橙色音频对象围绕听者盘旋，留下渐淡的位置轨迹。](assets/readme/spatial-orbit.svg)
 
@@ -30,7 +33,7 @@
 
 ## 能用它做什么
 
-- **播放 AC-4 沉浸声**：Windows 走空间音频对象直通，macOS 走系统空间音频，两个平台都可以改用软件双耳（普通耳机即可）。
+- **播放 AC-4 沉浸声和 APAC 多声道**：Windows 走空间音频对象直通，macOS 走系统空间音频，两个平台都可以改用软件双耳（普通耳机即可）。
 - **看清文件里有什么**：容器、节目、对象数量、低频声道、码率等信息，不播放也能看。
 - **管理多个播放列表**：新建、改名、排序、拖拽、跨列表复制或移动；关掉再打开会回到上次那首歌和断点，并保持暂停。
 - **实时三维场景**：每个音频对象在空间中的位置随播放推进移动，可以任意角度观察。
@@ -49,7 +52,7 @@ APAC 支持单声道、立体声、5.1、7.1、7.1.4、9.1.6、22.2，以及按�
 
 ## 获取应用
 
-请到 [GitHub Releases](https://github.com/SakuzyPeng/MacinDecode-AC4-Player/releases) 查看可下载的版本和使用说明。
+请到 [GitHub Releases](https://github.com/SakuzyPeng/MacinDecode-Spatial-Player/releases) 查看可下载的版本和使用说明。
 在对应版本页面下方的 **Assets** 中，按电脑选择安装包：
 
 | 你的电脑 | 安装包 |
@@ -57,11 +60,20 @@ APAC 支持单声道、立体声、5.1、7.1、7.1.4、9.1.6、22.2，以及按�
 | Windows 11，Intel / AMD 64 位电脑（建议保持系统更新） | `.msi` |
 | macOS 14 或更新版本，Apple 芯片 Mac（M1 及更新机型） | `.pkg` |
 
-双击安装包，按提示完成安装。Windows 装到 `%LOCALAPPDATA%\Programs\MacinDecode AC-4 Player`，
+双击安装包，按提示完成安装。Windows 装到 `%LOCALAPPDATA%\Programs\MacinDecode Spatial Player`，
 Mac 上的应用位于个人文件夹中的 **Applications（应用程序）**，即 `~/Applications`；都不需要管理员权限。
 
 Windows 更新时直接运行新的 MSI 即可，无需先卸载；相同版本的不同构建也能覆盖安装。
 再次打开同一份 MSI 可以修复或卸载。升级会保留播放列表、设置和已导入的 SOFA 文件。
+
+### 从 MacinDecode AC-4 Player 升级
+
+- **数据**：新版第一次启动时，如果还没有自己的数据目录，就把旧版的数据目录**整个复制**过来——播放列表、
+  续播断点、设置、SOFA、耳机补偿曲线和皮肤都在。旧目录原样保留作备份，里面会多一份 `MOVED.txt` 说明去向；
+  确认新版一切正常后可以自行删除。复制前旧版必须已经退出，否则新版会提示先关掉它。
+- **Windows**：直接运行新的 MSI，会替换掉旧版（安装目录、开始菜单快捷方式一起换成新名字），不必先卸载。
+- **macOS**：新版装成 `~/Applications/MacinDecode Spatial Player.app`，旧的 `MacinDecode AC-4 Player.app`
+  不会被自动删除，手动移到废纸篓即可。新应用的标识不同，系统会重新询问蓝牙、运动传感器等权限。
 
 预览版安装包尚未正式签名，系统可能提示无法验证开发者。请确认下载来源是本仓库的发布页面。
 普通使用只需下载 `.msi` 或 `.pkg`，其余校验和、构建信息附件无需安装。也可以按
@@ -69,7 +81,7 @@ Windows 更新时直接运行新的 MSI 即可，无需先卸载；相同版本�
 
 ## 上手五步
 
-1. 启动应用。手边没有 AC-4 文件？先点右上角的 **Demo**，立刻就有东西可看可听。
+1. 启动应用。手边没有 AC-4 / APAC 文件？先点右上角的 **Demo**，立刻就有东西可看可听。
 2. 点击侧栏的 **Add files**，或者直接把文件拖进窗口。
 3. 侧栏顶部选择播放列表（`+` 新建，`⋯` 管理）。**单击**条目查看信息，**双击**（或按 Enter、右键 → Play）开始播放。
 4. 右上角 **Audio settings** 选择播放模式，旁边的下拉框选择输出设备。
@@ -95,14 +107,14 @@ Windows 更新时直接运行新的 MSI 即可，无需先卸载；相同版本�
 | 模式 | 可用平台 | 说明 |
 | --- | --- | --- |
 | **Automatic**（默认） | 全部 | Windows 用对象直通，macOS 用系统空间音频 |
-| **Windows object passthrough** | Windows | 把 AC-4 的动态对象原样交给 Windows 空间声音，需要先在系统里启用空间声音格式 |
-| **System spatial audio** | macOS / Windows | 先渲染成 7.1.4 / 9.1.6 / 22.2 多声道床（Apple 几何），再交给系统的空间音频。默认 7.1.4 |
+| **Windows object passthrough** | Windows | 把 AC-4 的动态对象（APAC 则是各个固定位置的声道）原样交给 Windows 空间声音，需要先在系统里启用空间声音格式 |
+| **System spatial audio** | macOS / Windows | 先渲染成 7.1.4 / 9.1.6 / 22.2 多声道床，再交给系统的空间音频。默认 7.1.4、SAF VBAP（Apple 几何），可改用 Triple Balance |
 | **SAF binaural** | macOS / Windows | 软件双耳渲染，任何普通立体声耳机都能用；内置 KEMAR，也可以选自己的 SOFA 文件 |
 
 **不确定选哪个？** 想先确认文件本身能播，切到 **SAF binaural**——它只需要一副普通耳机，不依赖系统设置，
 也不依赖设备能提供多少对象槽位。Windows 对象直通对设备有硬性要求，见[下一节](#windows-空间音频的前提)。
 
-床布局与 22.2 的 LFE 处理、macOS 控制中心的杜比全景声标签、自定义 HRTF（SOFA）、耳机补偿（HpTF）的
+床布局、扬声器渲染算法与 22.2 的 LFE 处理、macOS 控制中心的杜比全景声标签、自定义 HRTF（SOFA）、耳机补偿（HpTF）的
 Bass / Tilt 与逐段核对、逐对象头追与听者朝向，都在
 [用户手册 → 播放模式](docs/MANUAL.md#播放模式)。
 
@@ -129,6 +141,8 @@ Bass / Tilt 与逐段核对、逐对象头追与听者朝向，都在
 - **AC-4 L3** 最多 16 个对象：Windows 10 的 Dolby Atmos 耳机或内置扬声器路径即可回放。
 - **AC-4 L4** 需要 20 个对象：上述路径需要更新后的 Windows 11，较早版本只提供 16 个；
   Dolby Atmos 家庭影院（HDMI）路径在较早版本上也能提供 20 个。
+- **APAC** 的每个主声道占一个对象：7.1.4 要 11 个、9.1.6 要 15 个、22.2 要 22 个，LFE 不占动态对象。
+  槽位不够时改用 **System spatial audio** 的固定扬声器床。
 - 使用 Dolby Atmos 需要安装 **Dolby Access** 并在 Windows 设置里启用对应的空间声音格式。
   Windows Spatial Audio API 本身并不强制使用 Dolby Atmos。
 
@@ -139,7 +153,7 @@ Bass / Tilt 与逐段核对、逐对象头追与听者朝向，都在
 ## 常见问题
 
 **为什么没有声音？**
-先看状态栏和诊断窗口：如果显示解码失败，说明这个文件的 AC-4 形式暂不支持；如果显示输出不可用，
+先看状态栏和诊断窗口：如果显示解码失败，说明这个文件的 AC-4 形式或 APAC 布局（例如 HOA）暂不支持；如果显示输出不可用，
 多半是播放模式与设备不匹配。Windows 对象直通要求设备提供足够的动态对象槽位（见上一节）；
 想先确认文件本身能播，可以切到 **SAF binaural**，它只需要一副普通耳机。
 
@@ -157,12 +171,13 @@ Bass / Tilt 与逐段核对、逐对象头追与听者朝向，都在
 
 **播放列表和设置存在哪里？**
 
-- macOS：`~/Library/Application Support/com.macinrender.macindecode-ac4-player/`
-- Windows：`%APPDATA%\com.macinrender.macindecode-ac4-player\data\`
-- Linux：`${XDG_DATA_HOME:-~/.local/share}/com.macinrender.macindecode-ac4-player/`
+- macOS：`~/Library/Application Support/com.macinrender.macindecode-spatial-player/`
+- Windows：`%APPDATA%\com.macinrender.macindecode-spatial-player\data\`
+- Linux：`${XDG_DATA_HOME:-~/.local/share}/com.macinrender.macindecode-spatial-player/`
 
 里面是播放列表数据库（`library.sqlite3`）、设置（`settings.json`）、窗口状态（`app.ron`）、SOFA 文件（`sofa/`）、耳机补偿曲线（`hptf/`）和已导入皮肤（`skins/`）。
 删掉整个目录就能恢复初始状态。加 `--data-dir <路径>` 启动可以使用独立的数据目录。
+从 MacinDecode AC-4 Player 升级时，旧目录（名字里是 `macindecode-ac4-player`）会被复制到这里，见[从旧版升级](#从-macindecode-ac-4-player-升级)。
 
 **文件改名或移动之后怎么办？**
 右键条目 → **Locate file…** 重新指向新位置，该文件在所有播放列表里的引用都会一起更新。
@@ -176,6 +191,8 @@ Bass / Tilt 与逐段核对、逐对象头追与听者朝向，都在
 
 - **不做任何自动响度处理**：不应用响度调整、动态范围控制（DRC）、对白增强或额外降混。
 - 当前聚焦 **Full A-JOC** 内容，其他 AC-4 编码形式可能无法播放。
+- **APAC 的 HOA 暂不播放**，但可以查看信息。
+- **Triple Balance** 带 LFE 或输出 22.2 时要求 48 kHz 输入，并且不接受双 LFE 的 22.2 输入——那种文件请用 SAF VBAP。
 - **跳转有前提**：MP4/M4A 需要容器同步样本加上解码器报告的 Full random access；裸 `.ac4` 需要同步帧范围
   加上 Full random access。
 - 裸 `.ac4` 在中途改变采样率会安全停止并报错，不跨采样率推测时间线。
@@ -211,8 +228,11 @@ python scripts/prepare_inputs.py
 ```
 
 它按 `Cargo.toml` 和 `crates/macinrender/native/CMakeLists.txt` 里锁定的提交检出
-[MacinDecode-AC4-Core](https://github.com/SakuzyPeng/MacinDecode-AC4-Core) 与 MacinRender，
-生成规范表，输入放进被忽略的 `.ci-inputs/`。新 Core 的数值内核由 Rust 1.98 构建。
+[MacinDecode-AC4-Core](https://github.com/SakuzyPeng/MacinDecode-AC4-Core) 与
+[MacinRender-ADM-Core](https://github.com/SakuzyPeng/MacinRender-ADM-Core)，生成规范表，输入放进被忽略的
+`.ci-inputs/`。MacinRender 的数值内核是 Rust，随主程序由 Cargo 一起编译和链接，不再需要 OpenBLAS 或 Boost。
+APAC 解码器 [MacinDecode-APAC-Core](https://github.com/SakuzyPeng/MacinDecode-APAC-Core) 是普通的 Cargo 依赖，
+不需要额外的输入。
 然后在你的 shell 里指向它们：
 
 ```bash
@@ -274,6 +294,16 @@ python3 scripts/package.py --target aarch64-apple-darwin
 [播放列表与持久化](docs/PLAYLISTS.md) ·
 [数据目录与 SOFA](docs/STORAGE.md) ·
 [安装包与 CI](docs/PACKAGING.md)
+
+播放器本身不含解码或渲染算法，它们来自四个独立仓库，版本都锁定在 `Cargo.toml` 和
+`crates/macinrender/native/CMakeLists.txt` 里：
+
+| 组件 | 负责 |
+| --- | --- |
+| [MacinDecode-AC4-Core](https://github.com/SakuzyPeng/MacinDecode-AC4-Core) | AC-4 比特流检查与解码、MP4 容器 |
+| [MacinDecode-APAC-Core](https://github.com/SakuzyPeng/MacinDecode-APAC-Core) | APAC 解码、CAF / MP4 容器与帧精确跳转 |
+| [MacinRender-ADM-Core](https://github.com/SakuzyPeng/MacinRender-ADM-Core) | SAF VBAP、Triple Balance、SAF HRTF 双耳渲染与设备输出 |
+| [PoseBridge](https://github.com/SakuzyPeng/PoseBridge) | BLE／USB 头追传感器 |
 
 ## 许可证
 

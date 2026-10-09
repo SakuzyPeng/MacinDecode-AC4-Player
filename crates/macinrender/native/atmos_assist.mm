@@ -257,7 +257,7 @@ struct Session : std::enable_shared_from_this<Session> {
         NSMutableString* name = [NSMutableString stringWithCapacity:64];
         for (unsigned char byte : digest) [name appendFormat:@"%02x", byte];
         NSURL* directory = [[[NSFileManager defaultManager] URLsForDirectory:NSCachesDirectory inDomains:NSUserDomainMask].firstObject
-            URLByAppendingPathComponent:@"com.macinrender.macindecode-ac4-player/atmos-assist" isDirectory:YES];
+            URLByAppendingPathComponent:@"com.macinrender.macindecode-spatial-player/atmos-assist" isDirectory:YES];
         if (!directory || ![[NSFileManager defaultManager] createDirectoryAtURL:directory withIntermediateDirectories:YES attributes:nil error:error]) return nil;
         NSURL* url = [directory URLByAppendingPathComponent:[name stringByAppendingString:@".m4a"]];
         NSData* existing = [NSData dataWithContentsOfURL:url options:0 error:nil];

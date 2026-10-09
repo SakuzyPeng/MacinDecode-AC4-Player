@@ -16,11 +16,12 @@
 
 ## 数据位置与格式
 
-沿用应用 ID `com.macinrender.macindecode-ac4-player` 对应的 eframe 数据目录：
+使用应用 ID `com.macinrender.macindecode-spatial-player` 对应的 eframe 数据目录（改名前的
+`com.macinrender.macindecode-ac4-player` 目录会在首次启动时复制过来，规则见 [STORAGE.md](STORAGE.md#从旧应用-id-迁移)）：
 
-- macOS：`~/Library/Application Support/com.macinrender.macindecode-ac4-player/`
-- Windows：`%APPDATA%/com.macinrender.macindecode-ac4-player/data/`
-- Linux：`${XDG_DATA_HOME:-~/.local/share}/com.macinrender.macindecode-ac4-player/`
+- macOS：`~/Library/Application Support/com.macinrender.macindecode-spatial-player/`
+- Windows：`%APPDATA%/com.macinrender.macindecode-spatial-player/data/`
+- Linux：`${XDG_DATA_HOME:-~/.local/share}/com.macinrender.macindecode-spatial-player/`
 
 `library.sqlite3` 保存媒体、列表、条目、每张列表的焦点/滚动锚点/播放模式，以及当前来源与断点。
 `settings.json` 保存已成功应用的输出设置、音量、静音、相机、编号显示、手动头部朝向和上次目录。

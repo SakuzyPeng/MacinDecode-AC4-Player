@@ -8,7 +8,7 @@ Player 将 AC-4 Core 的 Scene 或 APAC 离散多声道 转换为 renderer-nativ
 `Audio settings → Speakers → Speaker renderer` 分别选择 SAF VBAP（默认）或 Triple Balance。
 VBAP 沿用 Apple 几何；Triple Balance 发送 C ABI 的 `ADM_RENDERER_TRIPLE_BALANCE = 7`，渲染和设备输出均使用标准房间几何。该选择只影响系统空间音频，软件双耳继续使用 SAF HRTF，Windows 对象直通保持原通路。旧设置缺少 `speaker_renderer` 时保持 VBAP；算法或几何改变会准备新输出并恢复当前播放位置。
 
-当前固定 Core `d75d460` / C ABI 1.45。后台以 null 输出实际提交对象、LFE 和静音补齐床，检查 worker 完成后才启用对应布局，不以创建成功代替可播放。探测不打开音频设备，失败显示结构化 backend diagnostic。
+当前固定 Core `d75d460` / C ABI 1.45（`abi_probe.c` 要求不低于 1.44）。1.45 新增的 Triple Balance **D mode** 只用于 48 kHz 离线渲染，播放器的实时 Scene 流不使用。后台以 null 输出实际提交对象、LFE 和静音补齐床，检查 worker 完成后才启用对应布局，不以创建成功代替可播放。探测不打开音频设备，失败显示结构化 backend diagnostic。
 
 Triple Balance 要求完整的 7.1.2 bed。播放器在原生边界为 LFE 增加九路永久静音的 bed 通道；普通对象照常提交，虚拟声道不占用播放器的源对象和表头。静音通道使用避开源 ID 的独立 ID，随 generation 重建，PCM 标为无信号，状态关闭且增益为零。源解码数据和场景元数据不修改。
 
@@ -344,8 +344,15 @@ FFT 工作区、卷积尾部及对象状态仍由每个渲染器独立持有。
 ## 原生源码构建
 
 默认 feature 包含 `decode` 和 `macinrender`。Cargo 调用 CMake/Ninja 构建固定提交的源代码；
-原生库使用 Release，开启 SOFA，关闭 CLI、测试和 IAMF。数值内核由 Core 的 Rust 1.98
-workspace 构建并静态链接；Windows 使用 MSVC，不再准备 OpenBLAS/LAPACKE 或 Boost。
+原生库使用 Release，开启 SOFA，关闭 CLI、测试和 IAMF。数值内核是 Core 的 Rust crate `mradm-ffi`，
+作为 `crates/macinrender` 的普通 Cargo 依赖链入，与播放器共用一个 Rust 依赖图和标准库，ThinLTO 下不会出现
+两份 std；CMake 为探针生成的独立 `mradm_ffi` staticlib 在链接时被跳过。Windows 使用 MSVC，不再准备
+OpenBLAS/LAPACKE 或 Boost。
+
+**升级 Core 要同时改三处同一个提交**：`crates/macinrender/native/CMakeLists.txt` 的 `GIT_TAG`、
+`crates/macinrender/Cargo.toml` 的 `mradm-ffi`，以及根 `Cargo.toml` `[patch.crates-io]` 里 Core 打过补丁的
+`sofar` / `rubato` / `rustfft`（重采样与 FFT 的逐位一致依赖这些补丁）。三处不一致时 C++ 与 Rust 半边会来自
+不同的 Core。
 
 可设置以下开发覆盖，避免修改锁定版本：
 

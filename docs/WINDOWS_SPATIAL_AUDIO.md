@@ -47,6 +47,9 @@ native crate 看不到 AC-4 bitstream、Core Session 或 Core 的借用类型。
   因而 quantum 内的 metadata update 会量化到后续 quantum 边界。
 - LFE 使用独立静态对象，不参与动态对象槽位计数；它和动态对象一样遵循 OAMD active、语义完整性、
   linear gain 与 ramp，最终再乘主音量。没有有效状态或 inactive 时以零增益提交。
+- Windows 只有这一个 LFE 槽位。APAC 22.2 的两路 LFE 由 `backend::lfe` 在 quantum 内按块判断：只有一路
+  有信号时原电平通过，两路都有信号时按 `(LFE1 + LFE2) / sqrt(2)` 合成。APAC 的主声道按固定位置作为
+  动态对象提交，占用的槽位数等于主声道数。
 - 首个 block 会锁定完整 Scene 签名：采样率、configuration generation、presentation、动态对象
   element ID 集合和 LFE element ID。播放中发生变化时 adapter 报告可恢复边界，协调器在该绝对位置
   自动重建流，避免把 Core 新分配的 element ID 绑定到旧 Windows 对象。

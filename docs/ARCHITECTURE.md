@@ -4,20 +4,21 @@
 
 ```text
 Native GUI (egui/eframe)
-        ├── inspection worker ── MacinDecode inspect API
+        ├── inspection worker ── MacinDecode AC-4 inspect API / APAC container metadata
         │
         │ commands / immutable snapshots
 Playback coordinator
         │ bounded render quanta
-AC-4 decode adapter ───────── Spatial output backend
-        │                     ├── Windows Spatial Audio
-MacinDecode scene API         └── MacinRender Scene + device output
-                                    ├── SAF VBAP → macOS/Windows system spatial audio
-                                    └── SAF binaural → stereo device
+Decode adapter ────────────── Spatial output backend
+  ├── AC-4: MacinDecode scene API   ├── Windows Spatial Audio
+  ├── APAC: apac-container Playback └── MacinRender Scene + device output
+  └── built-in demo (synthesised)         ├── SAF VBAP / Triple Balance → system spatial audio
+                                          └── SAF binaural → stereo device
 ```
 
-GUI、播放协调器和解码适配器均留在 Rust 进程内，直接依赖
-`macindecode-ac4-mp4` 与 `macindecode-ac4-scene`，不跨语言暴露 Rust 类型或 Rust ABI。
+GUI、播放协调器和解码适配器均留在 Rust 进程内，直接依赖 `macindecode-ac4-mp4`、`macindecode-ac4-scene`
+与 `apac-container` / `apac-core`，不跨语言暴露 Rust 类型或 Rust ABI。MacinRender 的 Rust 数值内核
+（`mradm-ffi`）也由 Cargo 链进同一个依赖图，但播放器只经它的 C ABI 调用。
 
 平台后端只能消费播放器内部定义的窄语义：对象稳定 ID、单声道 normalized `f32` PCM、最多两路独立 LFE、
 整数采样时间、active、位置、增益和 ramp。后端不得接收 `Ac4SceneFrame`，也不得反向影响解码器
@@ -25,7 +26,7 @@ GUI、播放协调器和解码适配器均留在 Rust 进程内，直接依赖
 
 ## 当前边界
 
-本仓库实现 GUI、只读 inspection、跨平台 Core 解码、Windows 对象直通，以及可选的 MacinRender
+本仓库实现 GUI、只读 inspection、跨平台 AC-4 与 APAC 解码、Windows 对象直通，以及可选的 MacinRender
 系统空间音频／软件双耳输出。新输出链和固定几何、布局、LFE 默认值见 [MacinRender 集成](MACINRENDER.md)。
 
 `decode` 控制 Core 解码；`windows_spatial_output` 表示 Windows + decode；`macinrender_output`

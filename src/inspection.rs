@@ -468,7 +468,7 @@ mod tests {
     #[test]
     fn missing_input_is_reported_by_the_background_worker() {
         let path = std::env::temp_dir().join(format!(
-            "macindecode-ac4-player-missing-{}-{}.ac4",
+            "macindecode-spatial-player-missing-{}-{}.ac4",
             std::process::id(),
             1
         ));

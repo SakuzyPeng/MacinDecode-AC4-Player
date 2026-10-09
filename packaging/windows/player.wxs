@@ -1,39 +1,39 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
-  <Package Name="MacinDecode AC-4 Player" Manufacturer="MacinDecode"
+  <Package Name="MacinDecode Spatial Player" Manufacturer="MacinDecode"
            Version="$(var.Version)" ProductCode="*" UpgradeCode="$(var.UpgradeCode)"
            Scope="perUser" InstallerVersion="500" Compressed="yes">
     <!-- A rebuilt preview is a new package even when X.Y.Z is unchanged. Keep
          UpgradeCode stable, but give every build its own ProductCode so it can
          replace an earlier build instead of failing with MSI error 1638. -->
     <MajorUpgrade AllowSameVersionUpgrades="yes" Schedule="afterInstallInitialize"
-                  DowngradeErrorMessage="A newer MacinDecode AC-4 Player is already installed." />
+                  DowngradeErrorMessage="A newer MacinDecode Spatial Player is already installed." />
     <UIRef Id="PlayerUI" />
     <MediaTemplate EmbedCab="yes" />
     <Property Id="ARPNOMODIFY" Value="1" />
-    <Property Id="ARPHELPLINK" Value="https://github.com/SakuzyPeng/MacinDecode-AC4-Player" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/SakuzyPeng/MacinDecode-Spatial-Player" />
     <Property Id="ARPPRODUCTICON" Value="PlayerIcon" />
     <Property Id="WINDOWS_BUILD">
       <RegistrySearch Id="FindWindowsBuild" Root="HKLM" Key="SOFTWARE\Microsoft\Windows NT\CurrentVersion"
                       Name="CurrentBuildNumber" Type="raw" Bitness="always64" />
     </Property>
     <Launch Condition="Installed OR (VersionNT64 AND WINDOWS_BUILD &gt;= 19045)"
-            Message="MacinDecode AC-4 Player requires Windows 10 22H2 or later (x64)." />
+            Message="MacinDecode Spatial Player requires Windows 10 22H2 or later (x64)." />
     <Icon Id="PlayerIcon" SourceFile="$(var.Icon)" />
     <StandardDirectory Id="LocalAppDataFolder">
       <Directory Id="UserPrograms" Name="Programs">
-        <Directory Id="INSTALLFOLDER" Name="MacinDecode AC-4 Player">
+        <Directory Id="INSTALLFOLDER" Name="MacinDecode Spatial Player">
           <Component Id="PlayerExecutable" Guid="$(var.ComponentCode)">
-            <File Id="PlayerExe" Source="$(var.Executable)" Name="macindecode-ac4-player.exe" />
-            <RegistryValue Root="HKCU" Key="Software\MacinDecode\AC4Player\Installer"
+            <File Id="PlayerExe" Source="$(var.Executable)" Name="macindecode-spatial-player.exe" />
+            <RegistryValue Root="HKCU" Key="Software\MacinDecode\SpatialPlayer\Installer"
                            Name="Version" Type="string" Value="[ProductVersion]" KeyPath="yes" />
-            <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuFolder" Name="MacinDecode AC-4 Player"
+            <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuFolder" Name="MacinDecode Spatial Player"
                       Target="[#PlayerExe]" WorkingDirectory="INSTALLFOLDER" Icon="PlayerIcon" />
             <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
           </Component>
         </Directory>
       </Directory>
     </StandardDirectory>
-    <Feature Id="Player" Title="MacinDecode AC-4 Player" Level="1">
+    <Feature Id="Player" Title="MacinDecode Spatial Player" Level="1">
       <ComponentRef Id="PlayerExecutable" />
     </Feature>
   </Package>

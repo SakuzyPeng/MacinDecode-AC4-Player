@@ -46,7 +46,7 @@ fn embed_windows_icon() {
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         embed_resource::compile_for(
             "assets/icons/windows.rc",
-            ["macindecode-ac4-player"],
+            ["macindecode-spatial-player"],
             embed_resource::ParamsIncludeDirs(["assets/icons"]),
         )
         .manifest_required()

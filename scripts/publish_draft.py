@@ -29,7 +29,7 @@ def publish(tag, folder):
         subprocess.run(["gh", "release", "upload", tag, "--clobber", *assets], check=True)
     else:
         subprocess.run(["gh", "release", "create", tag, "--verify-tag", "--draft", "--prerelease",
-                        "--title", f"MacinDecode AC-4 Player {tag} preview",
+                        "--title", f"MacinDecode Spatial Player {tag} preview",
                         "--notes-file", str(ROOT / "packaging/release-notes.md"), *assets], check=True)
 
 

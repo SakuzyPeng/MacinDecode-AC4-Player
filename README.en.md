@@ -1,4 +1,4 @@
-# MacinDecode AC-4 Player
+# MacinDecode Spatial Player
 
 [简体中文](README.md) · **English**
 
@@ -6,6 +6,10 @@ A desktop app for **opening, inspecting and playing Dolby AC-4 and APAC spatial 
 own AC-4 and APAC decoders — no system or third-party media decoder is involved — and sends the decoded audio
 objects to system spatial audio or to a software binaural renderer, while drawing those objects live
 in a 3D scene in the middle of the window.
+
+The project used to be called **MacinDecode AC-4 Player**; it was renamed once it stopped playing only
+AC-4. Your playlists and settings come along on first launch — see
+[upgrading from the old name](#upgrading-from-macindecode-ac-4-player).
 
 ![Illustrative spatial scene: orange audio objects orbit the listener, leaving fading position trails.](assets/readme/spatial-orbit.svg)
 
@@ -34,7 +38,7 @@ Default builds include embedded PoseBridge BLE/USB head tracking and device cont
 
 ## What you can do with it
 
-- **Play immersive AC-4.** Windows uses spatial-audio object passthrough, macOS uses system spatial
+- **Play immersive AC-4 and APAC multichannel.** Windows uses spatial-audio object passthrough, macOS uses system spatial
   audio, and both platforms can switch to software binaural rendering over ordinary headphones.
 - **See what is inside a file.** Container, presentation, object count, LFE channel, bit rate and
   more — no playback required.
@@ -59,7 +63,7 @@ Choose SAF VBAP or Triple Balance under **Speakers → Speaker renderer** in sys
 
 ## Getting the app
 
-Check [GitHub Releases](https://github.com/SakuzyPeng/MacinDecode-AC4-Player/releases) for downloadable
+Check [GitHub Releases](https://github.com/SakuzyPeng/MacinDecode-Spatial-Player/releases) for downloadable
 versions and their usage notes. Under **Assets** at the bottom of a version's page, choose an installer
 for your computer:
 
@@ -69,12 +73,25 @@ for your computer:
 | macOS 14 or later, Apple silicon Mac (M1 or newer) | `.pkg` |
 
 Double-click the installer and follow its steps. On Windows, the app installs to
-`%LOCALAPPDATA%\Programs\MacinDecode AC-4 Player`. On Mac, find it in **Applications** inside your
+`%LOCALAPPDATA%\Programs\MacinDecode Spatial Player`. On Mac, find it in **Applications** inside your
 home folder (`~/Applications`). Neither installer requires administrator rights.
 
 On Windows, run the new MSI to update without uninstalling first; a different build of the same
 version can also replace the installed build. Reopening the same MSI offers repair and uninstall.
 Updates preserve playlists, settings, and imported SOFA files.
+
+### Upgrading from MacinDecode AC-4 Player
+
+- **Your data:** on first launch, if the new app has no data directory yet, it **copies** the old one
+  over whole — playlists, resume positions, settings, SOFA files, headphone profiles and skins. The old
+  directory is left untouched as a backup, with a `MOVED.txt` saying where the copy went; delete it
+  yourself once you are happy with the new app. The old app has to be closed first; if it is still
+  running, the new one asks you to quit it.
+- **Windows:** just run the new MSI. It replaces the old install — install folder and Start menu
+  shortcut take the new name — with no uninstall needed.
+- **macOS:** the new app installs as `~/Applications/MacinDecode Spatial Player.app`. The old
+  `MacinDecode AC-4 Player.app` is not removed for you; move it to the Bin. Because the app identifier
+  changed, macOS asks again for Bluetooth and motion permissions.
 
 Preview installers are not formally signed, so your system may say it cannot verify the developer.
 Make sure you downloaded them from this repository's release page. You only need the `.msi` or `.pkg`;
@@ -83,7 +100,7 @@ the checksum and build information attachments do not need to be installed. You 
 
 ## Five steps to your first playback
 
-1. Launch the app. No AC-4 file to hand? Press **Demo** in the top right and there is immediately
+1. Launch the app. No AC-4 or APAC file to hand? Press **Demo** in the top right and there is immediately
    something to look at and listen to.
 2. Click **Add files** in the sidebar, or drag files onto the window.
 3. Pick a playlist at the top of the sidebar (`+` creates one, `⋯` manages them). **Single-click** an
@@ -118,8 +135,8 @@ live and do not interrupt decoding of the current track.
 | Mode | Available on | What it does |
 | --- | --- | --- |
 | **Automatic** (default) | all | Object passthrough on Windows, system spatial audio on macOS |
-| **Windows object passthrough** | Windows | Hands AC-4's dynamic objects straight to Windows Spatial Audio; a spatial sound format must be enabled in Windows first |
-| **System spatial audio** | macOS / Windows | Renders a 7.1.4 / 9.1.6 / 22.2 speaker bed (Apple geometry) and hands it to the system spatializer. 7.1.4 by default |
+| **Windows object passthrough** | Windows | Hands AC-4's dynamic objects (for APAC, its fixed-position channels) straight to Windows Spatial Audio; a spatial sound format must be enabled in Windows first |
+| **System spatial audio** | macOS / Windows | Renders a 7.1.4 / 9.1.6 / 22.2 speaker bed and hands it to the system spatializer. 7.1.4 and SAF VBAP (Apple geometry) by default; Triple Balance is the alternative |
 | **SAF binaural** | macOS / Windows | Software binaural rendering over any ordinary stereo headphones; built-in KEMAR, or your own SOFA file |
 
 **Not sure which to pick?** To check that a file plays at all, switch to **SAF binaural**: it only
@@ -160,6 +177,8 @@ Windows spatial sound format offers:
 - **AC-4 L4** needs 20 objects: on those paths that requires an updated Windows 11 — earlier
   versions provide only 16. The Dolby Atmos home theater (HDMI) path offers 20 on earlier versions
   too.
+- **APAC** takes one object per main channel: 11 for 7.1.4, 15 for 9.1.6, 22 for 22.2; the LFE
+  takes no dynamic slot. Short of slots, use the fixed speaker bed of **System spatial audio** instead.
 - Dolby Atmos requires **Dolby Access** to be installed and the matching spatial sound format enabled
   in Windows. The Windows Spatial Audio API itself does not mandate Dolby Atmos.
 
@@ -172,7 +191,7 @@ is short of.
 
 **Why is there no sound?**
 Check the status line and the diagnostics window first. A decode failure means this file's AC-4
-flavor is not supported yet; an unavailable output usually means the playback mode does not match
+flavor or APAC layout (HOA, for instance) is not supported yet; an unavailable output usually means the playback mode does not match
 the device. Windows object passthrough needs a device with enough dynamic-object slots (see above).
 To check the file itself first, switch to **SAF binaural** — it only needs ordinary headphones.
 
@@ -193,14 +212,16 @@ the other devices back one at a time — that separates chain latency from head-
 
 **Where are my playlists and settings stored?**
 
-- macOS: `~/Library/Application Support/com.macinrender.macindecode-ac4-player/`
-- Windows: `%APPDATA%\com.macinrender.macindecode-ac4-player\data\`
-- Linux: `${XDG_DATA_HOME:-~/.local/share}/com.macinrender.macindecode-ac4-player/`
+- macOS: `~/Library/Application Support/com.macinrender.macindecode-spatial-player/`
+- Windows: `%APPDATA%\com.macinrender.macindecode-spatial-player\data\`
+- Linux: `${XDG_DATA_HOME:-~/.local/share}/com.macinrender.macindecode-spatial-player/`
 
 That folder holds the playlist database (`library.sqlite3`), settings (`settings.json`), window state
 (`app.ron`), SOFA files (`sofa/`), headphone compensation profiles (`hptf/`) and imported
 skins (`skins/`). Deleting it resets the app. Starting with
-`--data-dir <path>` uses a separate data directory instead.
+`--data-dir <path>` uses a separate data directory instead. Upgrading from MacinDecode AC-4 Player
+copies its directory (the one named `macindecode-ac4-player`) here; see
+[upgrading from the old name](#upgrading-from-macindecode-ac-4-player).
 
 **A file was renamed or moved — now what?**
 Right-click the item → **Locate file…** and point it at the new path; every playlist referring to
@@ -217,6 +238,9 @@ current track — the app keeps using the file handle it already opened.
 - **No automatic loudness processing:** no loudness normalization, dynamic range control, dialogue
   enhancement or extra downmixing.
 - The current focus is **Full A-JOC**; other AC-4 coding flavors may not play.
+- **APAC HOA does not play yet**, though it can be inspected.
+- **Triple Balance** needs 48 kHz input when an LFE is present or the output is 22.2, and does not
+  accept dual-LFE 22.2 input — use SAF VBAP for those files.
 - **Seeking has prerequisites:** MP4/M4A needs a container sync sample *and* Full random access as
   reported by the decoder; raw `.ac4` needs sync-frame ranges plus Full random access.
 - A raw `.ac4` stream that changes sample rate mid-file stops safely with an error rather than
@@ -257,9 +281,12 @@ python scripts/prepare_inputs.py
 ```
 
 This checks out [MacinDecode-AC4-Core](https://github.com/SakuzyPeng/MacinDecode-AC4-Core) and
-MacinRender at the commits pinned in `Cargo.toml` and
-`crates/macinrender/native/CMakeLists.txt` and generates the spec tables under the gitignored `.ci-inputs/`.
-The new Core builds its numerical kernels with Rust 1.98. Then point your shell at the inputs:
+[MacinRender-ADM-Core](https://github.com/SakuzyPeng/MacinRender-ADM-Core) at the commits pinned in
+`Cargo.toml` and `crates/macinrender/native/CMakeLists.txt` and generates the spec tables under the
+gitignored `.ci-inputs/`. MacinRender's numerical kernels are Rust, compiled and linked by Cargo along
+with the player, so OpenBLAS and Boost are no longer needed. The APAC decoder,
+[MacinDecode-APAC-Core](https://github.com/SakuzyPeng/MacinDecode-APAC-Core), is an ordinary Cargo
+dependency and needs no extra input. Then point your shell at the inputs:
 
 ```bash
 export MACINDECODE_AC4_SPEC_DIR="$PWD/.ci-inputs/ac4-core/spec"
@@ -322,6 +349,16 @@ The design docs, which describe how the code is organised, are written in Chines
 [playlists and persistence](docs/PLAYLISTS.md) ·
 [data directory and SOFA](docs/STORAGE.md) ·
 [packaging and CI](docs/PACKAGING.md)
+
+The player holds no decoding or rendering algorithms of its own. They come from four separate
+repositories, each pinned in `Cargo.toml` and `crates/macinrender/native/CMakeLists.txt`:
+
+| Component | What it does |
+| --- | --- |
+| [MacinDecode-AC4-Core](https://github.com/SakuzyPeng/MacinDecode-AC4-Core) | AC-4 bitstream inspection and decoding, the MP4 container |
+| [MacinDecode-APAC-Core](https://github.com/SakuzyPeng/MacinDecode-APAC-Core) | APAC decoding, CAF / MP4 containers, frame-exact seeking |
+| [MacinRender-ADM-Core](https://github.com/SakuzyPeng/MacinRender-ADM-Core) | SAF VBAP, Triple Balance, SAF HRTF binaural rendering and device output |
+| [PoseBridge](https://github.com/SakuzyPeng/PoseBridge) | BLE/USB head-tracking sensors |
 
 ## License
 

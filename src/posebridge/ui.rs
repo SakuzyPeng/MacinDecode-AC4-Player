@@ -241,7 +241,7 @@ impl Panel {
         let remains_open = context.show_viewport_immediate(
             egui::ViewportId::from_hash_of("posebridge-device"),
             egui::ViewportBuilder::default()
-                .with_title("MacinDecode AC-4 PoseBridge")
+                .with_title("MacinDecode Spatial Player PoseBridge")
                 .with_icon(crate::app_icon::load())
                 .with_inner_size([1000.0, 700.0])
                 .with_min_inner_size([580.0, 440.0]),

@@ -10,23 +10,36 @@ use crate::app::MeterReadout;
 use crate::backend::OutputSettings;
 use crate::scene3d::camera::{Camera, CameraState};
 
-pub const APP_ID: &str = "com.macinrender.macindecode-ac4-player";
+mod migration;
+
+pub const APP_ID: &str = "com.macinrender.macindecode-spatial-player";
 const VERSION: u32 = 1;
 
 pub struct DataDirectory {
     pub path: PathBuf,
+    /// Where the player kept its data under its previous application ID, for
+    /// the default location only: an explicit directory has no predecessor.
+    pub legacy: Option<PathBuf>,
     _lock: File,
 }
 impl DataDirectory {
     /// Runs before the GUI or any output stream is created.
     pub fn acquire() -> Result<Arc<Self>, String> {
-        let path = std::env::var_os("MACINDECODE_PLAYER_DATA_DIR")
-            .map(PathBuf::from)
-            .or_else(|| eframe::storage_dir(APP_ID))
-            .ok_or("Cannot locate the application data directory")?;
-        Self::at(path)
+        if let Some(path) = std::env::var_os("MACINDECODE_PLAYER_DATA_DIR") {
+            return Self::at(path.into());
+        }
+        let path =
+            eframe::storage_dir(APP_ID).ok_or("Cannot locate the application data directory")?;
+        let legacy = eframe::storage_dir(migration::LEGACY_APP_ID);
+        if let Some(legacy) = &legacy {
+            migration::adopt(legacy, &path)?;
+        }
+        Self::open(path, legacy)
     }
     pub fn at(path: PathBuf) -> Result<Arc<Self>, String> {
+        Self::open(path, None)
+    }
+    fn open(path: PathBuf, legacy: Option<PathBuf>) -> Result<Arc<Self>, String> {
         fs::create_dir_all(&path).map_err(|e| format!("Cannot create {}: {e}", path.display()))?;
         let lock = OpenOptions::new()
             .read(true)
@@ -45,7 +58,11 @@ impl DataDirectory {
             fs::create_dir_all(path.join(kind.slug))
                 .map_err(|e| format!("Cannot create the {} directory: {e}", kind.noun))?;
         }
-        Ok(Arc::new(Self { path, _lock: lock }))
+        Ok(Arc::new(Self {
+            path,
+            legacy,
+            _lock: lock,
+        }))
     }
 }
 
@@ -106,6 +123,16 @@ impl AppPreferences {
             } else {
                 0.0
             };
+        }
+        self
+    }
+    /// Points managed files that settings still place in the previous data
+    /// directory at their copies in this one.
+    pub fn relocated(mut self, directory: &DataDirectory) -> Self {
+        if let Some(legacy) = &directory.legacy {
+            for path in [&mut self.output.sofa, &mut self.output.hptf] {
+                migration::relocate(path, legacy, &directory.path);
+            }
         }
         self
     }
@@ -296,6 +323,27 @@ mod tests {
         assert!(warning.is_some());
         assert!(store.save(&prefs).is_err());
         assert_eq!(fs::read(path).unwrap(), b"bad");
+    }
+    #[test]
+    fn settings_written_under_the_old_id_find_their_managed_copies() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = dir.path().join("old");
+        let current = dir.path().join("new");
+        let directory = DataDirectory::open(current.clone(), Some(legacy.clone())).unwrap();
+        let external = dir.path().join("Downloads").join("headphones.txt");
+        let mut prefs = AppPreferences::default();
+        prefs.output.sofa = legacy
+            .join("sofa")
+            .join("personal.sofa")
+            .to_string_lossy()
+            .into_owned();
+        prefs.output.hptf = external.to_string_lossy().into_owned();
+        let prefs = prefs.relocated(&directory);
+        assert_eq!(
+            Path::new(&prefs.output.sofa),
+            current.join("sofa").join("personal.sofa")
+        );
+        assert_eq!(Path::new(&prefs.output.hptf), external);
     }
     #[test]
     fn second_instance_cannot_acquire_same_directory() {

@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 from verify_runtime import clean_environment, pe_imports, verify_binary, verify_modules
-from package import BINARY, build_msi, verify_app
+from package import APP_ID, BINARY, build_msi, guid, verify_app
 
 
 def pe_fixture(direct="kernel32.dll", delayed=None):
@@ -27,6 +27,15 @@ def pe_fixture(direct="kernel32.dll", delayed=None):
         struct.pack_into("<II", image, 0x2A0, 1, 0x10E0)
         image[0x2E0:0x2E0 + len(delayed) + 1] = delayed.encode() + b"\0"
     return image
+
+
+class InstallerIdentityTests(unittest.TestCase):
+    def test_renamed_msi_still_replaces_the_ac4_player_install(self):
+        # Every MSI released as MacinDecode AC-4 Player carried this UpgradeCode;
+        # a different one would install beside it rather than over it.
+        self.assertEqual(guid("upgrade"), "{1480C849-8AF0-55F3-83A0-3F71183BDEE7}")
+        self.assertNotIn("ac4", APP_ID)
+        self.assertNotEqual(guid("executable"), guid("upgrade"))
 
 
 class RuntimeAuditTests(unittest.TestCase):

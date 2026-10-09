@@ -19,9 +19,9 @@ import xml.etree.ElementTree as ET
 from verify_runtime import require, run_smoke, verify_binary
 
 ROOT = Path(__file__).resolve().parents[1]
-APP_NAME = "MacinDecode AC-4 Player"
-APP_ID = "com.macinrender.macindecode-ac4-player"
-BINARY = "macindecode-ac4-player"
+APP_NAME = "MacinDecode Spatial Player"
+APP_ID = "com.macinrender.macindecode-spatial-player"
+BINARY = "macindecode-spatial-player"
 TARGETS = ("x86_64-pc-windows-msvc", "aarch64-apple-darwin")
 ABOUT_VERSION = "0.9.2"
 WIX_VERSION = "5.0.2"
@@ -65,8 +65,15 @@ def sha256(path):
         return hashlib.file_digest(source, "sha256").hexdigest()
 
 
+# The MSI upgrade family predates the rename to MacinDecode Spatial Player.
+# Keep deriving it from the old ID, or a new MSI would install beside an
+# existing "MacinDecode AC-4 Player" instead of replacing it.
+UPGRADE_ID = "com.macinrender.macindecode-ac4-player"
+
+
 def guid(name):
-    return "{" + str(uuid.uuid5(uuid.NAMESPACE_DNS, APP_ID + "." + name)).upper() + "}"
+    identity = UPGRADE_ID if name == "upgrade" else APP_ID
+    return "{" + str(uuid.uuid5(uuid.NAMESPACE_DNS, identity + "." + name)).upper() + "}"
 
 
 def version_info(tag):
@@ -302,7 +309,7 @@ def build(target, tag):
         native = legacy.cargo_native(Path(metadata["target_directory"]) / target)
         require(native.get("linkage") == "static", "Packaging requires static native linkage")
         extension = ".msi" if os.name == "nt" else ".pkg"
-        artifact_stem = f"MacinDecode-AC4-Player-{artifact_version}-{target}"
+        artifact_stem = f"MacinDecode-Spatial-Player-{artifact_version}-{target}"
         installer = work / (artifact_stem + extension)
         relocated = work / "relocated application"
         relocated.mkdir()

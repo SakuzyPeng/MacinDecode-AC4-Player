@@ -55,14 +55,14 @@ def main():
     args.output.mkdir(parents=True, exist_ok=True)
     if sys.platform == "darwin":
         target = "aarch64-apple-darwin"
-        expected = args.output / "MacinDecode AC-4 Player.app"
+        expected = args.output / "MacinDecode Spatial Player.app"
         require(not expected.exists(), f"Choose a fresh output directory: {expected}")
         package = make_app(args.target_dir / "release" / BINARY, args.output, version)
         verify_app(package, version)
         executable = package / "Contents/MacOS" / BINARY
     elif sys.platform == "win32":
         target = "x86_64-pc-windows-msvc"
-        package = args.output / "MacinDecode-AC4-Player-windows-x64"
+        package = args.output / "MacinDecode-Spatial-Player-windows-x64"
         package.mkdir()
         executable = package / (BINARY + ".exe")
         shutil.copy2(args.target_dir / "release" / executable.name, executable)

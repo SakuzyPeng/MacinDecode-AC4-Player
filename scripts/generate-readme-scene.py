@@ -252,7 +252,7 @@ def build():
                      for _, _, start in objects for sample in range(TRAIL_SAMPLES + 1)})
     svg = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{WIDTH}" height="{HEIGHT}" '
            f'viewBox="0 0 {WIDTH} {HEIGHT}" role="img" aria-labelledby="title desc">',
-           '<title id="title">MacinDecode AC-4 Player — spatial object scene</title>',
+           '<title id="title">MacinDecode Spatial Player — spatial object scene</title>',
            '<desc id="desc">Six orange audio objects surround a voxel listener in a warm, '
            'gridded room. Two orbit while four stay in place. Short trails show recent positions; vertical guides '
            'connect them to the floor. This is an illustrative loop. Reduced-motion '

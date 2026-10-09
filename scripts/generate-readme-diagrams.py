@@ -464,7 +464,7 @@ def build_playback_paths():
                      "Automatic: passthrough on Windows, system spatial on macOS",
                      size=11, fill=MUTED, anchor="end"))
     return "playback-paths.svg", document(
-        width, height, "MacinDecode AC-4 Player — playback paths",
+        width, height, "MacinDecode Spatial Player — playback paths",
         "One AC-4 decoder feeds three output paths. Windows object passthrough "
         "hands dynamic objects and a static LFE to Windows Spatial Audio. System "
         "spatial audio renders a VBAP speaker bed on Apple geometry and hands it "
@@ -553,7 +553,7 @@ def build_object_footprint():
                      "The core can never exceed the ring", size=11, fill=MUTED,
                      anchor="end"))
     return "object-footprint.svg", document(
-        width, height, "MacinDecode AC-4 Player — the object footprint",
+        width, height, "MacinDecode Spatial Player — the object footprint",
         "With loudness enabled, an object's floor mark carries two readings on "
         "one decibel scale: a hairline ring at the gain the metadata asks for, "
         "and a filled core at the level actually measured. Three cases follow: "
@@ -626,7 +626,7 @@ def build_silent_objects():
     body.append(text(width - 22, height - 18, "The gain ring never fades",
                      size=11, fill=WARNING, anchor="end"))
     return "silent-objects.svg", document(
-        width, height, "MacinDecode AC-4 Player — persistently silent objects",
+        width, height, "MacinDecode Spatial Player — persistently silent objects",
         "Three stages of a silent object. While sounding, its nameplate reads a "
         "level and the footprint's core answers its gain ring. When the signal "
         "stops the readout turns to minus infinity and the plate steps back to a "
@@ -729,7 +729,7 @@ def build_meter_row():
                      "Clipping is the one reading that is not weighted at all",
                      size=11, fill=MUTED, anchor="end"))
     return "meter-row.svg", document(
-        width, height, "MacinDecode AC-4 Player — a meter bank row",
+        width, height, "MacinDecode Spatial Player — a meter bank row",
         "One meter bank row enlarged and labelled: the object number, a track "
         "whose bar fills from the left with the measured level, a tick at the "
         "gain the metadata asked for on the same scale, a peak marker that holds "
@@ -957,7 +957,7 @@ def build_reference_frames():
                      "System spatial audio cannot keep per-object head locking",
                      size=11, fill=MUTED, anchor="end"))
     return "reference-frames.svg", document(
-        width, height, "MacinDecode AC-4 Player — reference frames",
+        width, height, "MacinDecode Spatial Player — reference frames",
         "The same two objects with the listener facing forward and then turned "
         "45 degrees to the right. A scene-relative object keeps its place in the "
         "room, so its bearing to the listener changes from 100 to 55 degrees — "
@@ -1104,7 +1104,7 @@ def build_projection_modes():
                      "Everything at one height scales together; only height separates them",
                      size=11, fill=MUTED, anchor="end"))
     return "projection-modes.svg", document(
-        width, height, "MacinDecode AC-4 Player — orthographic and perspective",
+        width, height, "MacinDecode Spatial Player — orthographic and perspective",
         "The same four objects seen straight down in both projections. The floor "
         "footprint carries gain by growing, so an object quieter than -18.8 dB "
         "has a footprint narrower than its own cube. An orthographic straight-down "
@@ -1233,7 +1233,7 @@ def build_head_tracking():
         body.append(text(width - 22, height - 18, "Reduced motion shows the head forward",
                          size=11, fill=MUTED, anchor="end"))
         return "head-tracking.svg", document(
-            width, height, "MacinDecode AC-4 Player — head tracking",
+            width, height, "MacinDecode Spatial Player — head tracking",
             "The listener turns from side to side. A scene-relative object stays "
             "where it is in the room, and the arc from the listener's facing "
             "direction to it opens and closes — the bearing you hear changes, "
@@ -1384,7 +1384,7 @@ def build_trail_jumps():
                          "No line, because none of it was travelled",
                          size=11, fill=WARNING, anchor="end"))
         return "trail-jumps.svg", document(
-            width, height, "MacinDecode AC-4 Player — object trails and jumps",
+            width, height, "MacinDecode Spatial Player — object trails and jumps",
             "Two trails across the same room over the same 400 milliseconds. In "
             "the first every mark is a solid cube and the spacing is even, so "
             "the object travelled and the gaps read as its speed. In the second "
@@ -1555,7 +1555,7 @@ def build_magnetic_grid():
                      "Every number is a reading, not a verdict on the sensor",
                      size=11, fill=MUTED, anchor="end"))
     return "magnetic-grid.svg", document(
-        width, height, "MacinDecode AC-4 Player — magnetic coverage grid",
+        width, height, "MacinDecode Spatial Player — magnetic coverage grid",
         "The Magnetic page's coverage grid, enlarged. Twelve columns of heading "
         "run from directly behind through left, forward and right to behind "
         "again; four rows split the sphere by the sine of elevation at plus 30, "
@@ -1708,7 +1708,7 @@ def build_magnetic_turn():
                      "Drawn on a head for its facing; turn the headset in your hands",
                      size=11, fill=MUTED, anchor="end"))
     return "magnetic-turn.svg", document(
-        width, height, "MacinDecode AC-4 Player — following a magnetic instruction",
+        width, height, "MacinDecode Spatial Player — following a magnetic instruction",
         f"Two rooms, before and after following the instruction {MAG_INSTRUCTION}. "
         f"The Earth's field is drawn as an arrow fixed in the room, {before} degrees "
         f"right of where the headset first faces. Turning the headset {turned} "

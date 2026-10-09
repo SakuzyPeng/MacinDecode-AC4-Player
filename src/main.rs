@@ -3,7 +3,7 @@
 
 #[cfg(target_arch = "wasm32")]
 compile_error!(
-    "MacinDecode AC-4 Player is a native desktop application; WebAssembly is unsupported"
+    "MacinDecode Spatial Player is a native desktop application; WebAssembly is unsupported"
 );
 
 mod apac;
@@ -32,7 +32,7 @@ mod theme;
 
 fn main() {
     if let Err(error) = run() {
-        eprintln!("MacinDecode AC-4 Player: {error}");
+        eprintln!("MacinDecode Spatial Player: {error}");
         std::process::exit(1);
     }
 }
@@ -49,7 +49,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 return Err(error.into());
             }
             rfd::MessageDialog::new()
-                .set_title("MacinDecode AC-4 Player")
+                .set_title("MacinDecode Spatial Player")
                 .set_description(error)
                 .set_level(rfd::MessageLevel::Error)
                 .show();
@@ -68,7 +68,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             .with_icon(app_icon::load())
             .with_inner_size([1_180.0, 760.0])
             .with_min_inner_size([920.0, 620.0])
-            .with_title("MacinDecode AC-4 Player"),
+            .with_title("MacinDecode Spatial Player"),
         persistence_path: Some(directory.path.join("app.ron")),
         ..Default::default()
     };
@@ -85,7 +85,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     eframe::run_native(
-        "MacinDecode AC-4 Player",
+        "MacinDecode Spatial Player",
         native_options,
         Box::new(move |creation_context| {
             let mut app = app::PlayerApp::new(creation_context, directory.clone());

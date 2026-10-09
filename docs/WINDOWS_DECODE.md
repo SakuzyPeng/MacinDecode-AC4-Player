@@ -2,7 +2,9 @@
 
 ## 数据路径
 
-Windows 首版不调用系统媒体解码器。压缩数据只经过锁定提交的 `MacinDecode-AC4-Core`：
+Windows 首版不调用系统媒体解码器。AC-4 压缩数据只经过锁定提交的 `MacinDecode-AC4-Core`；APAC 走
+`MacinDecode-APAC-Core`（`decoder::apac`），共用下面的 FIFO、`PlaybackKey` 与 seek 契约，见
+[ARCHITECTURE.md](ARCHITECTURE.md#apac-适配)：
 
 ```text
 MP4/M4A ── macindecode-ac4-mp4 ── bounded raw_ac4_frame ─┐
@@ -30,7 +32,7 @@ worker 内立即复制以下最小语义，然后才允许 Session 继续：
 - 配置代次、presentation 下标/ID、采样率、整数起点与长度；
 - 稳定 Scene element ID；
 - 每个对象一路 normalized mono `f32` PCM；
-- 最多一路原生 LFE PCM；
+- 原生 LFE PCM：AC-4 最多一路；Scene 类型最多容纳两路独立 LFE，供 APAC 22.2 使用；
 - 帧起点的 active、Cartesian position、linear gain 与 semantic-complete 状态；
 - 帧内 metadata update 的 offset、ramp、changed mask 与完整目标状态。
 

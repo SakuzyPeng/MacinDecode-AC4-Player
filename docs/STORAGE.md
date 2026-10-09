@@ -1,10 +1,29 @@
 # 数据目录与托管文件夹
 
-播放器沿用最新版的多播放列表数据库、JSON 设置和 eframe 窗口存档，详见 [PLAYLISTS.md](PLAYLISTS.md)。本次不引入旧方案的第二套单播放列表数据库，也不搬移已存在的用户资料。
+播放器沿用最新版的多播放列表数据库、JSON 设置和 eframe 窗口存档，详见 [PLAYLISTS.md](PLAYLISTS.md)。数据目录由应用 ID `com.macinrender.macindecode-spatial-player` 决定；改名前的目录只在下文「从旧应用 ID 迁移」描述的条件下复制一次。
 
-- macOS：`~/Library/Application Support/com.macinrender.macindecode-ac4-player/`
-- Windows：`%APPDATA%/com.macinrender.macindecode-ac4-player/data/`
+- macOS：`~/Library/Application Support/com.macinrender.macindecode-spatial-player/`
+- Windows：`%APPDATA%/com.macinrender.macindecode-spatial-player/data/`
+- Linux：`${XDG_DATA_HOME:-~/.local/share}/com.macinrender.macindecode-spatial-player/`
 - 开发隔离：`MACINDECODE_PLAYER_DATA_DIR` 或命令行 `--data-dir PATH`。
+
+## 从旧应用 ID 迁移
+
+改名前应用 ID 是 `com.macinrender.macindecode-ac4-player`，数据目录跟着它走。`preferences::migration`
+在 `DataDirectory::acquire` 里、加锁之前处理一次，规则如下：
+
+- **只在默认位置**：显式 `--data-dir` 或 `MACINDECODE_PLAYER_DATA_DIR` 没有前身，不迁移。
+- **只在新目录不存在时**：新目录一旦存在（哪怕是空的），就以它为准，永不覆盖。
+- **复制，不搬移**：先拿旧目录的 `player.lock`，旧版仍在运行就报错退出、什么都不建；拿到锁后把整棵树
+  复制到同级的 `<新目录>.migrating`（逐文件 fsync，跳过 `player.lock`，符号链接按它指向的文件复制），
+  完成后一次 `rename` 成新目录。中断留下的 `.migrating` 下次启动删掉重来，不会被当成已迁移的数据。
+- **旧目录原样保留**：只多写一份说明去向的 `MOVED.txt`，旧版仍能用它启动。
+- **失败即报错，不新建**：若迁移失败就开一个空目录，新目录存在后再也不会迁移，用户会以为数据丢了。
+
+设置里的 SOFA 与 HpTF 是绝对路径，托管文件在数据目录里。`AppPreferences::relocated` 在每次加载设置时把
+落在旧目录下的路径换到新目录——每次而不是一次，这样日后从旧目录拷回来的 `settings.json` 也能找到副本。
+数据库里的媒体路径不在数据目录内，SOFA / HpTF 索引存的是相对路径，二者都不需要改写。
+macOS 的 Atmos 标识辅助音轨是缓存，换到新 ID 的缓存目录后按需重新生成，不迁移。
 
 业务目录含 `library.sqlite3`、`settings.json`、`app.ron`，以及两个托管文件夹：`sofa/` 放 HRIR，`hptf/` 放 AutoEq 耳机补偿曲线。同一数据目录仍由现有操作系统文件锁保护。设置与播放列表继续通过 `LibraryController` 的单一工作线程提交，原有损坏保护、备份、浏览/播放分离及断点恢复均保留。
 

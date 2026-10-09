@@ -325,6 +325,7 @@ fn run(
         context.request_repaint();
     };
     let (mut preferences, prefs, warning) = PreferencesStore::load(&directory.path, legacy);
+    let prefs = prefs.relocated(directory);
     if let Some(warning) = warning {
         emit(Event::Error(warning));
     }

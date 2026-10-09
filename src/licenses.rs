@@ -93,7 +93,7 @@ impl Window {
             .open(&mut self.open)
             .default_width(700.0)
             .show(context, |ui| {
-                ui.heading("MacinDecode AC-4 Player");
+                ui.heading("MacinDecode Spatial Player");
                 ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
                 if !EMBEDDED {
                     ui.label("Development build: the installer build embeds the complete notices.");

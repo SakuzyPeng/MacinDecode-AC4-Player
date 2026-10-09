@@ -2100,7 +2100,28 @@ dependencies = [
 ]
 
 [[package]]
-name = "macindecode-ac4-player"
+name = "macindecode-ac4-scene"
+version = "0.1.0"
+source = "git+https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git?rev=9673e1ef445e7e2ab218cc1b7b79f484fa92135f#9673e1ef445e7e2ab218cc1b7b79f484fa92135f"
+dependencies = [
+ "macindecode-ac4-bitstream",
+ "macindecode-ac4-decode",
+ "macindecode-ac4-metadata",
+]
+
+[[package]]
+name = "macindecode-macinrender"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "mradm-ffi",
+ "serde_json",
+ "shlex",
+ "tempfile",
+]
+
+[[package]]
+name = "macindecode-spatial-player"
 version = "0.1.2"
 dependencies = [
  "apac-container",
@@ -2123,27 +2144,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "tempfile",
-]
-
-[[package]]
-name = "macindecode-ac4-scene"
-version = "0.1.0"
-source = "git+https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git?rev=9673e1ef445e7e2ab218cc1b7b79f484fa92135f#9673e1ef445e7e2ab218cc1b7b79f484fa92135f"
-dependencies = [
- "macindecode-ac4-bitstream",
- "macindecode-ac4-decode",
- "macindecode-ac4-metadata",
-]
-
-[[package]]
-name = "macindecode-macinrender"
-version = "0.1.0"
-dependencies = [
- "cc",
- "mradm-ffi",
- "serde_json",
- "shlex",
  "tempfile",
 ]
 

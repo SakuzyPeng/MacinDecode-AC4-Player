@@ -4,9 +4,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Native desktop player and inspector for AC-4 and APAC spatial audio (`.m4a`, `.mp4`, `.ac4`, `.caf`), built on
-egui/eframe. Decoding comes from `MacinDecode-AC4-Core` and `MacinDecode-APAC-Core` — the app never calls a system media
-decoder. Decode runs on every platform: Core's crates carry no `target_os` of their own.
+**MacinDecode Spatial Player** (package/binary `macindecode-spatial-player`, app ID
+`com.macinrender.macindecode-spatial-player`; formerly MacinDecode AC-4 Player — the GitHub repository
+and this checkout may still carry the old name). A native desktop player and inspector for AC-4 and
+APAC spatial audio (`.m4a`, `.mp4`, `.ac4`, `.caf`), built on egui/eframe. Decoding comes from
+`MacinDecode-AC4-Core` and `MacinDecode-APAC-Core` — the app never calls a system media decoder. Decode
+runs on every platform: neither Core's crates carry a `target_os` of their own.
+
+The old name survives on purpose in exactly three places, each because it identifies something that
+already exists on users' machines: `preferences::migration::LEGACY_APP_ID` (the data directory to copy
+from), `scripts/package.py`'s `UPGRADE_ID` (the MSI UpgradeCode, pinned in `test_packaging.py`, so a
+new MSI replaces the old install instead of installing beside it), and the user-facing upgrade notes.
+Don't "finish the rename" in those.
 
 One thing in the pipeline is not decoded: `decoder::demo`, the built-in demo track, synthesises a
 Scene downstream of Core and feeds the same FIFO. It exercises everything from the FIFO outwards and
@@ -16,7 +25,8 @@ labels itself `built-in demo` for exactly that reason.
 What a platform adds is *playback*, and there are two independent output paths:
 
 - **Windows object passthrough** — `crates/windows-spatial-audio` (COM/WASAPI). Dynamic objects plus
-  one static LFE, submitted per Windows render quantum.
+  one static LFE, submitted per Windows render quantum. APAC channels go as fixed-position dynamic
+  objects; a dual-LFE source is folded onto the one LFE slot by `backend::lfe`.
 - **MacinRender** — `crates/macinrender` over the MacinRender C ABI. Either a SAF VBAP bed on fixed
   Apple geometry handed to the system spatializer ("system spatial audio"), or SAF HRTF binaural to
   any stereo device. Available on **macOS *and* Windows**; the crate is an optional dependency
@@ -193,7 +203,8 @@ Every one of these is named; keep new ones named too.
 
 | Thread | Owner |
 | --- | --- |
-| `ac4-core-decode`, `ac4-seek-index` | `decoder/worker.rs` (the demo shares `ac4-core-decode`) |
+| `ac4-core-decode`, `ac4-seek-index` | `decoder/worker.rs` (the demo and APAC share `ac4-core-decode`) |
+| `apac-seek-index` | `decoder/apac.rs` |
 | `ac4-inspection` | `inspection.rs` |
 | `player-library` | `library.rs` |
 | `sofa-catalog`, `hptf-catalog` | `file_catalog.rs` |
@@ -228,7 +239,8 @@ must then be removed and added again.
 
 `Ac4DecoderSession::decode_access_unit` returns borrowed views valid only until the Session's next
 mutable call. `decoder/worker.rs::own_scene_frame` copies the minimal semantics — stable element
-IDs, per-object mono planar normalized `f32`, one optional native LFE, integer sample times, OAMD
+IDs, per-object mono planar normalized `f32`, one optional native LFE (the owned Scene type holds up
+to two, for APAC 22.2; AC-4 never fills the second), integer sample times, OAMD
 active/position/gain/ramp and content head-tracking policy — into player-owned types *before* the worker lets the Session advance.
 Core types must never cross into `backend`; a native crate must never see a bitstream or a Core
 Session.
@@ -245,11 +257,12 @@ all of it, each `unsafe_op_in_unsafe_fn = "deny"` and each exposing a safe surfa
   Objective-C++ Atmos label assist and CoreMotion bridges. `backend/macinrender.rs` adapts onto it;
   don't leak `raw`/ABI types past that file.
 
-### Two Scene producers
+### Three Scene producers
 
-`decoder/worker.rs` holds both: `LoadedMedia` (Core decoding a file) and `DemoStream` (the
-synthesised demo). They share the thread, the FIFO, the `PlaybackKey`, the phases and end-of-stream,
-so no consumer knows which one is upstream. `PlaybackSource` is what the controller distinguishes;
+`decoder/worker.rs`'s `LoadedSource` holds all three: `LoadedMedia` (AC-4 Core decoding a file),
+`decoder::apac::Stream` (APAC Core, chosen by `media::MediaCodec` from the file's contents) and
+`DemoStream` (the synthesised demo). They share the thread, the FIFO, the `PlaybackKey`, the phases
+and end-of-stream, so no consumer knows which one is upstream. `PlaybackSource` is what the controller distinguishes;
 `media::MediaSource` stays about files, because the demo has no path and a sentinel one would reach
 the library, the file catalog and the relocate dialog as a file that had gone missing.
 
@@ -296,12 +309,12 @@ producer submits ADM coordinates unchanged because the renderer is ADM-native.
 ### Scene view mirror
 
 `scene_view::SceneViewMirror` is the one-way channel from whichever consumer is live to the frame
-that draws it: `try_lock` writes that drop rather than block, a fixed `MAX_VIEW_OBJECTS` (20) array
+that draws it: `try_lock` writes that drop rather than block, a fixed `MAX_VIEW_OBJECTS` (22, the APAC 22.2 main channels) array
 so neither side allocates, and reader-copies-and-leaves. A scene past the budget is truncated and
 reported on screen, never grown.
 
-LFE has its own `LfeView` and `LFE_METER_SLOT`; it never consumes a dynamic-object slot or enters
-reference-frame counts. All three consumers use a persistent K-weighting filter for each channel,
+LFE has its own `LfeView` (up to two) and meter slots from `LFE_METER_SLOT` (`METER_SLOTS` =
+`MAX_VIEW_OBJECTS + 2`); it never consumes a dynamic-object slot or enters reference-frame counts. All three consumers use a persistent K-weighting filter for each channel,
 including LFE, after metadata gain and before master volume. LFE-only publications are valid.
 `MeterReadout` controls every bank row, scene nameplate, footprint core and trail level, with no
 LFE exception: fast 30 ms dBFS with ballistics or unballistic 400 ms LUFS-M. These are individual
@@ -394,6 +407,13 @@ playback checkpoint saves every 5 s plus on pause, track change and exit. Startu
 the seek index and must not overwrite a stored checkpoint with the zero position of a fresh start.
 Never migrate a database version without going through the SQLite backup API first.
 
+The data directory follows the app ID. `preferences::migration` copies the pre-rename directory once,
+in `DataDirectory::acquire`, only for the default location and only when the new directory does not
+exist: lock the old one, copy into `<new>.migrating`, rename into place, leave the old one untouched
+with a `MOVED.txt`. Failure is an error, never a fresh start — an empty new directory would stop every
+later launch from migrating. `AppPreferences::relocated` rewrites SOFA/HpTF paths under the old
+directory on every load. `docs/STORAGE.md` carries the contract.
+
 ### Platform gating
 
 Five inputs, all derived in `build.rs` (each with a matching `rustc-check-cfg`, so `unexpected_cfgs`
@@ -450,8 +470,13 @@ side of the trade.
   command uses `-D warnings`, so pedantic findings are hard errors. Silence them narrowly with
   `#[allow(..., reason = "...")]` — the existing code always supplies a `reason`.
 - The four `MacinDecode-AC4-Core` crates are pinned to one git `rev`; bump all of them together and
-  regenerate the spec tables from a matching Core checkout. The MacinRender commit is pinned
-  separately in `crates/macinrender/native/CMakeLists.txt`.
+  regenerate the spec tables from a matching Core checkout. `apac-core` / `apac-container` share
+  their own `rev`.
+- MacinRender-ADM-Core is pinned in **three** places that must name the same commit:
+  `crates/macinrender/native/CMakeLists.txt` (`GIT_TAG`), `crates/macinrender/Cargo.toml`
+  (`mradm-ffi`, the Rust kernels linked through Cargo so ThinLTO sees one std), and the root
+  `[patch.crates-io]` (`sofar` / `rubato` / `rustfft`, Core's patched DSP crates). `docs/MACINRENDER.md`
+  records the pinned commit and C ABI version.
 - `.cargo/config.toml` sets `+crt-static` and `/STACK:8000000` on both MSVC targets and pins
   `MACOSX_DEPLOYMENT_TARGET=14.0`; the decoder depends on the stack size and packaging on the rest.
 - UI strings are English. `docs/` is Chinese; `README.md` is Chinese with `README.en.md` alongside it.

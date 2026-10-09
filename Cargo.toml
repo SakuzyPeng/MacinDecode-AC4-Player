@@ -1,5 +1,5 @@
 [package]
-name = "macindecode-ac4-player"
+name = "macindecode-spatial-player"
 version = "0.1.2"
 edition = "2024"
 rust-version = "1.98"

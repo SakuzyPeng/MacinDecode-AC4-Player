@@ -2,9 +2,24 @@
 
 Windows 发布当前用户 MSI，程序载荷只有一个自包含 EXE。macOS 发布 Apple Silicon PKG，安装到 `~/Applications`；`.app` 内只有主程序、Info.plist、图标和 ad-hoc 签名资源，最低系统为 **14.0**。
 
-Windows 程序安装到 `%LOCALAPPDATA%\Programs\MacinDecode AC-4 Player`。Rust 与全部自建 C/C++ 库使用静态 CRT；MacinRender（含 Rust 数值内核）和 SQLite 编入主程序。macOS 渲染和头追代码同样静态链接，Accelerate、CoreMotion 等系统框架继续动态链接。用户数据库、播放列表、设置及自定义 SOFA 的存储格式和位置不变。
+Windows 程序安装到 `%LOCALAPPDATA%\Programs\MacinDecode Spatial Player`。Rust 与全部自建 C/C++ 库使用静态 CRT；MacinRender（含 Rust 数值内核）和 SQLite 编入主程序。macOS 渲染和头追代码同样静态链接，Accelerate、CoreMotion 等系统框架继续动态链接。用户数据库、播放列表、设置及自定义 SOFA 的存储格式不变。
 
-Windows 每次构建生成新的 ProductCode，保留固定 UpgradeCode 和组件身份；即使版本号相同，新 MSI 也能在事务内替换之前的预览构建，不要求先手动卸载。相同版本之间不区分构建先后，较低的 X.Y.Z 仍禁止覆盖较高版本；正式发布仍应递增版本号。再次打开同一份 MSI 会提供修复／卸载入口。安装界面包含准备、执行进度和完成页面，执行进度订阅 Windows Installer 的实际事件，并显示删除文件、快捷方式、注册信息等阶段；单文件载荷的进度可能跳跃，不代表剩余时间。
+Windows 每次构建生成新的 ProductCode，保留固定 UpgradeCode 和组件身份（改名时的一次例外见下节）；即使版本号相同，新 MSI 也能在事务内替换之前的预览构建，不要求先手动卸载。相同版本之间不区分构建先后，较低的 X.Y.Z 仍禁止覆盖较高版本；正式发布仍应递增版本号。再次打开同一份 MSI 会提供修复／卸载入口。安装界面包含准备、执行进度和完成页面，执行进度订阅 Windows Installer 的实际事件，并显示删除文件、快捷方式、注册信息等阶段；单文件载荷的进度可能跳跃，不代表剩余时间。
+
+## 改名后的身份
+
+应用从 MacinDecode AC-4 Player 改名为 MacinDecode Spatial Player，可见名称、可执行文件
+`macindecode-spatial-player`、应用 ID / macOS bundle ID `com.macinrender.macindecode-spatial-player`、
+安装目录、开始菜单快捷方式和 `HKCU\Software\MacinDecode\SpatialPlayer\Installer` 一起换名。
+数据目录跟着应用 ID 换位置，首次启动由播放器复制旧目录，规则见 [STORAGE.md](STORAGE.md#从旧应用-id-迁移)。
+
+- **UpgradeCode 不变**：`package.py` 的 `guid("upgrade")` 仍由旧 ID `com.macinrender.macindecode-ac4-player`
+  派生，`test_packaging.py` 钉住其值。新 MSI 因此按 MajorUpgrade 先卸掉旧产品（旧目录、快捷方式、注册表值），
+  再装到新目录，不会并排出现两个产品。
+- **组件 GUID 改变**：组件的键路径和文件路径都变了，按 Windows Installer 组件规则必须换新 GUID，因此
+  `guid("executable")` 改由新 ID 派生。
+- **macOS 没有升级关系**：PKG 的标识也换成新 ID，安装到 `~/Applications/MacinDecode Spatial Player.app`；
+  旧 `.app` 不会被删除，权限（蓝牙、运动）按新 bundle ID 重新询问。PKG 不带脚本，这一步留给用户。
 
 ## 构建
 

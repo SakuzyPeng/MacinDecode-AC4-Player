@@ -26,9 +26,11 @@ headphone compensation appears in only one of them, see [playback modes](#playba
   - [The four modes](#the-four-modes)
   - [Pages in the settings window](#pages-in-the-settings-window)
   - [System spatial audio](#system-spatial-audio)
+  - [Speaker renderer](#speaker-renderer)
   - [Software binaural and HRTFs](#software-binaural-and-hrtfs)
   - [Headphone compensation (HpTF)](#headphone-compensation-hptf)
   - [Head tracking and listener orientation](#head-tracking-and-listener-orientation)
+- [APAC multichannel playback](#apac-multichannel-playback)
 - [Looking inside a file](#looking-inside-a-file)
 - [Further reading](#further-reading)
 
@@ -55,12 +57,12 @@ Opening the **meter bank** takes a strip from the right of the scene; see
 
 The **Demo** button in the top right plays a piece the application carries with it. It needs no
 file, so the 3D scene, the meter bank, HRTF switching and head tracking are all demonstrable the
-moment you install — AC-4 spatial material is hard to come by otherwise. Press it again (it reads
+moment you install — AC-4 and APAC spatial material is hard to come by otherwise. Press it again (it reads
 **Stop demo**) to stop. The demo defaults to **Repeat one**; choose **Play once** in the bottom
 playback-mode control to stop after one run. Pause, resume, seeking and replay after the end use
 the ordinary transport controls. The demo's mode does not change any playlist's mode.
 
-**It is not AC-4.** The sound is synthesised by the application in real time and never passes
+**It is not decoded.** The sound is synthesised by the application in real time and never passes
 through the decoder, which is why the container field in the status line reads `built-in demo`
 rather than `raw AC-4` or `ISO BMFF`. It can show you that the output path, the renderer, the scene
 view and the meters are working; it can say nothing about the decoder. That cuts the other way too,
@@ -322,8 +324,8 @@ to the operating system before two channels exist**, so anything that acts on th
 | Mode | Available on | What it does |
 | --- | --- | --- |
 | **Automatic** (default) | all | Object passthrough on Windows, system spatial audio on macOS |
-| **Windows object passthrough** | Windows | Hands AC-4's dynamic objects straight to Windows Spatial Audio; a spatial sound format must be enabled in Windows first |
-| **System spatial audio** | macOS / Windows | Renders a 7.1.4 / 9.1.6 / 22.2 speaker bed (Apple geometry) and hands it to the system spatializer. 7.1.4 by default |
+| **Windows object passthrough** | Windows | Hands AC-4's dynamic objects (for APAC, its fixed-position channels) straight to Windows Spatial Audio; a spatial sound format must be enabled in Windows first |
+| **System spatial audio** | macOS / Windows | Renders a 7.1.4 / 9.1.6 / 22.2 speaker bed and hands it to the system spatializer. 7.1.4 and SAF VBAP (Apple geometry) by default; [Triple Balance](#speaker-renderer) is the alternative |
 | **SAF binaural** | macOS / Windows | Software binaural rendering over any ordinary stereo headphones; built-in KEMAR, or your own SOFA file |
 
 **Not sure which to pick?** To check that a file plays at all, switch to **SAF binaural**: it only
@@ -349,8 +351,9 @@ page can push the way out of that page off the screen.
 
 ### System spatial audio
 
-**The bed layout** is chosen on the `Speakers` page: 7.1.4 (default), 9.1.6 or 22.2, on Apple's
-geometry.
+**The bed layout** is chosen on the `Speakers` page: 7.1.4 (default), 9.1.6 or 22.2. **Speaker renderer**
+on the same page decides how that bed is rendered: SAF VBAP (default) on Apple's geometry, or Triple
+Balance on a fixed room geometry — see [speaker renderer](#speaker-renderer).
 
 **22.2** copies a lone audible LFE to both outputs at `1/sqrt(2)` each by default. When both LFEs have signal, each passes through at its original level. Direct always preserves the original channel assignment.
 
@@ -358,8 +361,14 @@ geometry.
 does not work with 9.1.6 or 22.2. The Control Center Atmos label assist is enabled by default and can
 be turned off while retaining system spatial audio and head tracking. The helper uses a continuous
 timeline of about 24 hours to avoid the frequent player-item transitions that could interrupt AirPods
-playback with the former 30-second loop. **AC-4 rendering is unchanged.** See
+playback with the former 30-second loop. **The audio itself is rendered exactly as before.** See
 [playback integration](MACINRENDER.md) (in Chinese).
+
+### Speaker renderer
+
+In system spatial mode, **Speakers → Speaker renderer** selects SAF VBAP or Triple Balance. SAF VBAP remains the default and uses Apple speaker geometry; Triple Balance uses fixed room geometry. Available speaker layouts remain 7.1.4, 9.1.6 and 22.2. This preference does not change software binaural rendering or Windows object passthrough.
+
+Triple Balance becomes available after the background playback probe succeeds. Its LFE is carried by a complete 7.1.2 bed with nine silent lanes; ordinary objects remain separate. LFE-bearing input and 22.2 output require 48 kHz. The current Core provides only one LFE input bus in Triple Balance. Select SAF VBAP for dual-LFE 22.2 input in either routing mode; summing the inputs would destroy the independent content that both Direct and equal-power copy must preserve. Source Z must be nonnegative for 7.1.4/9.1.6; 22.2 supports lower channels. Unsupported states such as headLocked report the Core’s specific error. Changing algorithms prepares a new output and resumes at the current position on success; a preparation failure keeps the previous settings.
 
 ### Software binaural and HRTFs
 
@@ -702,12 +711,21 @@ to try ending it. A read-only session with no pending operation or calibration w
 On macOS, run the packaged `.app` with its Bluetooth usage description and allow access on the first scan/connection.
 
 
+## APAC multichannel playback
+
+Add or drop an APAC CAF, M4A or MP4 file. The player identifies the codec from its contents and decodes it with [MacinDecode-APAC-Core](https://github.com/SakuzyPeng/MacinDecode-APAC-Core), CAC enabled. Supported discrete layouts are mono, stereo, 5.1, 7.1, 7.1.4, 9.1.6 and 22.2. HOA and unrecognized layouts report an explicit error. DRC, loudness and scene/renderer metadata are not applied. Container restrictions follow the Core: CAF and nonfragmented single-audio-track MP4/M4A.
+
+For 9.1.6 choose **System spatial audio → 9.1.6**; for 22.2 choose **System spatial audio → 22.2**. The latter preserves two input LFE PCM planes and, with Direct selected, routes them to separate macOS output slots. Core Audio's CICP_13 calls these LFE2/LFE3; the renderer calls them LFE1/LFE2. Equal-power copy duplicates only a lone audible LFE to both outputs at `1/sqrt(2)` each. When both have signal, each passes through at its original level, without summing or attenuation. Activity is checked per audio block after gain and mute. The scene and meter bank show 22 main channels and two independent LFE meters. Smaller output layouts and binaural output render into their own output format. Windows object passthrough has one LFE destination: a lone audible input passes through at unity, while two audible inputs are folded as `(LFE1 + LFE2) / sqrt(2)`. The 22 main channels still need enough dynamic slots; system 22.2 output can use the fixed speaker bed instead. Windows system 22.2 output retains the native backend's documented final LFE fold-down.
+
+Opening reads metadata and starts playback without waiting for the background checkpoint index. Priming and remainder are trimmed by the Core. Seeking, replay, pause and playlist controls use the existing transport; seeks restore checkpoints and return PCM at the requested valid-audio frame. Source changes cancel old work.
+
 ## Looking inside a file
 
 **No playback required.** Two ways in:
 
 - **Details…** on the file card — the bitstream details window: container, presentation, object
-  count, LFE channel, bit rate and more.
+  count, LFE channel, bit rate and more. APAC files show their own metadata — layout, channels,
+  sample rate — rather than AC-4's fields.
 - The **`...`** menu next to the scene heading — output compatibility notices, the software-binaural
   shortcut, and **Playback diagnostics** for buffering, decode and output state. The menu button
   changes color when a notice is available, without taking a separate row above the scene.
@@ -729,17 +747,3 @@ than how to use it:
 [playlists and persistence](PLAYLISTS.md) ·
 [data directory and SOFA](STORAGE.md) ·
 [packaging and CI](PACKAGING.md)
-
-## APAC multichannel playback
-
-Add or drop an APAC CAF, M4A or MP4 file. The player identifies the codec from its contents and uses MacinDecode-APAC-Core at commit `4aefbd3` with CAC enabled. Supported discrete layouts are mono, stereo, 5.1, 7.1, 7.1.4, 9.1.6 and 22.2. HOA and unrecognized layouts report an explicit error. DRC, loudness and scene/renderer metadata are not applied. Container restrictions follow the Core: CAF and nonfragmented single-audio-track MP4/M4A.
-
-For 9.1.6 choose **System spatial audio → 9.1.6**; for 22.2 choose **System spatial audio → 22.2**. The latter preserves two input LFE PCM planes and, with Direct selected, routes them to separate macOS output slots. Core Audio's CICP_13 calls these LFE2/LFE3; the renderer calls them LFE1/LFE2. Equal-power copy duplicates only a lone audible LFE to both outputs at `1/sqrt(2)` each. When both have signal, each passes through at its original level, without summing or attenuation. Activity is checked per audio block after gain and mute. The scene and meter bank show 22 main channels and two independent LFE meters. Smaller output layouts and binaural output render into their own output format. Windows object passthrough has one LFE destination: a lone audible input passes through at unity, while two audible inputs are folded as `(LFE1 + LFE2) / sqrt(2)`. The 22 main channels still need enough dynamic slots; system 22.2 output can use the fixed speaker bed instead. Windows system 22.2 output retains the native backend's documented final LFE fold-down.
-
-Opening reads metadata and starts playback without waiting for the background checkpoint index. Priming and remainder are trimmed by the Core. Seeking, replay, pause and playlist controls use the existing transport; seeks restore checkpoints and return PCM at the requested valid-audio frame. Source changes cancel old work.
-
-## Speaker renderer
-
-In system spatial mode, **Speakers → Speaker renderer** selects SAF VBAP or Triple Balance. SAF VBAP remains the default and uses Apple speaker geometry; Triple Balance uses fixed room geometry. Available speaker layouts remain 7.1.4, 9.1.6 and 22.2. This preference does not change software binaural rendering or Windows object passthrough.
-
-Triple Balance becomes available after the background playback probe succeeds. Its LFE is carried by a complete 7.1.2 bed with nine silent lanes; ordinary objects remain separate. LFE-bearing input and 22.2 output require 48 kHz. The current Core provides only one LFE input bus in Triple Balance. Select SAF VBAP for dual-LFE 22.2 input in either routing mode; summing the inputs would destroy the independent content that both Direct and equal-power copy must preserve. Source Z must be nonnegative for 7.1.4/9.1.6; 22.2 supports lower channels. Unsupported states such as headLocked report the Core’s specific error. Changing algorithms prepares a new output and resumes at the current position on success; a preparation failure keeps the previous settings.

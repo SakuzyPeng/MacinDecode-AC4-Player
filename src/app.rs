@@ -1449,7 +1449,7 @@ impl PlayerApp {
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
                         ui.label(
-                            RichText::new("MacinDecode AC-4 Player")
+                            RichText::new("MacinDecode Spatial Player")
                                 .size(21.0)
                                 .strong()
                                 .color(theme::TEXT),
@@ -3134,7 +3134,7 @@ impl PlayerApp {
         let remains_open = context.show_viewport_immediate(
             egui::ViewportId::from_hash_of("playback-diagnostics"),
             egui::ViewportBuilder::default()
-                .with_title("MacinDecode AC-4 Diagnostics")
+                .with_title("MacinDecode Spatial Player Diagnostics")
                 .with_icon(crate::app_icon::load())
                 .with_inner_size([460.0, 390.0])
                 .with_min_inner_size([400.0, 300.0]),
@@ -3817,7 +3817,7 @@ impl eframe::App for PlayerApp {
         self.library.shutdown();
         if let Some(error) = &self.library.error {
             rfd::MessageDialog::new()
-                .set_title("MacinDecode AC-4 Player")
+                .set_title("MacinDecode Spatial Player")
                 .set_description(format!("Some changes could not be saved.\n{error}"))
                 .set_level(rfd::MessageLevel::Error)
                 .show();
@@ -4153,7 +4153,7 @@ fn draw_speakers_page(
         let applicable = settings.atmos_label_applicable();
         ui.add_enabled(applicable, egui::Checkbox::new(
                 &mut settings.atmos_label_assist, "Control Center Atmos label"
-            )).on_hover_text("Available only for 7.1.4 system spatial output. Changes system content identification; AC-4 audio rendering stays the same.");
+            )).on_hover_text("Available only for 7.1.4 system spatial output. Changes system content identification; the decoded audio and its rendering stay the same.");
     }
     if settings.layout == SpeakerLayout::TwentyTwoTwo {
         ui.horizontal(|ui| {

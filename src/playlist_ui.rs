@@ -120,7 +120,7 @@ pub fn contents(
             }
             if list.entries.is_empty() {
                 ui.label("Playlist is empty");
-                ui.label(RichText::new("Add or drop AC-4 media files").color(theme::MUTED));
+                ui.label(RichText::new("Add or drop AC-4 / APAC media files").color(theme::MUTED));
                 return;
             }
             let stride = 34.0 + ui.spacing().item_spacing.y;
