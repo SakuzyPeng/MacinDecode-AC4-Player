@@ -1,6 +1,6 @@
-//! Opt-in diagnostic: production decode, Scene output and PoseBridge control workers.
-//! Set MACINDECODE_UNDERRUN_MEDIA and MACINDECODE_UNDERRUN_SETTINGS explicitly.
-//! HEAD selects off/held/posebridge; FULL_TRACK keeps tracking through EOF.
+//! Opt-in diagnostic: production decode, Scene output and `PoseBridge` control workers.
+//! Set `MACINDECODE_UNDERRUN_MEDIA` and `MACINDECODE_UNDERRUN_SETTINGS` explicitly.
+//! HEAD selects off/held/posebridge; `FULL_TRACK` keeps tracking through EOF.
 use super::*;
 use crate::decoder::{DecodePhase, DecoderController};
 use crate::head_tracking::{HeadSource, HeadStatus, HeadTracker};
@@ -10,6 +10,7 @@ use std::time::Instant;
 
 #[test]
 #[ignore = "requires explicit media/settings paths and an available stereo endpoint; logs timing"]
+#[allow(clippy::too_many_lines)] // Keep the opt-in measurement protocol in one place.
 fn current_player_saf_pose_underrun_probe() {
     let media = std::env::var_os("MACINDECODE_UNDERRUN_MEDIA").expect("media path");
     let prefs_path = std::env::var_os("MACINDECODE_UNDERRUN_SETTINGS").expect("settings path");
@@ -115,7 +116,7 @@ fn current_player_saf_pose_underrun_probe() {
     let mut next_log = Duration::ZERO;
     let mut started = false;
     let mut stopped = false;
-    let mut held = false;
+    let mut holding_pose = false;
     let mut active_snapshots = 0;
     while full_track || start.elapsed() < Duration::from_secs(30) {
         let elapsed = start.elapsed();
@@ -139,9 +140,10 @@ fn current_player_saf_pose_underrun_probe() {
                 .unwrap();
             started = true;
         }
-        if head == "held" && !held && tracker.snapshot().status == HeadStatus::BridgeActive {
+        if head == "held" && !holding_pose && tracker.snapshot().status == HeadStatus::BridgeActive
+        {
             tracker.toggle_hold();
-            held = true;
+            holding_pose = true;
         }
         if !full_track && started && elapsed >= Duration::from_secs(20) && !stopped {
             tracker.set_target(None);
