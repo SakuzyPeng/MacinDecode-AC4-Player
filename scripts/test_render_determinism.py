@@ -47,7 +47,11 @@ def resolved(target):
 class RenderDeterminismTests(unittest.TestCase):
     def test_renderer_dsp_keeps_core_scalar_and_portable_math(self):
         pin = core_pin()
-        for target in TARGETS:
+        # Each CI job builds TARGET, so only that target's dependencies are
+        # guaranteed to be cached. Local runs without TARGET check both graphs.
+        targets = (os.environ["TARGET"],) if "TARGET" in os.environ else TARGETS
+        for target in targets:
+            self.assertIn(target, TARGETS, "Expected a packaged desktop target")
             packages = resolved(target)
             for name in SCALAR_ONLY:
                 with self.subTest(target=target, package=name):

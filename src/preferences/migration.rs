@@ -106,8 +106,13 @@ fn copy_tree(from: &Path, to: &Path, root: bool) -> io::Result<()> {
         } else if kind.is_file() || (kind.is_symlink() && source.is_file()) {
             // A link is carried over as the file it points to; a dangling one
             // has nothing to carry.
-            fs::copy(&source, &destination)?;
-            File::open(&destination)?.sync_all()?;
+            let mut source = File::open(&source)?;
+            let mut destination = File::create(&destination)?;
+            io::copy(&mut source, &mut destination)?;
+            // Keep the writable handle: Windows cannot flush a read-only one.
+            // Applying permissions after opening also carries read-only files.
+            destination.set_permissions(source.metadata()?.permissions())?;
+            destination.sync_all()?;
         }
     }
     Ok(())
@@ -156,6 +161,37 @@ mod tests {
         assert_eq!(fs::read(target.join("settings.json")).unwrap(), b"current");
         assert!(!adopt(&root.path().join("missing"), &root.path().join("fresh")).unwrap());
         assert!(!root.path().join("fresh").exists());
+    }
+
+    #[test]
+    fn read_only_managed_files_keep_their_contents_and_permissions() {
+        let root = tempfile::tempdir().unwrap();
+        let legacy = legacy_directory(root.path());
+        let target = root.path().join("new");
+        let source = legacy.join("sofa").join("personal.sofa");
+        let copied = target.join("sofa").join("personal.sofa");
+        let original = fs::metadata(&source).unwrap().permissions();
+        let mut read_only = original.clone();
+        read_only.set_readonly(true);
+        fs::set_permissions(&source, read_only).unwrap();
+
+        let result = adopt(&legacy, &target);
+        let permissions = fs::metadata(&copied).map(|metadata| metadata.permissions());
+        // Windows requires writable files even when removing a temporary tree.
+        // Restore both possible destinations before asserting the result.
+        for path in [
+            source.clone(),
+            copied.clone(),
+            staging_path(&target).join("sofa").join("personal.sofa"),
+        ] {
+            if path.exists() {
+                fs::set_permissions(path, original.clone()).unwrap();
+            }
+        }
+        assert!(result.unwrap());
+        assert!(permissions.unwrap().readonly());
+        assert_eq!(fs::read(&copied).unwrap(), b"hrir");
+        assert_eq!(fs::read(&source).unwrap(), b"hrir");
     }
 
     #[test]
