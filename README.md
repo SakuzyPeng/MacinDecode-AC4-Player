@@ -308,24 +308,6 @@ python3 scripts/package.py --target aarch64-apple-darwin
 | [MacinRender-ADM-Core](https://github.com/SakuzyPeng/MacinRender-ADM-Core) | SAF VBAP、Triple Balance、SAF HRTF 双耳渲染与设备输出 |
 | [PoseBridge](https://github.com/SakuzyPeng/PoseBridge) | BLE／USB 头追传感器 |
 
-### 渲染的跨平台逐位一致
-
-MacinRender 的数值代码迁到 Rust 时，专门清掉了让结果随机器变化的来源：FFT 固定走标量路径，不再按 CPU
-挑 AVX 或 NEON；重采样换成打过补丁的标量实现和自带的 sin/cos；OM spreader 改用纯 Rust 的 libm，
-并固定分组数。锁定提交的一致性 CI 里有 150 个 PCM 用例被设为门禁，要求在 macOS arm64、Linux x64 和
-Windows x64 上**逐位相同**。这些用例覆盖双耳、VBAP、Triple Balance 的三种布局、设备端 DSP（音量、
-耳机补偿、峰值保护），以及 44.1 / 48 / 96 kHz 之间的重采样。
-
-对播放器来说，输入、设置和设备每次取的帧数都相同时，软件双耳和扬声器床在交给设备**之前**算出的是同一串
-比特，不管你用的是 Mac 还是 PC。这不等于两台电脑录下来的回放一模一样：
-
-- 设备每次取多少帧、头追姿态何时到达，都因机器而异；
-- 交给系统空间音频之后的部分，以及 Windows 对象直通，由操作系统渲染；
-- 外部 SOFA 文件和 AC-4 / APAC 解码不在这套矩阵里。
-
-播放器用 `scripts/test_render_determinism.py` 守住链接这份代码时的前提。范围与证据见上游的
-[二期结项记录](https://github.com/SakuzyPeng/MacinRender-ADM-Core/blob/d75d46028b85a84394ffaad32726e68c89549ae3/docs/architecture/RUST_PHASE2_CLOSEOUT.md)。
-
 ## 许可证
 
 本项目采用 [MIT License](LICENSE)。应用的 About 页面内嵌了全部第三方依赖的许可声明。

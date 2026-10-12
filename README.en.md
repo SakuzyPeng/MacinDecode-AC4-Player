@@ -363,28 +363,6 @@ repositories, each pinned in `Cargo.toml` and `crates/macinrender/native/CMakeLi
 | [MacinRender-ADM-Core](https://github.com/SakuzyPeng/MacinRender-ADM-Core) | SAF VBAP, Triple Balance, SAF HRTF binaural rendering and device output |
 | [PoseBridge](https://github.com/SakuzyPeng/PoseBridge) | BLE/USB head-tracking sensors |
 
-### Bit-identical rendering across platforms
-
-When MacinRender's numerical code moved to Rust, the sources that made results depend on the machine
-were removed one by one: the FFT always takes the scalar path instead of picking AVX or NEON by CPU,
-resampling uses a patched scalar implementation with its own sin/cos, and the OM spreader uses a
-pure-Rust libm with a fixed group count. At the pinned commit, Core's consistency CI gates 150 PCM
-cases as **bit-identical** on macOS arm64, Linux x64 and Windows x64. They cover binaural, VBAP,
-Triple Balance in all three layouts, device-side DSP (volume, headphone compensation, peak
-protection), and resampling between 44.1, 48 and 96 kHz.
-
-For the player, with the same input, settings and device block size, the software binaural feed and
-the speaker bed come out as the same bits **before** they reach the device, whether you are on a Mac
-or a PC. It does not mean two machines record identical playback:
-
-- how many frames a device asks for at a time, and when head-tracking poses arrive, differ by machine;
-- everything after the hand-off to system spatial audio, and Windows object passthrough, is rendered
-  by the operating system;
-- external SOFA files and AC-4 / APAC decoding are outside this matrix.
-
-`scripts/test_render_determinism.py` keeps the conditions the player has to preserve when it links
-this code. Scope and evidence are in Core's [phase-two closeout](https://github.com/SakuzyPeng/MacinRender-ADM-Core/blob/d75d46028b85a84394ffaad32726e68c89549ae3/docs/architecture/RUST_PHASE2_CLOSEOUT.md) (in Chinese).
-
 ## License
 
 Released under the [MIT License](LICENSE). The app's About page embeds the license notices of every

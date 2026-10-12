@@ -477,8 +477,9 @@ side of the trade.
   (`mradm-ffi`, the Rust kernels linked through Cargo so ThinLTO sees one std), and the root
   `[patch.crates-io]` (`sofar` / `rubato` / `rustfft`, Core's patched DSP crates). `docs/MACINRENDER.md`
   records the pinned commit and C ABI version.
-- Core gates its rendering as bit-identical across macOS arm64 / Linux x64 / Windows x64, and the
-  READMEs say so. That holds in the player only while the linked graph keeps Core's conditions:
+- Core gates its rendering as bit-identical across macOS arm64 / Linux x64 / Windows x64; the
+  user-facing docs deliberately don't claim it for the player yet. It holds in the player only
+  while the linked graph keeps Core's conditions:
   `rustfft` / `realfft` / `rubato` with no features (Cargo feature unification would bring back
   run-time SIMD/FMA dispatch), Core's patched copies, `nalgebra` with `libm-force`, and no
   `target-cpu` / `+fma` rustflags. `scripts/test_render_determinism.py` checks all of it and the
