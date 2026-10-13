@@ -19,6 +19,7 @@ use std::io::Read;
 use std::path::Path;
 
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 /// A manifest is a few kilobytes of JSON; anything near this is not one.
 const MAX_MANIFEST_BYTES: u64 = 1 << 20;
@@ -32,6 +33,18 @@ pub const REVERBERATION_TOLERANCE: f64 = 0.05;
 
 /// A listener this close to the lateral centre line counts as on it.
 const CENTRE_LINE_TOLERANCE: f64 = 0.01;
+
+/// Room presets `MacinRender` publishes, by the SHA-256 of their manifest.
+///
+/// A manifest records the size and SHA-256 of every component it loads, and
+/// the renderer checks them when it loads the room, so the manifest's own hash
+/// names the whole package. Upstream keeps manifests LF on every platform for
+/// exactly this. Add a preset here when upstream publishes one; a package that
+/// is not listed is simply not recognised, never refused.
+const KNOWN_PRESETS: [(&str, &str); 1] = [(
+    "40495a7c441c77d4b430e7b97278a42ee53786707ecb585a91fafe6ce596bdec",
+    "reference-7x6x3.2-corrected-v1",
+)];
 
 /// The elevations the Scene-unit fit is reported at: the ear-level ring, the
 /// upper layers of 7.1.4 / 9.1.6 / 22.2, straight up, and 22.2's lower layer.
@@ -67,6 +80,8 @@ pub struct RoomGeometry {
     pub minimum_distance: f64,
     /// Sources are kept at least this far inside every wall.
     pub boundary_clearance: f64,
+    /// Lower-case hex SHA-256 of the manifest's bytes.
+    pub manifest_sha256: String,
 }
 
 /// One recommendation, held against this room.
@@ -147,7 +162,16 @@ impl RoomGeometry {
             reference_distance: manifest.reference_distance,
             minimum_distance: manifest.minimum_distance,
             boundary_clearance: manifest.boundary_clearance,
+            manifest_sha256: format!("{:x}", Sha256::digest(text.as_bytes())),
         })
+    }
+
+    /// The published preset this package is byte for byte, if any.
+    pub fn known_preset(&self) -> Option<&'static str> {
+        KNOWN_PRESETS
+            .iter()
+            .find(|(sha256, _)| *sha256 == self.manifest_sha256)
+            .map(|(_, id)| *id)
     }
 
     pub fn floor_area(&self) -> f64 {
@@ -286,6 +310,24 @@ mod tests {
             assert!(criterion.met, "{criterion:?}");
         }
         assert_eq!(room.criteria()[1].detail, "2.06 ≤ 2.19 ≤ 4.44");
+    }
+
+    #[test]
+    fn the_published_reference_manifest_is_recognised_byte_for_byte() {
+        let published = include_str!("../tests/fixtures/room-reference-7x6x3.2-corrected-v1.json");
+        let room = RoomGeometry::parse(published).unwrap();
+        assert_eq!(room.known_preset(), Some("reference-7x6x3.2-corrected-v1"));
+        let bits = |values: [f64; 3]| values.map(f64::to_bits);
+        assert_eq!(bits(room.dimensions), bits([7.0, 6.0, 3.2]));
+        assert_eq!(bits(room.listener), bits([3.4, 3.0, 1.2]));
+        // The same room with one byte changed is no longer that package, even
+        // though it still reads as the same geometry.
+        let edited = RoomGeometry::parse(&published.replacen('\n', "\r\n", 1)).unwrap();
+        assert_eq!(edited.known_preset(), None);
+        assert_eq!(bits(edited.dimensions), bits(room.dimensions));
+        assert_ne!(edited.manifest_sha256, room.manifest_sha256);
+        // Nor does a room that merely shares the id.
+        assert_eq!(RoomGeometry::parse(REFERENCE).unwrap().known_preset(), None);
     }
 
     #[test]

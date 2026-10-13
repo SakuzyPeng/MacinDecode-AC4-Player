@@ -401,6 +401,10 @@ Choosing it replaces the page with three controls:
 - **Scene unit** — how many metres one unit of Scene distance spans, 0.01–100 m, 1.5 m by default.
 - **Room geometry** — a card shown once a room package is chosen, read straight from the
   dimensions, listening position and distances in its `room.json`.
+  - **Package** and **SHA-256** — whether this is a preset MacinRender publishes, recognised by
+    the SHA-256 of `room.json`'s exact bytes. The manifest pins the hash of every component and the
+    renderer checks them on load, so this one hash stands for the whole package. Copy it to compare
+    with upstream's `SHA256SUMS`.
   - The room's name, size (front–back × left–right × height), listening position, floor area and
     volume, and the nominal reverberation time Tm = 0.25·(V/100 m³)^⅓ with its ±0.05 s window from
     200 Hz to 4 kHz — a target, not a measurement of the package.

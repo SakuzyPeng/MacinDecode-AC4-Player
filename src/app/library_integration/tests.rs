@@ -1023,6 +1023,8 @@ fn the_room_card_reads_the_chosen_manifest_and_follows_the_scene_unit() {
     let text = frame(&mut app, &context, &settings);
     let has = |text: &[String], wanted: &str| text.iter().any(|line| line.starts_with(wanted));
     assert!(has(&text, "Corrected reference listening room"));
+    // Same geometry as the published preset, but not its bytes.
+    assert!(has(&text, "Not a published preset"));
     assert!(has(&text, "42.0 m² · 134.4 m³"));
     assert!(has(&text, "0.276 s"));
     assert_eq!(text.iter().filter(|line| *line == "✓").count(), 6);
@@ -1037,6 +1039,20 @@ fn the_room_card_reads_the_chosen_manifest_and_follows_the_scene_unit() {
         "At 2.10 m, the walls pull in unit distance at overhead"
     ));
     assert!(has(&text, "×"));
+
+    // The published manifest itself is recognised.
+    std::fs::write(
+        &manifest,
+        include_bytes!("../../../tests/fixtures/room-reference-7x6x3.2-corrected-v1.json"),
+    )
+    .unwrap();
+    app.room_geometry = None;
+    let text = frame(&mut app, &context, &settings);
+    assert!(has(
+        &text,
+        "✓ Published preset reference-7x6x3.2-corrected-v1"
+    ));
+    assert!(has(&text, "40495a7c441c77d4…"));
 
     // A file that is not a room says so instead of drawing a card.
     let other = dir.path().join("hrir.json");

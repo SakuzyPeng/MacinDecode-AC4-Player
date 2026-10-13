@@ -1,0 +1,195 @@
+{
+  "schema": "mradm.room",
+  "version": 1,
+  "kind": "hybrid-shoebox-v1",
+  "id": "reference-7x6x3.2-corrected-v1",
+  "name": "Corrected reference listening room",
+  "sample_rate": 48000,
+  "dimensions": [
+    7.0,
+    6.0,
+    3.2
+  ],
+  "listener": [
+    3.4,
+    3.0,
+    1.2
+  ],
+  "speed_of_sound": 344.02,
+  "reference_distance": 2.1,
+  "minimum_distance": 0.25,
+  "boundary_clearance": 0.15,
+  "reflection_order": 4,
+  "absorption": [
+    [
+      0.94,
+      0.94,
+      0.94,
+      0.94,
+      0.94,
+      0.94,
+      0.94,
+      0.94
+    ],
+    [
+      0.94,
+      0.94,
+      0.94,
+      0.94,
+      0.94,
+      0.94,
+      0.94,
+      0.94
+    ],
+    [
+      0.94,
+      0.94,
+      0.94,
+      0.94,
+      0.94,
+      0.94,
+      0.94,
+      0.94
+    ],
+    [
+      0.94,
+      0.94,
+      0.94,
+      0.94,
+      0.94,
+      0.94,
+      0.94,
+      0.94
+    ],
+    [
+      0.94,
+      0.94,
+      0.94,
+      0.94,
+      0.94,
+      0.94,
+      0.94,
+      0.94
+    ],
+    [
+      0.94,
+      0.94,
+      0.94,
+      0.94,
+      0.94,
+      0.94,
+      0.94,
+      0.94
+    ]
+  ],
+  "source_directivity": "cosine2-listener",
+  "early_fade_seconds": [
+    0.015,
+    0.025
+  ],
+  "late_predelay_seconds": 0.018,
+  "late_energy": 0.21496020132039353,
+  "alignment_guard_samples": 40,
+  "band_filter_offset": 256,
+  "default_hrir": "hrir.json",
+  "generator": "mradm-generate-room-v1",
+  "assets": {
+    "bands": {
+      "file": "bands.f64",
+      "dtype": "<f8",
+      "shape": [
+        8,
+        512
+      ],
+      "sha256": "1ea7e9e5a95033e65c013dca43bddb6bc92693ea5fc913fafed0b010f767a5be",
+      "bytes": 32768
+    },
+    "late": {
+      "file": "late.f32",
+      "dtype": "<f4",
+      "shape": [
+        32,
+        48000
+      ],
+      "bytes": 6144000,
+      "sha256": "5ef3459641797f90a59c31db23c927b24c13a0989a5484281d287d1306674148"
+    },
+    "late_directions": {
+      "file": "late-directions.f64",
+      "dtype": "<f8",
+      "shape": [
+        32,
+        3
+      ],
+      "sha256": "404c306cea642631a44512ec51fbae50dc64e9e95da97b42837739474930e8c7",
+      "bytes": 768
+    },
+    "eq": {
+      "file": "eq.f64",
+      "dtype": "<f8",
+      "shape": [
+        16384
+      ],
+      "sha256": "3d2c374eb59f99d839cd8578f94224372fe088586135093d9b217541f8fca92d",
+      "bytes": 131072
+    },
+    "propagation_phases": {
+      "file": "propagation-phases.f32",
+      "dtype": "<f4",
+      "shape": [
+        1025,
+        81
+      ],
+      "sha256": "689da737f9168cb0eba5f2e664198b12feae370f07fd47c4d9ec5dc70ca0a9ec",
+      "bytes": 332100
+    }
+  },
+  "validation_scope": "New preset. Resource integrity only; requires independent acoustic validation.",
+  "generation": {
+    "template_manifest_sha256": "c8e62c00447923135821273aa0131809ec58ffd71696f10ae176be3f8e2f7dce",
+    "tool_sha256": "1b09ff5fef6c49674e60a1347d10ec6da4f8b524dea7f22e470d6375062583e2",
+    "definition_sha256": "842ffa213a19f0edc1a28c3f9f89434fa1b70e0dcb6c03c682679e0088673971",
+    "numpy": "2.3.2",
+    "scipy": "1.16.3",
+    "late": {
+      "generator": "template-orthogonal-mix-v1",
+      "template_late_sha256": "cc66a3ce79e097da7a710f1c7654b0597c2347d47a45aabb01f49609cbd197b8",
+      "mix_vector": [
+        0.7768790118921673,
+        0.9331356981665734,
+        0.17411756001817852,
+        0.7949733838333884,
+        1.124376198685309,
+        1.2459757217468324,
+        0.8772697998006468,
+        0.6336032072185712,
+        1.080324029074152,
+        1.0494069676428441,
+        0.4131648178193541,
+        0.7080478360581899,
+        1.185916526771521,
+        1.1607731605260947,
+        0.7835477566055291,
+        0.5878503723947303,
+        1.139029743994659,
+        1.507089211160523,
+        0.9396689324049613,
+        0.7979057349263265,
+        0.755702949273925,
+        1.3500917643974784,
+        1.276327818533748,
+        1.5225733581347496,
+        1.6289927775839406,
+        0.4895877497677628,
+        0.7552301620097102,
+        0.9540697805400934,
+        1.3146975167742414,
+        0.9067769925675195,
+        0.3878062230593401,
+        0.8470932874217464
+      ],
+      "decay_rate_per_second": 0.056287765208436216
+    },
+    "orthogonal_energy_relative_error_before_tilt": 4.988809531132845e-16
+  }
+}

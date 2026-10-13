@@ -74,9 +74,15 @@ Audio settings 的内容按**播放模式**分页，页签由 `OutputPage::of` �
 `reference_distance`、`minimum_distance`、`boundary_clearance`），按路径缓存，重新选择同一房间包即重读；
 清单上限 1 MiB，坐标沿用渲染器的 x 前后、y 左右、z 上。判定只覆盖 BS.1116-3 / EBU Tech 3276 的几何
 建议（面积、比例、整数比、左右对称），名义 Tm 只作为目标值显示。衰减和早反射属于上游
-`check-acoustics.py` 对滤波器的测量，播放器不读取、不推算也不声明。到墙距离按上游的射线约束和 `boundary_clearance` 计算各仰角最坏方位的
-最大半径；单位距离电平差为 `20·log10(reference_distance / max(scale, minimum_distance))`，未计入被墙拉回
-后的进一步变化。
+`check-acoustics.py` 对滤波器的测量，播放器不读取、不推算也不声明。到墙距离按上游的射线约束和
+`boundary_clearance` 计算各仰角最坏方位的最大半径；单位距离电平差为
+`20·log10(reference_distance / max(scale, minimum_distance))`，未计入被墙拉回后的进一步变化。
+
+卡片只负责认出是哪一份：显示 `room.json` 原始字节的 SHA-256，并与 `room_package::KNOWN_PRESETS`
+比对，逐字节一致即标为上游发布的预设。清单记录每个组件的大小与 SHA-256，渲染器加载时逐一核对，所以清单
+哈希即可代表整个房间包；上游让清单在各平台保持 LF，保证同一份字节。上游新增预设时把清单哈希加进该表；
+未列出的包只是不被认出，不会被拒绝。测试夹具 `tests/fixtures/room-reference-7x6x3.2-corrected-v1.json`
+是上游清单的原样副本，`.gitattributes` 禁止对它做换行转换。
 
 屏幕映射存于 `room_screen`（`backend/screen.rs` 的 `ScreenSettings`）：重放屏幕与自定义制作屏幕
 各自带开关，关闭时保留几何。`config_json` 生成 C ABI 1.47 `adm_create_scene_stream_with_room_ex`

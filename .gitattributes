@@ -1,0 +1,3 @@
+# Room manifests are identified by the SHA-256 of their exact bytes, so the
+# fixture must reach every platform as MacinRender published it.
+/tests/fixtures/room-*.json -text

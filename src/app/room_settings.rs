@@ -327,47 +327,7 @@ fn elevation_label(elevation: i32) -> String {
 }
 
 fn draw_room_card(ui: &mut egui::Ui, room: &RoomGeometry, metres_per_unit: f64) {
-    let [front, side, height] = room.dimensions;
-    let [x, y, z] = room.listener;
-    let nominal = room.nominal_reverberation();
-    egui::Grid::new("room-geometry-facts")
-        .num_columns(2)
-        .show(ui, |ui| {
-            ui.label("Room");
-            ui.label(if room.name.is_empty() {
-                &room.id
-            } else {
-                &room.name
-            })
-            .on_hover_text(&room.id);
-            ui.end_row();
-            ui.label("Size");
-            ui.label(format!("{front:.2} × {side:.2} × {height:.2} m"))
-                .on_hover_text("Front–back × left–right × height");
-            ui.end_row();
-            ui.label("Listener");
-            ui.label(format!("({x:.2}, {y:.2}, {z:.2}) m"))
-                .on_hover_text("From the room's corner: front–back, left–right, height");
-            ui.end_row();
-            ui.label("Floor · volume");
-            ui.label(format!(
-                "{:.1} m² · {:.1} m³",
-                room.floor_area(),
-                room.volume()
-            ));
-            ui.end_row();
-            ui.label("Nominal Tm");
-            ui.label(format!(
-                "{nominal:.3} s ({:.3}–{:.3} s)",
-                nominal - REVERBERATION_TOLERANCE,
-                nominal + REVERBERATION_TOLERANCE
-            ))
-            .on_hover_text(
-                "0.25 · (V / 100 m³)^⅓, the centre of the BS.1116-3 / EBU Tech 3276 tolerance mask; the range is its 200 Hz – 4 kHz part. A target for the package's decay, not a measurement of it.",
-            );
-            ui.end_row();
-        });
-
+    draw_room_facts(ui, room);
     ui.add_space(4.0);
     ui.strong("BS.1116-3 · EBU Tech 3276 room geometry");
     for criterion in room.criteria() {
@@ -423,6 +383,68 @@ fn draw_room_card(ui: &mut egui::Ui, room: &RoomGeometry, metres_per_unit: f64) 
             room.reference_distance
         ),
     );
+}
+
+/// Which package this is, and the room it describes.
+fn draw_room_facts(ui: &mut egui::Ui, room: &RoomGeometry) {
+    let [front, side, height] = room.dimensions;
+    let [x, y, z] = room.listener;
+    let nominal = room.nominal_reverberation();
+    egui::Grid::new("room-geometry-facts")
+        .num_columns(2)
+        .show(ui, |ui| {
+            ui.label("Room");
+            ui.label(if room.name.is_empty() {
+                &room.id
+            } else {
+                &room.name
+            })
+            .on_hover_text(&room.id);
+            ui.end_row();
+            ui.label("Package");
+            match room.known_preset() {
+                Some(id) => ui.colored_label(theme::SUCCESS, format!("✓ Published preset {id}")),
+                None => ui.colored_label(theme::MUTED, "Not a published preset"),
+            }
+            .on_hover_text(
+                "Recognised by the SHA-256 of room.json, byte for byte. The manifest pins the hash of every component, and the renderer checks them when it loads the room.",
+            );
+            ui.end_row();
+            ui.label("SHA-256");
+            ui.horizontal(|ui| {
+                ui.monospace(format!("{}…", &room.manifest_sha256[..16]))
+                    .on_hover_text(&room.manifest_sha256);
+                if ui.small_button("Copy").clicked() {
+                    ui.ctx().copy_text(room.manifest_sha256.clone());
+                }
+            });
+            ui.end_row();
+            ui.label("Size");
+            ui.label(format!("{front:.2} × {side:.2} × {height:.2} m"))
+                .on_hover_text("Front–back × left–right × height");
+            ui.end_row();
+            ui.label("Listener");
+            ui.label(format!("({x:.2}, {y:.2}, {z:.2}) m"))
+                .on_hover_text("From the room's corner: front–back, left–right, height");
+            ui.end_row();
+            ui.label("Floor · volume");
+            ui.label(format!(
+                "{:.1} m² · {:.1} m³",
+                room.floor_area(),
+                room.volume()
+            ));
+            ui.end_row();
+            ui.label("Nominal Tm");
+            ui.label(format!(
+                "{nominal:.3} s ({:.3}–{:.3} s)",
+                nominal - REVERBERATION_TOLERANCE,
+                nominal + REVERBERATION_TOLERANCE
+            ))
+            .on_hover_text(
+                "0.25 · (V / 100 m³)^⅓, the centre of the BS.1116-3 / EBU Tech 3276 tolerance mask; the range is its 200 Hz – 4 kHz part. A target for the package's decay, not a measurement of it.",
+            );
+            ui.end_row();
+        });
 }
 
 /// Which number of a [`ScreenGeometry`] a row of the screen form edits.
