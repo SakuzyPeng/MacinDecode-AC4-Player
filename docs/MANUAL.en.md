@@ -22,6 +22,7 @@ headphone compensation appears in only one of them, see [playback modes](#playba
   - [Fading persistently silent objects](#fading-persistently-silent-objects)
   - [The meter bank](#the-meter-bank)
   - [Listener skins](#listener-skins)
+  - [The room view](#the-room-view)
 - [Playback modes](#playback-modes)
   - [The four modes](#the-four-modes)
   - [Pages in the settings window](#pages-in-the-settings-window)
@@ -306,6 +307,33 @@ Legacy 64×32 Steve skins work too. Imports are copied to `skins/` in the data d
 deleting the original is safe. The list, the selected skin and the body override all survive
 restarts. Choose **Default figure** to restore the original listener.
 
+### The room view
+
+**Draw the modelled room** (on by default): while the [room binaural](#room-binaural-preview)
+renderer forms the headphone feed, the 3D scene draws the room package's room at its own proportions
+instead of the panner's box:
+
+- **The walls are cut away.** The walls and ceiling between the camera and the room are drawn as
+  edges only, and the far surfaces whole, so the inside is visible from any angle.
+- **The treatment reads the absorption and nothing else.** Walls carry vertical panels at a 0.6 m
+  pitch, each as wide as the surface's mean absorption times the pitch, so the reference room (0.94)
+  is almost fully covered; the ceiling carries square tiles; the floor's tone deepens with its
+  absorption. No doors, windows, diffusers or bass traps, because the model has none.
+- **The floor is a metric ruler** counted from the listener: 0.5 m squares, a heavier line every
+  metre, and two axes through the listener.
+- **The dashed box is the Scene's unit cube** — the ordinary view's whole box — centred on the
+  ears and sized by the scene unit; whatever part of it leaves the reachable room is drawn red.
+- **The listener sits**, in Minecraft's sitting pose, with the head's centre on the listening
+  position, at real size (about 1.6 m tall on a 0.3 m seat in the reference room), on a low-backed
+  chair. The chair is not in the room model and has no effect on the sound. Skins work as usual.
+- **Objects are drawn where they actually sound.** Scaled by the scene unit, a source beyond a wall
+  is pulled back inside along its own direction, and the scene draws it there; its nameplate, drop
+  line, footprint and trail follow. The position the Scene asked for is not drawn.
+- **No LFE.** The room renderer gives the LFE no position, so there is no LFE cabinet here and no
+  nameplate for it.
+
+With the switch off, the panner's box is drawn even while the room renderer plays.
+
 ## Playback modes
 
 Switch under **Audio settings**. **Picking the wrong one costs nothing** — mode changes are applied
@@ -439,7 +467,9 @@ session is created, so changing any of them prepares a new output.
 
 **This version ships the interface only.** The settings are saved, but the MacinRender the player
 pins does not carry room rendering yet (that needs C ABI 1.46), so starting playback with Room
-selected shows a specific error instead of quietly playing SAF HRTF.
+selected shows a specific error instead of quietly playing SAF HRTF. With Room selected and a
+readable package, the 3D scene already draws the room (see [the room view](#the-room-view)), only
+without objects yet.
 
 ### Headphone compensation (HpTF)
 

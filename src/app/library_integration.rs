@@ -164,6 +164,7 @@ impl PlayerApp {
                     self.object_loudness_visible = self.preferences.object_loudness;
                     self.fade_silent_objects = self.preferences.fade_silent_objects;
                     self.meter_bank_open = self.preferences.meter_bank;
+                    self.room_view_enabled = self.preferences.room_view;
                     self.meter_readout = self.preferences.meter_readout;
                     self.restore_skin(context);
                     self.preferences_observed = self.preferences.clone();
@@ -638,6 +639,7 @@ impl PlayerApp {
         prefs.object_loudness = self.object_loudness_visible;
         prefs.fade_silent_objects = self.fade_silent_objects;
         prefs.meter_bank = self.meter_bank_open;
+        prefs.room_view = self.room_view_enabled;
         prefs.meter_readout = self.meter_readout;
         prefs
     }

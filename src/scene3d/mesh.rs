@@ -242,6 +242,29 @@ impl MeshBuilder {
         }
     }
 
+    /// A flat quad seen from the side `facing` points to, culled from the other
+    /// side: a room's surface seen from inside. Shaded and faded with depth like
+    /// a box face, and wound the way [`Self::add_box`] winds its faces, so the
+    /// caller may list the corners in either order.
+    pub fn add_surface(
+        &mut self,
+        corners: [[f32; 3]; 4],
+        facing: [f32; 3],
+        base: Rgb,
+        view: &ViewContext,
+    ) {
+        let centre: [f32; 3] = std::array::from_fn(|axis| {
+            corners.iter().map(|corner| corner[axis]).sum::<f32>() / 4.0
+        });
+        let colour = faded(shade_face(base, facing, view), centre, view).to_bytes();
+        let [a, b, c, d] = corners;
+        if dot(cross(sub(b, a), sub(c, a)), facing) >= 0.0 {
+            self.quad(Layer::Solid, a, b, c, d, colour);
+        } else {
+            self.quad(Layer::Solid, d, c, b, a, colour);
+        }
+    }
+
     /// A skin texel run. Empty texels were removed when the skin was loaded;
     /// opaque ones share the scene depth buffer, and partial alpha gets its own
     /// sorted pass. Clothing is visible from inside its shell as well.

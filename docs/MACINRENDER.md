@@ -84,7 +84,13 @@ Audio settings 的内容按**播放模式**分页，页签由 `OutputPage::of` �
 未列出的包只是不被认出，不会被拒绝。测试夹具 `tests/fixtures/room-reference-7x6x3.2-corrected-v1.json`
 是上游清单的原样副本，`.gitattributes` 禁止对它做换行转换。
 
-### 3D 场景的房间视图（几何已就绪，尚未接入绘制）
+### 3D 场景的房间视图
+
+`SceneInput::room` 有值时，`scene::build` 画房间视图而不是声像器方盒；`PlayerApp::room_view` 在
+`OutputSettings::room_selected()`、房间包可读且 Visual settings 的 **Draw the modelled room**（偏好字段
+`room_view`，默认开）同时成立时给出它，每帧按当前 `room_metres_per_unit` 构造。对象的位置统一走
+`scene::object_position`：方块、落地线、足迹、轨迹和 app 画的铭牌（`nameplate_anchor`）都问同一处，
+互相不会对不上。普通视图的输出不变：用同一组对象和相机，经 wgpu 实际渲染的图像与改动前逐字节相同。
 
 `scene3d/room.rs` 把清单里的房间按真实比例画进场景：房间较长的一边对齐普通场景的房间宽度，耳朵仍在
 世界原点，房间 x 前、y 左、z 上转为场景的 −Z、−X、+Y；对象与人偶保持各自的世界尺寸。

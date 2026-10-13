@@ -85,6 +85,11 @@ impl PlayerApp {
                         ui.checkbox(&mut self.meter_bank_open, "Meter bank (side panel)")
                             .on_hover_text("A row per object beside the scene: level, metadata gain, peak and clipping.");
                         ui.label(RichText::new("Off by default because it takes width from the scene; the measurement runs either way.").small().color(theme::MUTED));
+                        ui.separator();
+                        ui.strong("Room renderer");
+                        ui.checkbox(&mut self.room_view_enabled, "Draw the modelled room")
+                            .on_hover_text("While the room renderer forms the headphone feed, draw its room at real proportions instead of the panner's box.");
+                        ui.label(RichText::new("The listener sits at the listening position, and objects sit where the room makes them sound. Off shows the panner's box.").small().color(theme::MUTED));
                     });
             });
         self.visual_settings_open = open;

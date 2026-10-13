@@ -6,12 +6,14 @@
 //! slot lives on the `-Z` wall and the listener faces that way, so the `BACK`
 //! camera preset at `+Z` correctly looks over the listener's shoulder.
 
+use crate::room_package::Surface;
 use crate::theme;
 
 use super::camera::Camera;
 use super::figure::{Figure, PartTone, Stance};
 use super::mesh::{ArrowSpec, Layer, MeshBuilder, Rgb, ViewContext, shade_face};
 use super::params;
+use super::room::{GridWeight, RoomView};
 
 /// Horizontal room extents. Logic uses a square footprint but a lower ceiling.
 const ROOM_HALF_WIDTH: f32 = params::ROOM_WIDTH / 2.0;
@@ -75,6 +77,28 @@ pub struct SceneInput<'a> {
     pub lfe_count: usize,
     pub figure: Figure,
     pub skin: Option<&'a super::skin::Skin>,
+    /// The room renderer's modelled room. With one, the frame is drawn in it
+    /// at its own proportions instead of in the panner's box: objects where
+    /// the room makes them sound, the listener seated, and no LFE, which the
+    /// room renderer gives no place.
+    pub room: Option<&'a RoomView>,
+}
+
+/// Where an object at a listener-space position is drawn: in the panner's box,
+/// or where the room renderer makes it sound. The cube, its drop line, its
+/// footprint, its trail and its nameplate all ask here, so none of them can
+/// disagree with another about where the object is.
+#[must_use]
+pub fn object_position(position: [f32; 3], room: Option<&RoomView>) -> [f32; 3] {
+    room.map_or_else(
+        || object_world_position(position),
+        |room| room.place(position),
+    )
+}
+
+/// The floor objects drop their lines and footprints onto.
+fn floor_of(room: Option<&RoomView>) -> f32 {
+    room.map_or(FLOOR_Y, RoomView::floor_y)
 }
 
 /// Build one frame of geometry into `mesh`, which is cleared first.
@@ -93,22 +117,36 @@ pub fn build(
         stage: Rgb::from_color32(theme::STAGE),
     };
 
-    add_room(mesh, &view);
-    add_floor_grid(mesh, &view);
-    if let Some(skin) = input.skin {
-        skin.draw(mesh, input.figure, Stance::standing(FLOOR_Y), &view);
+    let stance = if let Some(room) = input.room {
+        add_room_view(mesh, room, &view);
+        let stance = room.stance();
+        for part in stance.seat(room.floor_y()) {
+            mesh.add_oriented_box(part.centre, part.size, part.axes, seat_colour(), &view);
+        }
+        stance
     } else {
-        add_figure(mesh, input.figure, &view);
+        add_room(mesh, &view);
+        add_floor_grid(mesh, &view);
+        Stance::standing(FLOOR_Y)
+    };
+    if let Some(skin) = input.skin {
+        skin.draw(mesh, input.figure, stance, &view);
+    } else {
+        add_figure(mesh, input.figure, stance, &view);
     }
-    for index in 0..input.lfe_count.max(1) {
-        add_lfe_slot(
-            mesh,
-            input.has_lfe,
-            input.show_element_numbers,
-            index,
-            input.lfe_count,
-            &view,
-        );
+    // The room renderer gives the LFE no position, so only the panner's box
+    // has a slot for it.
+    if input.room.is_none() {
+        for index in 0..input.lfe_count.max(1) {
+            add_lfe_slot(
+                mesh,
+                input.has_lfe,
+                input.show_element_numbers,
+                index,
+                input.lfe_count,
+                &view,
+            );
+        }
     }
     // An inactive element is one whose metadata is absent or incomplete, so the
     // only coordinate available for it is the origin — the listener's own head.
@@ -116,12 +154,13 @@ pub fn build(
     // in the one place guaranteed to look deliberate. Leaving it out is the
     // honest reading of "we do not know where this is".
     for object in input.objects.iter().filter(|object| object.active) {
-        add_trail(mesh, object, input.show_loudness, &view);
+        add_trail(mesh, object, input.show_loudness, input.room, &view);
         add_object(
             mesh,
             object,
             input.show_element_numbers,
             input.show_loudness,
+            input.room,
             &view,
         );
     }
@@ -134,10 +173,10 @@ pub fn build(
 /// base already near `INK` loses every distinction between faces and the figure
 /// renders as one dark obelisk instead of a body. Graphite, well clear of the
 /// terracotta the dynamic objects own.
-fn add_figure(mesh: &mut MeshBuilder, figure: Figure, view: &ViewContext) {
+fn add_figure(mesh: &mut MeshBuilder, figure: Figure, stance: Stance, view: &ViewContext) {
     let muted = Rgb::from_color32(theme::MUTED);
     let skin = muted.lerp(Rgb::from_color32(theme::TEXT), 0.22);
-    for part in figure.parts(FLOOR_Y) {
+    for part in figure.parts_in(stance) {
         let base = match part.tone {
             PartTone::Skin => skin,
             PartTone::Cloth => muted.lerp(view.ink, 0.50),
@@ -227,6 +266,108 @@ fn add_room(mesh: &mut MeshBuilder, view: &ViewContext) {
     );
 }
 
+/// The modelled room, cut away towards the camera.
+///
+/// The surfaces between the camera and the room are left as edges, so the
+/// inside stays visible from any angle; the far ones are drawn whole, with the
+/// treatment their absorption reads as. Then the metric floor ruler, the
+/// room's twelve edges, and the Scene's unit box — the panner's whole room —
+/// sized by the scene unit, with whatever part of it the walls cut off marked.
+fn add_room_view(mesh: &mut MeshBuilder, room: &RoomView, view: &ViewContext) {
+    let bare = view.stage.lerp(Rgb::from_color32(theme::BORDER), 0.5);
+    let fabric = Rgb::from_color32(theme::ACCENT_SOFT).lerp(Rgb::from_color32(theme::MUTED), 0.18);
+    for surface in Surface::ALL {
+        if !RoomView::shows_inner_face(surface, view.direction) {
+            continue;
+        }
+        let inward = RoomView::inward(surface);
+        if surface == Surface::Floor {
+            // A hair below the floor, so the ruler and the footprints, which
+            // are decals on it, always win.
+            let corners = room
+                .corners(surface)
+                .map(|[x, y, z]| [x, y - params::ROOM_VIEW_FLOOR_SINK, z]);
+            let tone = params::ROOM_VIEW_FLOOR_TONE * room.coverage(surface);
+            mesh.add_surface(
+                corners,
+                inward,
+                view.stage.lerp(Rgb::from_color32(theme::MUTED), tone),
+                view,
+            );
+            continue;
+        }
+        mesh.add_surface(room.corners(surface), inward, bare, view);
+        for panel in room.panels(surface) {
+            mesh.add_box(panel.centre, panel.size, fabric, view);
+        }
+    }
+
+    let faint = Rgb::from_color32(theme::BORDER).lerp(
+        Rgb::from_color32(theme::MUTED),
+        params::FLOOR_GRID_CONTRAST * 0.6,
+    );
+    for line in room.floor_lines() {
+        let (colour, width) = match line.weight {
+            GridWeight::Axis => (faint.lerp(view.ink, 0.45), params::HAIRLINE_POINTS * 1.4),
+            GridWeight::Metre => (faint.lerp(view.ink, 0.22), params::HAIRLINE_POINTS),
+            GridWeight::Half => (faint, params::HAIRLINE_POINTS * 0.6),
+        };
+        mesh.add_line(Layer::Decal, line.from, line.to, colour, width, view);
+    }
+
+    let edge = Rgb::from_color32(theme::BORDER).lerp(view.ink, 0.25);
+    for (from, to) in room.edges() {
+        mesh.add_line(Layer::Line, from, to, edge, params::HAIRLINE_POINTS, view);
+    }
+
+    let reachable = Rgb::from_color32(theme::MUTED).lerp(view.ink, 0.15);
+    let cut = Rgb::from_color32(theme::WARNING);
+    for segment in room.unit_box() {
+        if segment.reachable {
+            add_dashed(mesh, segment.from, segment.to, reachable, view);
+        } else {
+            mesh.add_line(
+                Layer::Line,
+                segment.from,
+                segment.to,
+                cut,
+                params::HAIRLINE_POINTS * 1.3,
+                view,
+            );
+        }
+    }
+}
+
+/// A hairline broken into dashes of fixed world length, which is what tells
+/// the unit box apart from the room's own solid edges.
+fn add_dashed(
+    mesh: &mut MeshBuilder,
+    from: [f32; 3],
+    to: [f32; 3],
+    colour: Rgb,
+    view: &ViewContext,
+) {
+    let span: [f32; 3] = std::array::from_fn(|axis| to[axis] - from[axis]);
+    let length = span[0].hypot(span[1]).hypot(span[2]);
+    let period = params::ROOM_VIEW_DASH + params::ROOM_VIEW_DASH_GAP;
+    let mut start = 0.0;
+    while start < length {
+        let end = (start + params::ROOM_VIEW_DASH).min(length);
+        let at = |distance: f32| -> [f32; 3] {
+            std::array::from_fn(|axis| from[axis] + span[axis] * distance / length)
+        };
+        mesh.add_line(
+            Layer::Line,
+            at(start),
+            at(end),
+            colour,
+            params::HAIRLINE_POINTS,
+            view,
+        );
+        start += period;
+    }
+}
+
 /// The floor ruler.
 ///
 /// Weighted rather than drawn at one weight. Legibility comes from graduation —
@@ -289,9 +430,11 @@ fn add_object(
     object: &SceneObject<'_>,
     show_label: bool,
     show_loudness: bool,
+    room: Option<&RoomView>,
     view: &ViewContext,
 ) {
-    let [x, y, z] = object_world_position(object.position);
+    let [x, y, z] = object_position(object.position, room);
+    let floor = floor_of(room);
     let edge = params::OBJECT_EDGE;
     let base = receded(object_colour(object, view), object, view);
     mesh.add_box([x, y, z], [edge; 3], base, view);
@@ -319,7 +462,7 @@ fn add_object(
     mesh.add_line(
         Layer::Line,
         [x, y - edge / 2.0, z],
-        [x, FLOOR_Y, z],
+        [x, floor, z],
         drop,
         params::HAIRLINE_POINTS * 0.8,
         view,
@@ -334,14 +477,14 @@ fn add_object(
         mesh.add_floor_ring(
             [x, z],
             gain_edge,
-            FLOOR_Y,
+            floor,
             Rgb::from_color32(theme::MUTED),
             params::FOOTPRINT_RING_POINTS,
             view,
         );
-        mesh.add_floor_mark(x, z, level_edge, FLOOR_Y, receded(mark, object, view), view);
+        mesh.add_floor_mark(x, z, level_edge, floor, receded(mark, object, view), view);
     } else {
-        mesh.add_floor_mark(x, z, gain_edge, FLOOR_Y, mark, view);
+        mesh.add_floor_mark(x, z, gain_edge, floor, mark, view);
     }
 }
 
@@ -570,6 +713,7 @@ fn add_trail(
     mesh: &mut MeshBuilder,
     object: &SceneObject<'_>,
     show_loudness: bool,
+    room: Option<&RoomView>,
     view: &ViewContext,
 ) {
     let Ok(count) = u16::try_from(object.trail.len()) else {
@@ -601,7 +745,7 @@ fn add_trail(
         } else {
             edge
         };
-        let [x, y, z] = object_world_position(*point);
+        let [x, y, z] = object_position(*point, room);
         let arrival = trail_jump_at(object, index);
         let departure = trail_jump_at(object, index.saturating_add(1));
         if arrival || departure {
@@ -618,14 +762,14 @@ fn add_trail(
             x,
             z,
             mark * 0.7,
-            FLOOR_Y,
+            floor_of(room),
             faded.lerp(view.stage, 1.0 - params::FLOOR_TRAIL_WEIGHT),
             view,
         );
         if arrival && let Some(previous) = index.checked_sub(1) {
             jump_arrow(
                 mesh,
-                object_world_position(object.trail[previous]),
+                object_position(object.trail[previous], room),
                 [x, y, z],
                 view,
             );
@@ -881,8 +1025,8 @@ mod tests {
     fn assert_number_contrasts_with_its_faces(object: SceneObject<'_>, view: &ViewContext) {
         let mut labelled = MeshBuilder::default();
         let mut plain = MeshBuilder::default();
-        add_object(&mut labelled, &object, true, false, view);
-        add_object(&mut plain, &object, false, false, view);
+        add_object(&mut labelled, &object, true, false, None, view);
+        add_object(&mut plain, &object, false, false, None, view);
         // Labels precede the drop line. Counting the plain object's vertices
         // also handles axis-aligned views where that line has no screen extent.
         let labels = &labelled.line[..labelled.line.len() - plain.line.len()];
@@ -897,6 +1041,7 @@ mod tests {
                 },
                 true,
                 false,
+                None,
                 view,
             );
             assert_eq!(labelled.line.len(), present.line.len());
@@ -1003,6 +1148,115 @@ mod tests {
             objects,
             ..SceneInput::default()
         })
+    }
+
+    fn reference_room() -> RoomView {
+        let room = crate::room_package::RoomGeometry::parse(include_str!(
+            "../../tests/fixtures/room-reference-7x6x3.2-corrected-v1.json"
+        ))
+        .unwrap();
+        RoomView::new(&room, 1.5)
+    }
+
+    fn in_room<'a>(room: &'a RoomView, objects: &'a [SceneObject<'a>]) -> MeshBuilder {
+        with_input(SceneInput {
+            objects,
+            room: Some(room),
+            ..SceneInput::default()
+        })
+    }
+
+    #[test]
+    fn the_room_view_gives_the_lfe_no_place() {
+        let room = reference_room();
+        let without = in_room(&room, &[]);
+        let with = with_input(SceneInput {
+            room: Some(&room),
+            has_lfe: true,
+            lfe_count: 2,
+            show_element_numbers: true,
+            ..SceneInput::default()
+        });
+        for (a, b) in [
+            (&without.solid, &with.solid),
+            (&without.line, &with.line),
+            (&without.decal, &with.decal),
+        ] {
+            assert_eq!(a.len(), b.len());
+            assert!(
+                a.iter()
+                    .zip(b.iter())
+                    .all(
+                        |(a, b)| a.position.map(f32::to_bits) == b.position.map(f32::to_bits)
+                            && a.colour == b.colour
+                    )
+            );
+        }
+    }
+
+    #[test]
+    fn in_the_room_an_object_is_drawn_where_the_room_makes_it_sound() {
+        let room = reference_room();
+        // Rear right and below the ears: at 1.5 m per unit it would be under
+        // the floor, so the room pulls it in along its own ray.
+        let object = sounding([0.5, -1.0, 0.5]);
+        let expected = room.place(object.position);
+        assert!(expected[1] > room.floor_y());
+        assert!((expected[1] - object_position(object.position, None)[1]).abs() > 0.05);
+        let empty = in_room(&room, &[]);
+        let one = in_room(&room, &[object]);
+        let cube = &one.solid[empty.solid.len()..];
+        assert_eq!(cube.len(), 36, "one cube and nothing else");
+        for (axis, centre) in expected.iter().enumerate() {
+            let low = cube
+                .iter()
+                .map(|vertex| vertex.position[axis])
+                .fold(f32::INFINITY, f32::min);
+            let high = cube
+                .iter()
+                .map(|vertex| vertex.position[axis])
+                .fold(f32::NEG_INFINITY, f32::max);
+            assert!((f32::midpoint(low, high) - centre).abs() < 1e-5);
+        }
+        // Its footprint lies on the room's floor, not the box's.
+        for vertex in &one.decal[empty.decal.len()..] {
+            assert!((vertex.position[1] - room.floor_y()).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn the_room_view_cuts_away_the_surfaces_facing_the_camera() {
+        let room = reference_room();
+        let mesh = in_room(&room, &[]);
+        let k = params::ROOM_WIDTH / 7.0;
+        // The default camera looks over the listener's left shoulder: the back
+        // wall (3.4 m behind, +Z) and the left wall (3 m left, -X) are edges
+        // only, while the front wall and its panels are drawn.
+        // The far surfaces meet the near ones at the room's edges, so only a
+        // surface's interior says whether it was drawn.
+        let between = |value: f32, low: f32, high: f32| low * k < value && value < high * k;
+        let on_back_wall = |vertex: &&Vertex| {
+            let [x, y, z] = vertex.position;
+            z > 3.3 * k && between(x, -2.9, 2.9) && between(y, -1.15, 1.95)
+        };
+        let on_left_wall = |vertex: &&Vertex| {
+            let [x, y, z] = vertex.position;
+            x < -2.9 * k && between(z, -3.5, 3.3) && between(y, -1.15, 1.95)
+        };
+        // The ceiling faces the camera too.
+        let on_ceiling = |vertex: &&Vertex| {
+            let [x, y, z] = vertex.position;
+            y > 1.95 * k && between(x, -2.9, 2.9) && between(z, -3.5, 3.3)
+        };
+        assert_eq!(mesh.solid.iter().filter(on_back_wall).count(), 0);
+        assert_eq!(mesh.solid.iter().filter(on_left_wall).count(), 0);
+        assert_eq!(mesh.solid.iter().filter(on_ceiling).count(), 0);
+        // The front wall, which the listener faces, is drawn with its panels.
+        let on_front_wall = |vertex: &&Vertex| {
+            let [x, y, z] = vertex.position;
+            z < -3.5 * k && between(x, -2.9, 2.9) && between(y, -1.15, 1.95)
+        };
+        assert!(mesh.solid.iter().filter(on_front_wall).count() > 10 * 6);
     }
 
     fn with_input(input: SceneInput<'_>) -> MeshBuilder {

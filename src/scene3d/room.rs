@@ -20,14 +20,6 @@
 //! ordinary room is drawn at, so the camera's framing carries over. Actors keep
 //! their own world sizes, as [`super::params`] requires: the room is a ruler.
 
-#![cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "the scene draws the room view once it is wired into scene::build; until then only the tests call it"
-    )
-)]
-
 use crate::room_package::{RoomGeometry, Surface};
 
 use super::figure::Stance;
@@ -38,6 +30,9 @@ use super::params;
 const PANEL_PITCH_METRES: f64 = 0.6;
 /// Panels stop this far short of the floor and the ceiling.
 const PANEL_INSET_METRES: f64 = 0.1;
+/// How far a panel stands off its surface: a common absorber's thickness, and
+/// enough that the wall behind it never shows through.
+const PANEL_DEPTH_METRES: f64 = 0.05;
 /// The floor ruler's finest step, counted out from the listener.
 const GRID_STEP_METRES: f64 = 0.5;
 
@@ -72,6 +67,13 @@ pub struct BoxSegment {
     pub from: [f32; 3],
     pub to: [f32; 3],
     pub reachable: bool,
+}
+
+/// One module of treatment: an axis-aligned box in world coordinates.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Panel {
+    pub centre: [f32; 3],
+    pub size: [f32; 3],
 }
 
 /// A room, at one scene unit, ready to draw.
@@ -198,11 +200,11 @@ impl RoomView {
 
     /// The surface's absorption averaged over its bands: how much of each
     /// module its treatment fills.
-    pub fn coverage(&self, surface: Surface) -> f64 {
-        self.coverage[surface as usize]
+    pub fn coverage(&self, surface: Surface) -> f32 {
+        narrow(self.coverage[surface as usize])
     }
 
-    /// The treatment on a surface, as quads in world coordinates.
+    /// The treatment on a surface, as boxes standing off it into the room.
     ///
     /// It reads the surface's absorption and nothing else. Walls carry vertical
     /// panels at a fixed pitch, each as wide as the absorbed share of its
@@ -211,25 +213,33 @@ impl RoomView {
     /// carries square tiles the same way. The floor carries none: it is the
     /// ruler, and its absorption is for its tone to show. There are no doors,
     /// windows, diffusers or traps, because the model has none.
-    pub fn panels(&self, surface: Surface) -> Vec<[[f32; 3]; 4]> {
-        let fill = self.coverage(surface).clamp(0.0, 1.0);
+    pub fn panels(&self, surface: Surface) -> Vec<Panel> {
+        let fill = self.coverage[surface as usize].clamp(0.0, 1.0);
         if surface == Surface::Floor || fill <= 0.0 {
             return Vec::new();
         }
         let axis = surface.axis();
-        let at = if surface.at_far_end() {
-            self.dimensions[axis]
+        let depth = if surface.at_far_end() {
+            (
+                self.dimensions[axis] - PANEL_DEPTH_METRES,
+                self.dimensions[axis],
+            )
         } else {
-            0.0
+            (0.0, PANEL_DEPTH_METRES)
         };
-        let quad = |(u, u0, u1): (usize, f64, f64), (v, v0, v1): (usize, f64, f64)| {
-            [(u0, v0), (u1, v0), (u1, v1), (u0, v1)].map(|(a, b)| {
-                let mut point = [0.0; 3];
-                point[axis] = at;
-                point[u] = a;
-                point[v] = b;
-                self.world(point)
-            })
+        let panel = |spans: [(usize, f64, f64); 2]| {
+            let mut low = [0.0; 3];
+            let mut high = [0.0; 3];
+            (low[axis], high[axis]) = depth;
+            for (along, from, to) in spans {
+                (low[along], high[along]) = (from, to);
+            }
+            let centre: [f64; 3] = std::array::from_fn(|i| f64::midpoint(low[i], high[i]));
+            let size = world_direction(std::array::from_fn(|i| high[i] - low[i]));
+            Panel {
+                centre: self.world(centre),
+                size: size.map(|value| narrow(value.abs() * self.scale)),
+            }
         };
         if surface == Surface::Ceiling {
             let along_x = modules(self.dimensions[0], fill);
@@ -239,7 +249,7 @@ impl RoomView {
                 .flat_map(|&(x0, x1)| {
                     along_y
                         .iter()
-                        .map(move |&(y0, y1)| quad((0, x0, x1), (1, y0, y1)))
+                        .map(move |&(y0, y1)| panel([(0, x0, x1), (1, y0, y1)]))
                 })
                 .collect()
         } else {
@@ -249,13 +259,42 @@ impl RoomView {
             modules(self.dimensions[run], fill)
                 .into_iter()
                 .map(|(a, b)| {
-                    quad(
+                    panel([
                         (run, a, b),
                         (2, PANEL_INSET_METRES, height - PANEL_INSET_METRES),
-                    )
+                    ])
                 })
                 .collect()
         }
+    }
+
+    /// The room's inward normal at a surface, in world axes.
+    pub fn inward(surface: Surface) -> [f32; 3] {
+        world_direction(inward_normal(surface)).map(narrow)
+    }
+
+    /// The room's twelve edges, in world coordinates.
+    pub fn edges(&self) -> [([f32; 3], [f32; 3]); 12] {
+        let corner = |index: usize| -> [f32; 3] {
+            self.world(std::array::from_fn(|axis| {
+                if index >> axis & 1 == 1 {
+                    self.dimensions[axis]
+                } else {
+                    0.0
+                }
+            }))
+        };
+        let mut edges = [([0.0; 3], [0.0; 3]); 12];
+        let mut next = 0;
+        for start in 0..8_usize {
+            for axis in 0..3 {
+                if start >> axis & 1 == 0 {
+                    edges[next] = (corner(start), corner(start | 1 << axis));
+                    next += 1;
+                }
+            }
+        }
+        edges
     }
 
     /// The floor ruler, counted out from the listener so that distances read
@@ -525,11 +564,15 @@ mod tests {
     #[test]
     fn treatment_fills_its_modules_by_the_surface_s_absorption() {
         let view = view(1.5);
-        // The front wall runs the 6 m width: ten 0.6 m modules, each 94 % full.
+        // The front wall runs the 6 m width: ten 0.6 m modules, each 94 % full,
+        // standing 5 cm proud of the wall and stopping 0.1 m short of floor and
+        // ceiling.
         let panels = view.panels(Surface::Front);
         assert_eq!(panels.len(), 10);
-        let width = (panels[0][1][0] - panels[0][0][0]).abs();
-        assert!((width - 0.6 * 0.94 * k()).abs() < 1e-5);
+        assert!((panels[0].size[0] - 0.6 * 0.94 * k()).abs() < 1e-5);
+        assert!((panels[0].size[1] - 3.0 * k()).abs() < 1e-5);
+        assert!((panels[0].size[2] - 0.05 * k()).abs() < 1e-6);
+        assert!((panels[0].centre[2] + (3.6 - 0.025) * k()).abs() < 1e-5);
         // The side walls run the 7 m length: eleven modules, centred.
         assert_eq!(view.panels(Surface::Right).len(), 11);
         // The ceiling is tiled both ways; the floor is the ruler.
@@ -542,8 +585,34 @@ mod tests {
         let bare = RoomView::new(&bare, 1.5);
         assert!(bare.panels(Surface::Front).is_empty());
         let strip = bare.panels(Surface::Right)[0];
-        let width = (strip[1][2] - strip[0][2]).abs();
-        assert!((width - 0.6 * 0.2 * k()).abs() < 1e-5);
+        assert!((strip.size[2] - 0.6 * 0.2 * k()).abs() < 1e-5);
+    }
+
+    #[test]
+    fn the_edges_outline_the_room() {
+        let view = view(1.5);
+        let edges = view.edges();
+        let corners = edges
+            .iter()
+            .flat_map(|(from, to)| [*from, *to])
+            .collect::<Vec<_>>();
+        // Every edge is one of the room's three lengths, axis-aligned.
+        for (from, to) in edges {
+            let length = norm(std::array::from_fn(|axis| f64::from(to[axis] - from[axis])));
+            assert!(
+                [7.0, 6.0, 3.2]
+                    .into_iter()
+                    .any(|side| (length - side * f64::from(k())).abs() < 1e-5),
+                "{length}"
+            );
+        }
+        let lowest = corners
+            .iter()
+            .map(|point| point[1])
+            .fold(f32::INFINITY, f32::min);
+        assert!((lowest - view.floor_y()).abs() < 1e-6);
+        assert!(close(RoomView::inward(Surface::Front), [0.0, 0.0, 1.0]));
+        assert!(close(RoomView::inward(Surface::Floor), [0.0, 1.0, 0.0]));
     }
 
     #[test]

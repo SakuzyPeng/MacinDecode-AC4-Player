@@ -100,6 +100,8 @@ pub struct PlayerApp {
     hptf_picker: Option<Pin<Box<dyn Future<Output = Option<rfd::FileHandle>>>>>,
     room_picker: Option<room_settings::RoomPicker>,
     room_geometry: room_settings::RoomGeometrySlot,
+    /// Draw the room renderer's room when it forms the headphone feed.
+    room_view_enabled: bool,
     /// Screen edits not yet applied; `None` when the page shows the settings.
     room_screen_draft: Option<crate::backend::ScreenSettings>,
     /// The drawn profile, read once per path and design rate.
@@ -942,6 +944,7 @@ impl PlayerApp {
             room_picker: None,
             room_screen_draft: None,
             room_geometry: None,
+            room_view_enabled: true,
             hptf_drawing: None,
             hptf_ghost: None,
             hptf_saving: None,
@@ -2805,6 +2808,7 @@ impl PlayerApp {
         }
         let nameplates = &objects[..nameplate_count];
         let objects = &objects[..object_count];
+        let room_view = self.room_view();
         frame.show(ui, |ui| {
             ui.set_min_height(content_height);
             // The stage claims drag and scroll itself so the camera never fights
@@ -2838,6 +2842,7 @@ impl PlayerApp {
                         lfe_count: decoder.metrics().map_or(0, DecodeMetrics::lfe_count),
                         figure: self.figure,
                         skin: self.skins.active.as_ref(),
+                        room: room_view.as_ref(),
                     },
                 );
                 let matrix = self.camera.view_projection(rect.width() / rect.height());
@@ -2848,7 +2853,7 @@ impl PlayerApp {
             }
 
             if self.object_loudness_visible {
-                self.draw_object_nameplates(ui, rect, nameplates);
+                self.draw_object_nameplates(ui, rect, nameplates, room_view.as_ref());
             }
             self.draw_camera_presets(ui, rect);
             self.draw_camera_readout(ui, rect, hidden_objects);
@@ -2870,6 +2875,7 @@ impl PlayerApp {
         ui: &egui::Ui,
         stage: egui::Rect,
         objects: &[scene3d::scene::SceneObject<'_>],
+        room: Option<&scene3d::room::RoomView>,
     ) {
         let font = egui::FontId::monospace(scene3d::params::NAMEPLATE_TEXT_POINTS);
         let pad = scene3d::params::NAMEPLATE_PAD_POINTS;
@@ -2891,17 +2897,14 @@ impl PlayerApp {
         // Without a depth buffer this is the only ordering available, and it is
         // at least the ordering the objects themselves have.
         let direction = self.camera.direction();
-        let world_position = |object: &scene3d::scene::SceneObject<'_>| {
-            if let Some((index, count)) = object.lfe_slot {
-                scene3d::scene::lfe_destination_position(index, count)
-            } else {
-                scene3d::scene::object_world_position(object.position)
-            }
-        };
-        let mut order: Vec<usize> = (0..objects.len()).collect();
+        let world_position =
+            |object: &scene3d::scene::SceneObject<'_>| nameplate_anchor(object, room);
+        let mut order: Vec<usize> = (0..objects.len())
+            .filter(|&index| world_position(&objects[index]).is_some())
+            .collect();
         order.sort_by(|left, right| {
             let depth = |index: usize| {
-                let position = world_position(&objects[index]);
+                let position = world_position(&objects[index]).unwrap_or_default();
                 position[0] * direction[0] + position[1] * direction[1] + position[2] * direction[2]
             };
             depth(*left).total_cmp(&depth(*right))
@@ -2913,7 +2916,9 @@ impl PlayerApp {
             if !object.active {
                 continue;
             }
-            let [x, y, z] = world_position(object);
+            let Some([x, y, z]) = world_position(object) else {
+                continue;
+            };
             let height = if object.lfe_slot.is_some() {
                 scene3d::params::LFE_SLAB_HEIGHT
             } else {
@@ -4328,6 +4333,20 @@ fn draw_catalog_files(
 
 /// The name a profile goes by on screen. The folder is one line above it and the
 /// full path is rarely the useful half.
+/// Where a nameplate's object is, by the same placement the mesh uses, so a
+/// plate cannot float over a spot its cube is not at. The room view has no LFE
+/// slot to label.
+fn nameplate_anchor(
+    object: &scene3d::scene::SceneObject<'_>,
+    room: Option<&scene3d::room::RoomView>,
+) -> Option<[f32; 3]> {
+    match object.lfe_slot {
+        Some(_) if room.is_some() => None,
+        Some((index, count)) => Some(scene3d::scene::lfe_destination_position(index, count)),
+        None => Some(scene3d::scene::object_position(object.position, room)),
+    }
+}
+
 fn profile_name(path: &str) -> String {
     Path::new(path)
         .file_name()

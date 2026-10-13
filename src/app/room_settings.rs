@@ -18,6 +18,7 @@ use crate::backend::{
     ScreenCoordinates, ScreenGeometry,
 };
 use crate::room_package::{REVERBERATION_TOLERANCE, RoomGeometry, Surface};
+use crate::scene3d::room::RoomView;
 
 /// A room manifest read once for the page, keyed by its path.
 pub(super) type RoomGeometrySlot = Option<(String, Result<RoomGeometry, String>)>;
@@ -258,6 +259,17 @@ impl PlayerApp {
         self.room_screen_draft = (draft != settings.room_screen).then_some(draft);
     }
 
+    /// The room to draw the scene in: the room renderer's, when it is the one
+    /// selected to form the headphone feed, its package reads, and the room
+    /// view is switched on.
+    pub(super) fn room_view(&mut self) -> Option<RoomView> {
+        room_view_of(
+            self.output.settings(),
+            self.room_view_enabled,
+            &mut self.room_geometry,
+        )
+    }
+
     /// What the chosen room is, held against the listening-room geometry
     /// recommendations, and how the current scene unit sits inside it.
     pub(super) fn draw_room_geometry(&mut self, ui: &mut egui::Ui, settings: &OutputSettings) {
@@ -298,7 +310,7 @@ impl PlayerApp {
     }
 }
 
-fn room_geometry<'a>(
+pub(super) fn room_geometry<'a>(
     slot: &'a mut RoomGeometrySlot,
     path: &str,
 ) -> &'a Result<RoomGeometry, String> {
@@ -308,6 +320,21 @@ fn room_geometry<'a>(
         *slot = Some((path.to_owned(), RoomGeometry::read(Path::new(path))));
     }
     &slot.as_ref().expect("filled above").1
+}
+
+/// The decision behind [`PlayerApp::room_view`], on its inputs alone.
+pub(super) fn room_view_of(
+    settings: &OutputSettings,
+    enabled: bool,
+    slot: &mut RoomGeometrySlot,
+) -> Option<RoomView> {
+    if !enabled || !settings.room_selected() || settings.room.is_empty() {
+        return None;
+    }
+    room_geometry(slot, &settings.room)
+        .as_ref()
+        .ok()
+        .map(|room| RoomView::new(room, settings.room_metres_per_unit))
 }
 
 fn mark(ui: &mut egui::Ui, met: bool) {
@@ -642,7 +669,48 @@ fn package_label(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::package_label;
+    use super::{RoomGeometrySlot, package_label, room_view_of};
+    use crate::backend::{BinauralRenderer, OutputSettings, SpatialBackendKind};
+
+    #[test]
+    fn the_room_view_needs_the_room_renderer_a_readable_package_and_the_switch() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("room.json");
+        std::fs::write(
+            &manifest,
+            include_str!("../../tests/fixtures/room-reference-7x6x3.2-corrected-v1.json"),
+        )
+        .unwrap();
+        let room = OutputSettings {
+            mode: SpatialBackendKind::SafBinaural,
+            binaural_renderer: BinauralRenderer::Room,
+            room: manifest.to_str().unwrap().into(),
+            room_metres_per_unit: 2.1,
+            ..OutputSettings::default()
+        };
+        let mut slot: RoomGeometrySlot = None;
+        let view = room_view_of(&room, true, &mut slot).expect("a room to draw");
+        // Built at the settings' own scene unit: overhead meets the ceiling.
+        let k = crate::scene3d::params::ROOM_WIDTH / 7.0;
+        assert!((view.place([0.0, 1.0, 0.0])[1] - 1.85 * k).abs() < 1e-5);
+
+        assert!(room_view_of(&room, false, &mut slot).is_none());
+        let saf = OutputSettings {
+            binaural_renderer: BinauralRenderer::SafHrtf,
+            ..room.clone()
+        };
+        assert!(room_view_of(&saf, true, &mut slot).is_none());
+        let speakers = OutputSettings {
+            mode: SpatialBackendKind::SystemSpatial,
+            ..room.clone()
+        };
+        assert!(room_view_of(&speakers, true, &mut slot).is_none());
+        let missing = OutputSettings {
+            room: dir.path().join("gone.json").to_str().unwrap().into(),
+            ..room
+        };
+        assert!(room_view_of(&missing, true, &mut slot).is_none());
+    }
 
     #[test]
     fn a_package_is_named_by_its_folder_and_manifest() {

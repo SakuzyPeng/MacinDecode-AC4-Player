@@ -81,6 +81,8 @@ pub struct AppPreferences {
     pub object_loudness: bool,
     pub fade_silent_objects: bool,
     pub meter_bank: bool,
+    /// Draw the room renderer's room when it forms the headphone feed.
+    pub room_view: bool,
     pub meter_readout: MeterReadout,
     pub skins: crate::skin_library::Preferences,
     pub manual_head: [f32; 3],
@@ -100,6 +102,7 @@ impl Default for AppPreferences {
             // The one object visual that is off by default: it is the only one
             // that takes width away from the scene.
             meter_bank: false,
+            room_view: true,
             meter_readout: MeterReadout::Fast,
             skins: crate::skin_library::Preferences::default(),
             manual_head: [0.0; 3],

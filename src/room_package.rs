@@ -102,25 +102,11 @@ impl Surface {
     }
 
     /// The room axis this surface is perpendicular to.
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "read by the room view, which the scene does not draw yet"
-        )
-    )]
     pub const fn axis(self) -> usize {
         self as usize / 2
     }
 
     /// Whether this surface lies at the far end of its axis rather than at zero.
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "read by the room view, which the scene does not draw yet"
-        )
-    )]
     pub const fn at_far_end(self) -> bool {
         self as usize % 2 == 1
     }

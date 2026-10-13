@@ -1104,7 +1104,9 @@ fn the_object_visual_switches_survive_a_restart() {
     assert!(app.object_loudness_visible);
     assert!(app.fade_silent_objects);
     assert!(!app.meter_bank_open);
+    assert!(app.room_view_enabled);
     assert_eq!(app.meter_readout, crate::app::MeterReadout::Fast);
+    app.room_view_enabled = false;
     app.object_numbers_visible = false;
     app.object_loudness_visible = false;
     app.fade_silent_objects = false;
@@ -1120,11 +1122,45 @@ fn the_object_visual_switches_survive_a_restart() {
     assert!(!restored.object_loudness_visible);
     assert!(!restored.fade_silent_objects);
     assert!(restored.meter_bank_open);
+    assert!(!restored.room_view_enabled);
     assert_eq!(
         restored.meter_readout,
         crate::app::MeterReadout::Momentary,
         "the bank's unit is a preference, not a per-session mode"
     );
+}
+
+#[test]
+fn a_nameplate_follows_its_cube_into_the_room_and_the_lfe_has_none_there() {
+    use crate::scene3d::{room::RoomView, scene::SceneObject};
+
+    let room = crate::room_package::RoomGeometry::parse(include_str!(
+        "../../../tests/fixtures/room-reference-7x6x3.2-corrected-v1.json"
+    ))
+    .unwrap();
+    let room = RoomView::new(&room, 1.5);
+    let object = SceneObject {
+        position: [0.5, -1.0, 0.5],
+        active: true,
+        ..SceneObject::default()
+    };
+    assert_eq!(
+        crate::app::nameplate_anchor(&object, Some(&room)),
+        Some(room.place(object.position))
+    );
+    assert_eq!(
+        crate::app::nameplate_anchor(&object, None),
+        Some(crate::scene3d::scene::object_world_position(
+            object.position
+        ))
+    );
+    let lfe = SceneObject {
+        lfe_slot: Some((0, 1)),
+        active: true,
+        ..SceneObject::default()
+    };
+    assert_eq!(crate::app::nameplate_anchor(&lfe, Some(&room)), None);
+    assert!(crate::app::nameplate_anchor(&lfe, None).is_some());
 }
 
 #[test]

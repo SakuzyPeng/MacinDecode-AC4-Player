@@ -341,6 +341,18 @@ pub const LFE_SLAB_HEIGHT: f32 = 0.22;
 /// buried.
 pub const LFE_WALL_INSET: f32 = 0.50;
 
+/// How far below the room view's floor its fill is drawn, in world units. The
+/// ruler and the footprints are decals on the floor plane itself, so the fill
+/// may never tie with them.
+pub const ROOM_VIEW_FLOOR_SINK: f32 = 0.001;
+/// How far a fully absorptive floor's fill leans from `STAGE` towards `MUTED`;
+/// a reflective floor stays the stage itself.
+pub const ROOM_VIEW_FLOOR_TONE: f32 = 0.10;
+/// Dash and gap of the room view's unit box, in world units: broken, so it can
+/// never be read as one of the room's own edges.
+pub const ROOM_VIEW_DASH: f32 = 0.035;
+pub const ROOM_VIEW_DASH_GAP: f32 = 0.025;
+
 /// Default orthographic height, framing the room with a little air around it.
 pub const DEFAULT_ORTHO_HEIGHT: f32 = 2.7;
 /// Zoomed all the way in: a single object fills a good part of the viewport.

@@ -37,13 +37,6 @@ pub enum PartTone {
     Skin,
     Cloth,
     /// The seat under a seated figure: furniture, not the listener.
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "the room view draws the seat once it is wired into scene::build"
-        )
-    )]
     Seat,
     Hat,
     Eye,
@@ -99,13 +92,6 @@ pub enum Pose {
     /// Minecraft also rolls each leg by 0.0785 rad; on a leg that already
     /// points forward that turns it about its own length, by 4.5°, and is left
     /// out.
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "the room view seats the listener once it is wired into scene::build"
-        )
-    )]
     Seated,
 }
 
@@ -217,13 +203,6 @@ impl Stance {
     }
 
     /// Seated, with the head's centre — the ears — at the origin.
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "the room view seats the listener once it is wired into scene::build"
-        )
-    )]
     pub fn seated(unit: f32) -> Self {
         Self {
             pose: Pose::Seated,
@@ -249,13 +228,6 @@ impl Stance {
     /// and it stops below the shoulders so that from the default camera, which
     /// looks over the listener's left shoulder, it covers only the torso. It
     /// is not in the room model and has no acoustic effect.
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "the room view draws the seat once it is wired into scene::build"
-        )
-    )]
     pub fn seat(self, floor_y: f32) -> [Part; SEAT_PART_COUNT] {
         const HIP: f32 = -12.0;
         const THICKNESS: f32 = 1.5;
@@ -327,12 +299,6 @@ const fn cue_depth(edge: f32) -> f32 {
 }
 
 impl Figure {
-    /// Resolve the standing pose into world-space boxes on `floor_y`.
-    #[must_use]
-    pub fn parts(self, floor_y: f32) -> [Part; PART_COUNT] {
-        self.parts_in(Stance::standing(floor_y))
-    }
-
     /// Resolve the figure into world-space boxes in `stance`.
     #[must_use]
     pub fn parts_in(self, stance: Stance) -> [Part; PART_COUNT] {
@@ -476,7 +442,7 @@ mod tests {
     }
 
     fn parts() -> [Part; PART_COUNT] {
-        Figure::default().parts(FLOOR)
+        Figure::default().parts_in(Stance::standing(FLOOR))
     }
 
     #[test]
@@ -591,7 +557,7 @@ mod tests {
             head_pitch: 0.0,
             head_roll: 0.0,
         }
-        .parts(FLOOR);
+        .parts_in(Stance::standing(FLOOR));
         let turned_wedge = turned[PART_COUNT - 1];
         assert!(turned_wedge.centre[0] < 0.0 && turned_wedge.centre[2].abs() < 1e-6);
     }
@@ -604,7 +570,7 @@ mod tests {
             head_pitch: 0.0,
             head_roll: 0.0,
         }
-        .parts(FLOOR);
+        .parts_in(Stance::standing(FLOOR));
 
         for (before, after) in still[..5].iter().zip(&turned[..5]) {
             assert_eq!(before, after, "body moved: {before:?}");
@@ -651,19 +617,19 @@ mod tests {
 
     #[test]
     fn head_pitch_moves_the_complete_head_assembly() {
-        let level = Figure::default().parts(FLOOR);
+        let level = Figure::default().parts_in(Stance::standing(FLOOR));
         let up = Figure {
             head_yaw: 0.0,
             head_pitch: 40.0,
             head_roll: 0.0,
         }
-        .parts(FLOOR);
+        .parts_in(Stance::standing(FLOOR));
         let down = Figure {
             head_yaw: 0.0,
             head_pitch: -40.0,
             head_roll: 0.0,
         }
-        .parts(FLOOR);
+        .parts_in(Stance::standing(FLOOR));
 
         let wedge_y = [
             down[PART_COUNT - 1].centre[1],
@@ -706,7 +672,7 @@ mod tests {
                 head_roll: 0.0,
             },
         ] {
-            let parts = pose.parts(FLOOR);
+            let parts = pose.parts_in(Stance::standing(FLOOR));
             let hat = parts
                 .iter()
                 .find(|part| part.tone == PartTone::Hat)
