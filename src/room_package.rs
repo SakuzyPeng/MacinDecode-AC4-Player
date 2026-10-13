@@ -62,6 +62,68 @@ struct Manifest {
     reference_distance: f64,
     minimum_distance: f64,
     boundary_clearance: f64,
+    absorption: [[f64; BANDS]; 6],
+}
+
+/// Frequency bands the room model's absorption is given in.
+pub const BANDS: usize = 8;
+
+/// The room's six surfaces, in the order the manifest lists their absorption:
+/// axis by axis (front–back, left–right, up), the wall at zero first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Surface {
+    Back,
+    Front,
+    Right,
+    Left,
+    Floor,
+    Ceiling,
+}
+
+impl Surface {
+    pub const ALL: [Self; 6] = [
+        Self::Back,
+        Self::Front,
+        Self::Right,
+        Self::Left,
+        Self::Floor,
+        Self::Ceiling,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Back => "back",
+            Self::Front => "front",
+            Self::Right => "right",
+            Self::Left => "left",
+            Self::Floor => "floor",
+            Self::Ceiling => "ceiling",
+        }
+    }
+
+    /// The room axis this surface is perpendicular to.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "read by the room view, which the scene does not draw yet"
+        )
+    )]
+    pub const fn axis(self) -> usize {
+        self as usize / 2
+    }
+
+    /// Whether this surface lies at the far end of its axis rather than at zero.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "read by the room view, which the scene does not draw yet"
+        )
+    )]
+    pub const fn at_far_end(self) -> bool {
+        self as usize % 2 == 1
+    }
 }
 
 /// The parts of a room package that describe the room rather than its filters.
@@ -80,6 +142,10 @@ pub struct RoomGeometry {
     pub minimum_distance: f64,
     /// Sources are kept at least this far inside every wall.
     pub boundary_clearance: f64,
+    /// Each surface's share of early-reflection energy absorbed, per band, in
+    /// [`Surface::ALL`] order. A parameter of the hybrid room model, not a
+    /// building material.
+    pub absorption: [[f64; BANDS]; 6],
     /// Lower-case hex SHA-256 of the manifest's bytes.
     pub manifest_sha256: String,
 }
@@ -142,6 +208,14 @@ impl RoomGeometry {
         {
             return Err("The room's distances must be positive".into());
         }
+        if manifest
+            .absorption
+            .iter()
+            .flatten()
+            .any(|value| !(0.0..=1.0).contains(value))
+        {
+            return Err("The room's absorption must lie between 0 and 1".into());
+        }
         if !finite(&manifest.listener)
             || manifest
                 .listener
@@ -162,6 +236,7 @@ impl RoomGeometry {
             reference_distance: manifest.reference_distance,
             minimum_distance: manifest.minimum_distance,
             boundary_clearance: manifest.boundary_clearance,
+            absorption: manifest.absorption,
             manifest_sha256: format!("{:x}", Sha256::digest(text.as_bytes())),
         })
     }
@@ -172,6 +247,21 @@ impl RoomGeometry {
             .iter()
             .find(|(sha256, _)| *sha256 == self.manifest_sha256)
             .map(|(_, id)| *id)
+    }
+
+    /// A surface's absorption averaged over the bands.
+    #[allow(clippy::cast_precision_loss, reason = "the band count is eight")]
+    pub fn mean_absorption(&self, surface: Surface) -> f64 {
+        self.absorption[surface as usize].iter().sum::<f64>() / BANDS as f64
+    }
+
+    /// Whether every surface absorbs the same in every band.
+    pub fn uniform_absorption(&self) -> bool {
+        let first = self.absorption[0][0];
+        self.absorption
+            .iter()
+            .flatten()
+            .all(|value| value.to_bits() == first.to_bits())
     }
 
     pub fn floor_area(&self) -> f64 {
@@ -285,6 +375,12 @@ mod tests {
         "dimensions": [7.0, 6.0, 3.2], "listener": [3.4, 3.0, 1.2],
         "speed_of_sound": 344.02, "reference_distance": 2.1,
         "minimum_distance": 0.25, "boundary_clearance": 0.15,
+        "absorption": [[0.94, 0.94, 0.94, 0.94, 0.94, 0.94, 0.94, 0.94],
+                       [0.94, 0.94, 0.94, 0.94, 0.94, 0.94, 0.94, 0.94],
+                       [0.94, 0.94, 0.94, 0.94, 0.94, 0.94, 0.94, 0.94],
+                       [0.94, 0.94, 0.94, 0.94, 0.94, 0.94, 0.94, 0.94],
+                       [0.94, 0.94, 0.94, 0.94, 0.94, 0.94, 0.94, 0.94],
+                       [0.94, 0.94, 0.94, 0.94, 0.94, 0.94, 0.94, 0.94]],
         "assets": {}
     }"#;
 
@@ -328,6 +424,30 @@ mod tests {
         assert_ne!(edited.manifest_sha256, room.manifest_sha256);
         // Nor does a room that merely shares the id.
         assert_eq!(RoomGeometry::parse(REFERENCE).unwrap().known_preset(), None);
+    }
+
+    #[test]
+    fn absorption_is_read_per_surface_in_manifest_order() {
+        let room = RoomGeometry::parse(REFERENCE).unwrap();
+        assert!(room.uniform_absorption());
+        assert!(close(room.mean_absorption(Surface::Ceiling), 0.94));
+        // The fifth row is the floor: z at zero.
+        let mut floor = room.clone();
+        floor.absorption[4] = [0.1, 0.1, 0.1, 0.1, 0.3, 0.3, 0.3, 0.3];
+        assert!(!floor.uniform_absorption());
+        assert!(close(floor.mean_absorption(Surface::Floor), 0.2));
+        assert!(close(floor.mean_absorption(Surface::Front), 0.94));
+        assert_eq!(
+            Surface::ALL.map(|surface| (surface.axis(), surface.at_far_end())),
+            [
+                (0, false),
+                (0, true),
+                (1, false),
+                (1, true),
+                (2, false),
+                (2, true)
+            ]
+        );
     }
 
     #[test]
@@ -397,6 +517,7 @@ mod tests {
                 REFERENCE.replace("[3.4, 3.0, 1.2]", "[3.4, 6.0, 1.2]"),
                 "listening position",
             ),
+            (REFERENCE.replacen("0.94", "1.2", 1), "absorption"),
         ] {
             let error = RoomGeometry::parse(&text).unwrap_err();
             assert!(error.contains(reason), "{error}");

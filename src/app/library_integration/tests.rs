@@ -1012,7 +1012,13 @@ fn the_room_card_reads_the_chosen_manifest_and_follows_the_scene_unit() {
             "name": "Corrected reference listening room",
             "dimensions": [7.0, 6.0, 3.2], "listener": [3.4, 3.0, 1.2],
             "reference_distance": 2.1, "minimum_distance": 0.25,
-            "boundary_clearance": 0.15}"#,
+            "boundary_clearance": 0.15,
+            "absorption": [[0.94, 0.94, 0.94, 0.94, 0.94, 0.94, 0.94, 0.94],
+                           [0.94, 0.94, 0.94, 0.94, 0.94, 0.94, 0.94, 0.94],
+                           [0.94, 0.94, 0.94, 0.94, 0.94, 0.94, 0.94, 0.94],
+                           [0.94, 0.94, 0.94, 0.94, 0.94, 0.94, 0.94, 0.94],
+                           [0.94, 0.94, 0.94, 0.94, 0.94, 0.94, 0.94, 0.94],
+                           [0.94, 0.94, 0.94, 0.94, 0.94, 0.94, 0.94, 0.94]]}"#,
     )
     .unwrap();
     let mut settings = OutputSettings {
@@ -1027,6 +1033,7 @@ fn the_room_card_reads_the_chosen_manifest_and_follows_the_scene_unit() {
     assert!(has(&text, "Not a published preset"));
     assert!(has(&text, "42.0 m² · 134.4 m³"));
     assert!(has(&text, "0.276 s"));
+    assert!(has(&text, "0.94 on every surface and band"));
     assert_eq!(text.iter().filter(|line| *line == "✓").count(), 6);
     assert!(has(&text, "At 1.50 m, unit distance clears every wall"));
     assert!(has(&text, "Unit distance plays +2.9 dB"));

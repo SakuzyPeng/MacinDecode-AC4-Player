@@ -84,6 +84,23 @@ Audio settings 的内容按**播放模式**分页，页签由 `OutputPage::of` �
 未列出的包只是不被认出，不会被拒绝。测试夹具 `tests/fixtures/room-reference-7x6x3.2-corrected-v1.json`
 是上游清单的原样副本，`.gitattributes` 禁止对它做换行转换。
 
+### 3D 场景的房间视图（几何已就绪，尚未接入绘制）
+
+`scene3d/room.rs` 把清单里的房间按真实比例画进场景：房间较长的一边对齐普通场景的房间宽度，耳朵仍在
+世界原点，房间 x 前、y 左、z 上转为场景的 −Z、−X、+Y；对象与人偶保持各自的世界尺寸。
+
+- **只画实际位置。** `RoomView::place` 逐项转写上游 `mradm-dsp` 的 `room::geometry::position`：按
+  Scene unit 缩放，至少保持 `minimum_distance`，沿自身射线停在第一面墙的 `boundary_clearance` 之内。
+  headLocked 走同一规则（上游用会话创建时的房间）。Scene 要求的位置不画，免得每个对象都要分辨两个方块。
+  听者正中的声源没有方向，上游沿用上一个方向，单帧无从得知，按上游的初始方向放在正前方。
+- **LFE 不画。** 房间渲染里 LFE 走公共核，没有位置。
+- **切开的墙。** 朝向相机的面（内法线与指向眼睛的方向点积不大于零）只画棱，其余面画全。
+- **装修只读吸声系数。** 墙面按 0.6 m 间距排竖向模块，每块宽度为该面 8 个频带的平均吸声系数乘以间距；
+  天花板同样排方形面板；地面不排，作为米制标尺。没有门、窗、扩散体或低频陷阱，因为模型里没有。
+- **地面标尺从听者量起**，0.5 m 一格、1 m 一粗线，两条中轴穿过听者，裁到房间内。
+- **Scene 单位立方体**以耳朵为中心、按 Scene unit 缩放，每条棱在可达体积（房间减去 `boundary_clearance`，
+  听者在内且为凸体，所以内部的点都按要求的位置发声）处切分，可达与否分开标记；`minimum_distance` 不画。
+
 屏幕映射存于 `room_screen`（`backend/screen.rs` 的 `ScreenSettings`）：重放屏幕与自定义制作屏幕
 各自带开关，关闭时保留几何。`config_json` 生成 C ABI 1.47 `adm_create_scene_stream_with_room_ex`
 所收的 `mradm.screen-config` v1，关闭的屏幕省略，即用上游缺省（无重放屏幕＝位置不变；无制作屏幕＝

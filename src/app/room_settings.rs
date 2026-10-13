@@ -17,7 +17,7 @@ use crate::backend::{
     BinauralRenderer, OutputSettings, ROOM_METRES_PER_UNIT_DEFAULT, ROOM_METRES_PER_UNIT_RANGE,
     ScreenCoordinates, ScreenGeometry,
 };
-use crate::room_package::{REVERBERATION_TOLERANCE, RoomGeometry};
+use crate::room_package::{REVERBERATION_TOLERANCE, RoomGeometry, Surface};
 
 /// A room manifest read once for the page, keyed by its path.
 pub(super) type RoomGeometrySlot = Option<(String, Result<RoomGeometry, String>)>;
@@ -433,6 +433,20 @@ fn draw_room_facts(ui: &mut egui::Ui, room: &RoomGeometry) {
                 room.floor_area(),
                 room.volume()
             ));
+            ui.end_row();
+            ui.label("Absorption");
+            ui.label(if room.uniform_absorption() {
+                format!("{:.2} on every surface and band", room.absorption[0][0])
+            } else {
+                Surface::ALL
+                    .map(|surface| {
+                        format!("{} {:.2}", surface.label(), room.mean_absorption(surface))
+                    })
+                    .join(" · ")
+            })
+            .on_hover_text(
+                "The share of early-reflection energy each surface absorbs in the room model, averaged over its eight bands. A parameter of the hybrid model, not a building material.",
+            );
             ui.end_row();
             ui.label("Nominal Tm");
             ui.label(format!(

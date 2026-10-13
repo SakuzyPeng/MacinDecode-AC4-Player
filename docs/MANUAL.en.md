@@ -408,6 +408,9 @@ Choosing it replaces the page with three controls:
   - The room's name, size (front–back × left–right × height), listening position, floor area and
     volume, and the nominal reverberation time Tm = 0.25·(V/100 m³)^⅓ with its ±0.05 s window from
     200 Hz to 4 kHz — a target, not a measurement of the package.
+  - **Absorption** — the share of early-reflection energy each of the six surfaces absorbs,
+    averaged over its eight bands, or one number when they are all the same. A parameter of the
+    hybrid room model, not a building material.
   - The room-geometry recommendations of ITU-R BS.1116-3 and EBU Tech 3276 (Supplement 1 for
     multichannel), each marked ✓ or × with the room's own numbers beside it: a multichannel floor
     area of 30–70 m²; 1.1·w/h ≤ l/h ≤ 4.5·w/h − 4; l/h < 3 and w/h < 3; no ratio within ±5 % of an

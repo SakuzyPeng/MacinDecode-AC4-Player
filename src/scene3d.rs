@@ -21,5 +21,6 @@ pub mod figure;
 pub mod gpu;
 pub mod mesh;
 pub mod params;
+pub mod room;
 pub mod scene;
 pub mod skin;
