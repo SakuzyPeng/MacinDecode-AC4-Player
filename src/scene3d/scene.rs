@@ -9,7 +9,7 @@
 use crate::theme;
 
 use super::camera::Camera;
-use super::figure::{Figure, PartTone};
+use super::figure::{Figure, PartTone, Stance};
 use super::mesh::{ArrowSpec, Layer, MeshBuilder, Rgb, ViewContext, shade_face};
 use super::params;
 
@@ -96,7 +96,7 @@ pub fn build(
     add_room(mesh, &view);
     add_floor_grid(mesh, &view);
     if let Some(skin) = input.skin {
-        skin.draw(mesh, input.figure, FLOOR_Y, &view);
+        skin.draw(mesh, input.figure, Stance::standing(FLOOR_Y), &view);
     } else {
         add_figure(mesh, input.figure, &view);
     }
@@ -147,9 +147,16 @@ fn add_figure(mesh: &mut MeshBuilder, figure: Figure, view: &ViewContext) {
             PartTone::Hat => skin.lerp(view.ink, 0.16),
             PartTone::Eye => view.ink.lerp(Rgb::from_color32(theme::TEXT), 0.20),
             PartTone::Facing => Rgb::from_color32(theme::ACCENT),
+            PartTone::Seat => seat_colour(),
         };
         mesh.add_oriented_box(part.centre, part.size, part.axes, base, view);
     }
+}
+
+/// The listening seat: lighter than the listener, so the figure always reads on
+/// top of it, and nowhere near the accent the objects and the facing wedge use.
+fn seat_colour() -> Rgb {
+    Rgb::from_color32(theme::BORDER).lerp(Rgb::from_color32(theme::MUTED), 0.45)
 }
 
 /// The LFE slot: a cabinet sunk into the front wall, centred, on the floor.

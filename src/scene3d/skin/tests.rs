@@ -6,6 +6,7 @@
 use super::*;
 use crate::scene3d::{
     camera::Camera,
+    params,
     scene::{self, SceneInput},
 };
 
@@ -182,6 +183,45 @@ fn outer_layer_holes_and_partial_alpha_survive_head_tracking() {
         assert_eq!(vertex.colour[3], 128);
         assert!(expected.contains(&vertex.position));
     }
+}
+
+#[test]
+fn a_skin_sits_on_the_figure_s_own_limbs() {
+    use crate::scene3d::figure::{Figure, Stance};
+
+    let skin = Skin::decode(&png(&sample_image(BodyType::Steve, false))).unwrap();
+    let stance = Stance::seated(0.01);
+    let parts = Figure::default().parts_in(stance);
+    let part_of = |limb| match limb {
+        Limb::LeftLeg => parts[0],
+        Limb::RightLeg => parts[1],
+        Limb::Body => parts[2],
+        Limb::LeftArm => parts[3],
+        Limb::RightArm => parts[4],
+        Limb::Head => parts[5],
+    };
+    let mut checked = 0;
+    for patch in skin
+        .patches
+        .iter()
+        .filter(|patch| !patch.overlay && patch.limb != Limb::Head)
+    {
+        let part = part_of(patch.limb);
+        for corner in patch.corners {
+            let world = stance.place(patch.limb, corner);
+            let offset: [f32; 3] = std::array::from_fn(|axis| world[axis] - part.centre[axis]);
+            for axis in 0..3 {
+                let local = (0..3).map(|i| offset[i] * part.axes[axis][i]).sum::<f32>();
+                assert!(
+                    local.abs() <= part.size[axis] / 2.0 + 1e-5,
+                    "{:?} texel leaves its limb on axis {axis}: {local}",
+                    patch.limb
+                );
+            }
+        }
+        checked += 1;
+    }
+    assert!(checked > 100);
 }
 
 #[test]

@@ -15,6 +15,14 @@
 //! The head is a separate box on a neck pivot. That is the entire reason for
 //! choosing this model — head tracking becomes two floats, and the body does not
 //! move.
+//!
+//! **Two poses, one set of joints.** The ordinary scene's listener stands. The
+//! room view's sits, in Minecraft's own riding pose — the one anyone who has
+//! played reads as sitting — because that pose only turns whole limbs about
+//! their joints: no limb is cut, so a skin maps onto it unchanged. [`Pose`] is
+//! the one description of those joints, and both this figure and
+//! [`super::skin`] go through it, so a skin cannot sit differently from the
+//! plain figure.
 
 use super::params;
 
@@ -28,6 +36,15 @@ pub const PART_COUNT: usize = 10;
 pub enum PartTone {
     Skin,
     Cloth,
+    /// The seat under a seated figure: furniture, not the listener.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "the room view draws the seat once it is wired into scene::build"
+        )
+    )]
+    Seat,
     Hat,
     Eye,
     Facing,
@@ -68,6 +85,204 @@ impl Part {
             axes,
             tone,
         }
+    }
+}
+
+/// How the body is held. The head assembly turns about the neck the same way in
+/// both; the pose only decides where the limbs point.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Pose {
+    #[default]
+    Standing,
+    /// Minecraft's riding pose, from `HumanoidModel`: legs pitched forward by
+    /// 1.4137 rad and splayed outward by π/10, arms pitched forward by π/5.
+    /// Minecraft also rolls each leg by 0.0785 rad; on a leg that already
+    /// points forward that turns it about its own length, by 4.5°, and is left
+    /// out.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "the room view seats the listener once it is wired into scene::build"
+        )
+    )]
+    Seated,
+}
+
+/// The parts a pose can turn. The skin atlas's parts map onto the same ones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Limb {
+    Head,
+    Body,
+    RightArm,
+    LeftArm,
+    RightLeg,
+    LeftLeg,
+}
+
+/// Leg pitch of the riding pose: 1.4137167 rad, as Minecraft writes it.
+const SEATED_LEG_PITCH_DEGREES: f32 = 81.0;
+/// Outward leg splay of the riding pose: π/10.
+const SEATED_LEG_SPLAY_DEGREES: f32 = 18.0;
+/// Arm pitch of the riding pose: π/5.
+const SEATED_ARM_PITCH_DEGREES: f32 = 36.0;
+
+impl Pose {
+    /// A limb's joint, in model units from the neck, and the axes the pose
+    /// holds the limb at. The joints are Minecraft's: shoulders two units
+    /// below the neck, hips at the bottom of the torso. The figure's right is
+    /// `+X`, because it faces `-Z`.
+    pub(super) fn joint(self, limb: Limb) -> ([f32; 3], [[f32; 3]; 3]) {
+        let (pivot, pitch, splay) = match limb {
+            Limb::Head | Limb::Body => return ([0.0; 3], IDENTITY_AXES),
+            Limb::RightArm => ([5.0, -2.0, 0.0], SEATED_ARM_PITCH_DEGREES, 0.0),
+            Limb::LeftArm => ([-5.0, -2.0, 0.0], SEATED_ARM_PITCH_DEGREES, 0.0),
+            Limb::RightLeg => (
+                [2.0, -12.0, 0.0],
+                SEATED_LEG_PITCH_DEGREES,
+                -SEATED_LEG_SPLAY_DEGREES,
+            ),
+            Limb::LeftLeg => (
+                [-2.0, -12.0, 0.0],
+                SEATED_LEG_PITCH_DEGREES,
+                SEATED_LEG_SPLAY_DEGREES,
+            ),
+        };
+        match self {
+            Self::Standing => (pivot, IDENTITY_AXES),
+            Self::Seated => (pivot, limb_axes(pitch, splay)),
+        }
+    }
+
+    /// A point on `limb`, in model units from the neck, where the pose puts it.
+    ///
+    /// Standing returns the point untouched rather than rotating it by the
+    /// identity about its joint: the ordinary scene must not move by a rounding
+    /// error because the room view learned to sit.
+    pub(super) fn posed(self, limb: Limb, local: [f32; 3]) -> [f32; 3] {
+        if self == Self::Standing {
+            return local;
+        }
+        let (pivot, axes) = self.joint(limb);
+        let offset: [f32; 3] = std::array::from_fn(|axis| local[axis] - pivot[axis]);
+        let turned = orient(offset, axes);
+        std::array::from_fn(|axis| pivot[axis] + turned[axis])
+    }
+}
+
+/// A limb's axes after pitching it forward — its hanging end towards `-Z` —
+/// and then turning it about the vertical. Positive splay swings the hanging
+/// end towards `-X`, the figure's left.
+fn limb_axes(pitch_degrees: f32, splay_degrees: f32) -> [[f32; 3]; 3] {
+    let (pitch_sin, pitch_cos) = pitch_degrees.to_radians().sin_cos();
+    let (splay_sin, splay_cos) = splay_degrees.to_radians().sin_cos();
+    [
+        [splay_cos, 0.0, -splay_sin],
+        [pitch_sin * splay_sin, pitch_cos, pitch_sin * splay_cos],
+        [pitch_cos * splay_sin, -pitch_sin, pitch_cos * splay_cos],
+    ]
+}
+
+/// A vector given in a part's local axes, in world axes.
+pub(super) fn orient(local: [f32; 3], axes: [[f32; 3]; 3]) -> [f32; 3] {
+    std::array::from_fn(|axis| {
+        axes[0][axis] * local[0] + axes[1][axis] * local[1] + axes[2][axis] * local[2]
+    })
+}
+
+/// Where a figure stands or sits, and how large it is.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Stance {
+    pub pose: Pose,
+    /// One model unit, in world units.
+    pub unit: f32,
+    /// World height of the neck: the head's pivot, and the origin of every
+    /// model-unit coordinate.
+    pub neck: f32,
+}
+
+/// Boxes in the seat under a seated figure: seat, back and four legs.
+pub const SEAT_PART_COUNT: usize = 6;
+
+impl Stance {
+    /// The ordinary scene's listener, standing on `floor_y` at the actor size
+    /// [`params::FIGURE_SHOULDER_WIDTH`] fixes.
+    pub fn standing(floor_y: f32) -> Self {
+        let unit = params::FIGURE_SHOULDER_WIDTH / 16.0;
+        Self {
+            pose: Pose::Standing,
+            unit,
+            neck: floor_y + 24.0 * unit,
+        }
+    }
+
+    /// Seated, with the head's centre — the ears — at the origin.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "the room view seats the listener once it is wired into scene::build"
+        )
+    )]
+    pub fn seated(unit: f32) -> Self {
+        Self {
+            pose: Pose::Seated,
+            unit,
+            neck: -4.0 * unit,
+        }
+    }
+
+    /// A point in model units from the neck, on `limb`, in world space.
+    pub(super) fn place(self, limb: Limb, local: [f32; 3]) -> [f32; 3] {
+        Figure::about_neck(
+            self.pose.posed(limb, local),
+            self.unit,
+            self.neck,
+            IDENTITY_AXES,
+        )
+    }
+
+    /// The seat a seated figure rests on, down to `floor_y`.
+    ///
+    /// Shaped to the pose rather than to furniture: its top is exactly where
+    /// the thighs' underside meets the hip joint, its back meets the torso's,
+    /// and it stops below the shoulders so that from the default camera, which
+    /// looks over the listener's left shoulder, it covers only the torso. It
+    /// is not in the room model and has no acoustic effect.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "the room view draws the seat once it is wired into scene::build"
+        )
+    )]
+    pub fn seat(self, floor_y: f32) -> [Part; SEAT_PART_COUNT] {
+        const HIP: f32 = -12.0;
+        const THICKNESS: f32 = 1.5;
+        let top = HIP - 2.0 * SEATED_LEG_PITCH_DEGREES.to_radians().sin();
+        let unit = self.unit;
+        let world_y = |y: f32| self.neck + y * unit;
+        let part = |x: [f32; 2], y: [f32; 2], z: [f32; 2]| {
+            Part::axis_aligned(
+                [
+                    f32::midpoint(x[0], x[1]) * unit,
+                    f32::midpoint(y[0], y[1]),
+                    f32::midpoint(z[0], z[1]) * unit,
+                ],
+                [(x[1] - x[0]) * unit, y[1] - y[0], (z[1] - z[0]) * unit],
+                PartTone::Seat,
+            )
+        };
+        let seat_bottom = world_y(top - THICKNESS);
+        let leg = |x: f32, z: f32| part([x, x + 1.0], [floor_y, seat_bottom], [z, z + 1.0]);
+        [
+            part([-6.0, 6.0], [seat_bottom, world_y(top)], [-3.0, 3.0]),
+            part([-6.0, 6.0], [world_y(top), world_y(HIP + 8.0)], [2.0, 3.0]),
+            leg(-6.0, -3.0),
+            leg(5.0, -3.0),
+            leg(-6.0, 2.0),
+            leg(5.0, 2.0),
+        ]
     }
 }
 
@@ -115,20 +330,20 @@ impl Figure {
     /// Resolve the standing pose into world-space boxes on `floor_y`.
     #[must_use]
     pub fn parts(self, floor_y: f32) -> [Part; PART_COUNT] {
-        // One model unit. The 16-unit outer shoulder span, not the 32-unit full
-        // height, is what determines it.
-        let u = params::FIGURE_SHOULDER_WIDTH / 16.0;
-        let leg_height = 12.0 * u;
-        let torso_height = 12.0 * u;
-        let head_height = 8.0 * u;
+        self.parts_in(Stance::standing(floor_y))
+    }
 
-        let leg_centre = floor_y + leg_height / 2.0;
-        let torso_centre = floor_y + leg_height + torso_height / 2.0;
-        // The neck: where the head turns, and Minecraft's own pivot.
-        let neck = floor_y + leg_height + torso_height;
-
-        let leg = [4.0 * u, leg_height, 4.0 * u];
-        let arm = [4.0 * u, torso_height, 4.0 * u];
+    /// Resolve the figure into world-space boxes in `stance`.
+    #[must_use]
+    pub fn parts_in(self, stance: Stance) -> [Part; PART_COUNT] {
+        let u = stance.unit;
+        let neck = stance.neck;
+        let limb = |limb: Limb, centre: [f32; 3], size: [f32; 3], tone: PartTone| Part {
+            centre: stance.place(limb, centre),
+            size: size.map(|edge| edge * u),
+            axes: stance.pose.joint(limb).1,
+            tone,
+        };
 
         // The complete head assembly shares one rigid transform. Rotating only
         // the cue centres is not enough: an axis-aligned eye can disappear
@@ -147,16 +362,37 @@ impl Figure {
         let wedge = Self::about_neck([0.0, 2.4, cue_depth(WEDGE_EDGE)], u, neck, head_axes);
 
         [
-            Part::axis_aligned([-2.0 * u, leg_centre, 0.0], leg, PartTone::Cloth),
-            Part::axis_aligned([2.0 * u, leg_centre, 0.0], leg, PartTone::Cloth),
-            Part::axis_aligned(
-                [0.0, torso_centre, 0.0],
-                [8.0 * u, torso_height, 4.0 * u],
+            limb(
+                Limb::LeftLeg,
+                [-2.0, -18.0, 0.0],
+                [4.0, 12.0, 4.0],
                 PartTone::Cloth,
             ),
-            Part::axis_aligned([-6.0 * u, torso_centre, 0.0], arm, PartTone::Skin),
-            Part::axis_aligned([6.0 * u, torso_centre, 0.0], arm, PartTone::Skin),
-            Part::oriented(head_centre, [head_height; 3], head_axes, PartTone::Skin),
+            limb(
+                Limb::RightLeg,
+                [2.0, -18.0, 0.0],
+                [4.0, 12.0, 4.0],
+                PartTone::Cloth,
+            ),
+            limb(
+                Limb::Body,
+                [0.0, -6.0, 0.0],
+                [8.0, 12.0, 4.0],
+                PartTone::Cloth,
+            ),
+            limb(
+                Limb::LeftArm,
+                [-6.0, -6.0, 0.0],
+                [4.0, 12.0, 4.0],
+                PartTone::Skin,
+            ),
+            limb(
+                Limb::RightArm,
+                [6.0, -6.0, 0.0],
+                [4.0, 12.0, 4.0],
+                PartTone::Skin,
+            ),
+            Part::oriented(head_centre, [8.0 * u; 3], head_axes, PartTone::Skin),
             // The hat layer: the head shell inflated by half a unit a side. It
             // is where a headphone band would eventually hang.
             Part::oriented(head_centre, [9.0 * u; 3], head_axes, PartTone::Hat),
@@ -514,6 +750,95 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn seated() -> (Stance, [Part; PART_COUNT]) {
+        let stance = Stance::seated(0.01);
+        (stance, Figure::default().parts_in(stance))
+    }
+
+    /// A limb's far end: the one that hangs from its joint, along local -Y.
+    fn hanging_end(part: &Part) -> [f32; 3] {
+        std::array::from_fn(|axis| part.centre[axis] - part.axes[1][axis] * part.size[1] / 2.0)
+    }
+
+    /// A limb's joint end, along local +Y.
+    fn joint_end(part: &Part) -> [f32; 3] {
+        std::array::from_fn(|axis| part.centre[axis] + part.axes[1][axis] * part.size[1] / 2.0)
+    }
+
+    #[test]
+    fn the_seated_figure_keeps_its_head_on_the_listening_position() {
+        let (_, parts) = seated();
+        assert!(same_point(parts[5].centre, [0.0; 3]), "{:?}", parts[5]);
+        assert!(same_point(parts[6].centre, [0.0; 3]));
+        // Head tracking still turns only the head assembly.
+        let turned = Figure {
+            head_yaw: 40.0,
+            head_pitch: -10.0,
+            head_roll: 5.0,
+        }
+        .parts_in(Stance::seated(0.01));
+        assert_eq!(parts[..5], turned[..5]);
+    }
+
+    #[test]
+    fn seated_legs_reach_forward_and_out_and_the_arms_forward() {
+        let (stance, parts) = seated();
+        let unit = stance.unit;
+        let hip = stance.neck - 12.0 * unit;
+        let (pitch_sin, pitch_cos) = 81.0_f32.to_radians().sin_cos();
+        let (splay_sin, splay_cos) = 18.0_f32.to_radians().sin_cos();
+        let reach = 12.0 * unit * pitch_sin;
+        for (leg, side) in [(&parts[0], -1.0), (&parts[1], 1.0)] {
+            // The joint stays at the hip; the foot goes forward, out and a
+            // little down.
+            assert!(same_point(joint_end(leg), [side * 2.0 * unit, hip, 0.0]));
+            let foot = hanging_end(leg);
+            assert!(close(foot[0], side * reach.mul_add(splay_sin, 2.0 * unit)));
+            assert!(close(foot[1], (-12.0 * unit).mul_add(pitch_cos, hip)));
+            assert!(close(foot[2], -reach * splay_cos));
+        }
+        for arm in &parts[3..5] {
+            let hand = hanging_end(arm);
+            assert!(hand[2] < 0.0, "the hand is not in front: {hand:?}");
+            assert!(hand[1] > hip, "the hand reaches below the hip: {hand:?}");
+        }
+        // The torso does not move between the poses.
+        let standing = Figure::default().parts_in(Stance {
+            pose: Pose::Standing,
+            ..stance
+        });
+        assert_eq!(parts[2], standing[2]);
+    }
+
+    #[test]
+    fn the_seat_meets_the_thighs_at_the_hip_and_the_back_at_the_torso() {
+        let (stance, parts) = seated();
+        let floor = -0.4;
+        let seat = stance.seat(floor);
+        let top = seat[0].centre[1] + seat[0].size[1] / 2.0;
+        for leg in &parts[..2] {
+            // The lowest edge of the leg's joint end.
+            let joint = joint_end(leg);
+            let underside = [-1.0_f32, 1.0]
+                .into_iter()
+                .map(|z| joint[1] + leg.axes[2][1] * z * leg.size[2] / 2.0)
+                .fold(f32::INFINITY, f32::min);
+            assert!(close(underside, top), "{underside} vs {top}");
+        }
+        let torso = parts[2];
+        let back = seat[1];
+        assert!(close(
+            torso.centre[2] + torso.size[2] / 2.0,
+            back.centre[2] - back.size[2] / 2.0
+        ));
+        // It stops below the shoulder joints, two units under the neck.
+        assert!(back.centre[1] + back.size[1] / 2.0 < 2.0f32.mul_add(-stance.unit, stance.neck));
+        for leg in &seat[2..] {
+            assert!(close(leg.centre[1] - leg.size[1] / 2.0, floor));
+        }
+        assert!(seat.iter().all(|part| part.tone == PartTone::Seat));
     }
 
     #[test]

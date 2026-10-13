@@ -30,6 +30,7 @@
 
 use crate::room_package::{RoomGeometry, Surface};
 
+use super::figure::Stance;
 use super::params;
 
 /// Width, in metres, of one module of wall treatment: the pitch panels are laid
@@ -39,6 +40,9 @@ const PANEL_PITCH_METRES: f64 = 0.6;
 const PANEL_INSET_METRES: f64 = 0.1;
 /// The floor ruler's finest step, counted out from the listener.
 const GRID_STEP_METRES: f64 = 0.5;
+
+/// The seated listener's model unit, in metres, at most: a 1.6 m figure.
+const SEATED_UNIT_METRES: f64 = 0.05;
 
 /// Below this a direction component counts as zero, as the renderer counts it.
 const DIRECTION_EPSILON: f64 = 1e-15;
@@ -95,6 +99,24 @@ impl RoomView {
             metres_per_unit,
             scale: f64::from(params::ROOM_WIDTH) / front.max(side),
         }
+    }
+
+    /// The listener, seated with the head's centre on the listening position.
+    ///
+    /// The person is real size: a model unit is 0.05 m, a 1.6 m figure, so the
+    /// room reads at its true scale around them. The seat top sits about 18
+    /// units below the head's centre (16 to the hip, two more to the thighs'
+    /// underside), so a unit is also capped at a 24th of the ear height, which
+    /// keeps the seat at least a quarter of that height off the floor in a room
+    /// whose listening position is low.
+    pub fn stance(&self) -> Stance {
+        let metres = SEATED_UNIT_METRES.min(self.listener[2] / 24.0);
+        Stance::seated(narrow(metres * self.scale))
+    }
+
+    /// The floor's height in world coordinates.
+    pub fn floor_y(&self) -> f32 {
+        narrow(-self.listener[2] * self.scale)
     }
 
     /// A point in the room, in world coordinates.
@@ -552,6 +574,42 @@ mod tests {
                 .iter()
                 .all(|line| (line.from[1] - line.to[1]).abs() < 1e-6)
         );
+    }
+
+    #[test]
+    fn the_listener_sits_at_real_size_with_the_seat_on_the_floor() {
+        use crate::scene3d::figure::Figure;
+
+        let view = view(1.5);
+        let stance = view.stance();
+        assert!((stance.unit - 0.05 * k()).abs() < 1e-7);
+        assert!((view.floor_y() + 1.2 * k()).abs() < 1e-6);
+        let seat = stance.seat(view.floor_y());
+        let lowest = seat
+            .iter()
+            .map(|part| part.centre[1] - part.size[1] / 2.0)
+            .fold(f32::INFINITY, f32::min);
+        assert!((lowest - view.floor_y()).abs() < 1e-6);
+        // Seat top: 1.2 m less 16 units to the hip and the thighs' underside.
+        let top = seat[0].centre[1] + seat[0].size[1] / 2.0;
+        let expected = narrow(1.2 - 0.05 * (16.0 + 2.0 * 81.0_f64.to_radians().sin()));
+        assert!(
+            (top - view.floor_y() - expected * k()).abs() < 1e-5,
+            "{top}"
+        );
+        // The head is centred on the listening position.
+        let head = Figure::default().parts_in(stance)[5];
+        assert!(close(head.centre, [0.0; 3]));
+
+        // A listening position half a metre up still leaves room for the seat.
+        let mut low = reference();
+        low.listener[2] = 0.5;
+        let low = RoomView::new(&low, 1.5);
+        let stance = low.stance();
+        assert!((stance.unit - narrow(0.5 / 24.0) * k()).abs() < 1e-7);
+        let seat = stance.seat(low.floor_y());
+        let top = seat[0].centre[1] + seat[0].size[1] / 2.0;
+        assert!(top - low.floor_y() >= 0.5 / 4.0 * k() - 1e-6);
     }
 
     #[test]

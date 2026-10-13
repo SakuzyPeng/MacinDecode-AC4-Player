@@ -9,7 +9,11 @@ use std::io::Cursor;
 use image::{ImageDecoder, RgbaImage};
 use serde::{Deserialize, Serialize};
 
-use super::{figure::Figure, mesh::MeshBuilder, mesh::ViewContext, params};
+use super::{
+    figure::{self, Figure, Limb, Stance},
+    mesh::MeshBuilder,
+    mesh::ViewContext,
+};
 
 pub const MAX_PNG_BYTES: u64 = 1024 * 1024;
 
@@ -49,7 +53,7 @@ struct Patch {
     corners: [[f32; 3]; 4],
     normal: [f32; 3],
     colour: [u8; 4],
-    head: bool,
+    limb: Limb,
     overlay: bool,
 }
 
@@ -166,24 +170,32 @@ impl Skin {
                     corners,
                     normal,
                     colour,
-                    head: part.head,
+                    limb: part.limb,
                     overlay: part.overlay,
                 });
             }
         }
     }
 
-    pub fn draw(&self, mesh: &mut MeshBuilder, figure: Figure, floor: f32, view: &ViewContext) {
-        let unit = params::FIGURE_SHOULDER_WIDTH / 16.0;
-        let neck = floor + 24.0 * unit;
-        let identity = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    /// Draw the skin on a figure in `stance`. Every texel goes through the
+    /// same joints as the plain figure's boxes, so a skin sits the way the
+    /// figure sits.
+    pub fn draw(&self, mesh: &mut MeshBuilder, figure: Figure, stance: Stance, view: &ViewContext) {
         let head = figure.head_axes();
         for patch in &self.patches {
-            let axes = if patch.head { head } else { identity };
-            let corners = patch
-                .corners
-                .map(|point| Figure::about_neck(point, unit, neck, axes));
-            let normal = Figure::about_neck(patch.normal, 1.0, 0.0, axes);
+            let (corners, normal) = if patch.limb == Limb::Head {
+                (
+                    patch
+                        .corners
+                        .map(|point| Figure::about_neck(point, stance.unit, stance.neck, head)),
+                    Figure::about_neck(patch.normal, 1.0, 0.0, head),
+                )
+            } else {
+                (
+                    patch.corners.map(|point| stance.place(patch.limb, point)),
+                    figure::orient(patch.normal, stance.pose.joint(patch.limb).1),
+                )
+            };
             mesh.add_skin_quad(corners, normal, patch.colour, patch.overlay, view);
         }
     }
@@ -220,7 +232,7 @@ struct ModelPart {
     centre: [f32; 3],
     size: [u8; 3],
     uv: [u8; 2],
-    head: bool,
+    limb: Limb,
     overlay: bool,
     mirror: bool,
 }
@@ -228,16 +240,41 @@ struct ModelPart {
 fn model_parts(model: BodyType, legacy: bool) -> Vec<ModelPart> {
     let arm = model.arm_width();
     let shoulder = 4.0 + f32::from(arm) / 2.0;
+    // The figure faces -Z, so its right is +X.
     let base = [
-        ([0.0, 4.0, 0.0], [8, 8, 8], [0, 0], [32, 0]),
-        ([0.0, -6.0, 0.0], [8, 12, 4], [16, 16], [16, 32]),
-        ([shoulder, -6.0, 0.0], [arm, 12, 4], [40, 16], [40, 32]),
-        ([-shoulder, -6.0, 0.0], [arm, 12, 4], [32, 48], [48, 48]),
-        ([2.0, -18.0, 0.0], [4, 12, 4], [0, 16], [0, 32]),
-        ([-2.0, -18.0, 0.0], [4, 12, 4], [16, 48], [0, 48]),
+        ([0.0, 4.0, 0.0], [8, 8, 8], [0, 0], [32, 0], Limb::Head),
+        ([0.0, -6.0, 0.0], [8, 12, 4], [16, 16], [16, 32], Limb::Body),
+        (
+            [shoulder, -6.0, 0.0],
+            [arm, 12, 4],
+            [40, 16],
+            [40, 32],
+            Limb::RightArm,
+        ),
+        (
+            [-shoulder, -6.0, 0.0],
+            [arm, 12, 4],
+            [32, 48],
+            [48, 48],
+            Limb::LeftArm,
+        ),
+        (
+            [2.0, -18.0, 0.0],
+            [4, 12, 4],
+            [0, 16],
+            [0, 32],
+            Limb::RightLeg,
+        ),
+        (
+            [-2.0, -18.0, 0.0],
+            [4, 12, 4],
+            [16, 48],
+            [0, 48],
+            Limb::LeftLeg,
+        ),
     ];
     let mut parts = Vec::with_capacity(12);
-    for (index, (centre, size, mut uv, overlay_uv)) in base.into_iter().enumerate() {
+    for (index, (centre, size, mut uv, overlay_uv, limb)) in base.into_iter().enumerate() {
         let mirror = legacy && matches!(index, 3 | 5);
         if mirror {
             uv = if index == 3 { [40, 16] } else { [0, 16] };
@@ -246,12 +283,12 @@ fn model_parts(model: BodyType, legacy: bool) -> Vec<ModelPart> {
             centre,
             size,
             uv,
-            head: index == 0,
+            limb,
             overlay: false,
             mirror,
         };
         parts.push(part);
-        if !legacy || part.head {
+        if !legacy || part.limb == Limb::Head {
             parts.push(ModelPart {
                 uv: overlay_uv,
                 overlay: true,
@@ -275,7 +312,7 @@ impl Face {
     fn point(&self, part: ModelPart, x: u8, y: u8) -> [f32; 3] {
         let inflate = if !part.overlay {
             0.0
-        } else if part.head {
+        } else if part.limb == Limb::Head {
             1.0
         } else {
             0.5
