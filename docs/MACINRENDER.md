@@ -67,7 +67,17 @@ Audio settings 的内容按**播放模式**分页，页签由 `OutputPage::of` �
 对应上游 C ABI 1.46 的 `adm_room_config_t`。两种包都是清单加旁边的组件文件，所以原地选择
 （`app/room_settings.rs`），不进 `file_catalog` 的托管目录。
 
-`needs_rebuild` 按上游会话契约划分：切换渲染器、HRIR 或比例需要新会话；只换房间不重建，留给
+`room_hrir` 接受 SOFA 或已准备的 HRIR 清单：上游 `c03af5f` 起，`hrir_manifest` 为 SOFA 时由渲染器在
+创建会话时原生准备。
+
+屏幕映射存于 `room_screen`（`backend/screen.rs` 的 `ScreenSettings`）：重放屏幕与自定义制作屏幕
+各自带开关，关闭时保留几何。`config_json` 生成 C ABI 1.47 `adm_create_scene_stream_with_room_ex`
+所收的 `mradm.screen-config` v1，关闭的屏幕省略，即用上游缺省（无重放屏幕＝位置不变；无制作屏幕＝
+标准 58°／1.78）。`ScreenGeometry::edges` 逐项转写上游 `mradm-dsp` 的 `room::screen::edges`，
+供界面在提交前拒绝渲染器不接受的几何；最终判断仍在渲染器。存储中被拒的几何在加载时回到标准屏幕。
+界面以草稿编辑、Apply 一次提交，因为屏幕随会话固定，每次提交都会准备新输出。
+
+`needs_rebuild` 按上游会话契约划分：切换渲染器、HRIR、比例或屏幕需要新会话；只换房间不重建，留给
 `adm_scene_stream_switch_room` 在运行中的会话里后台准备并交叉淡化。
 
 当前固定的 `d75d460` / C ABI 1.45 没有房间渲染。`OutputSettings::playback_blocker` 在选中 Room 时

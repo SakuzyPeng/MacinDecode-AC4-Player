@@ -99,6 +99,8 @@ pub struct PlayerApp {
     sofa_picker: Option<Pin<Box<dyn Future<Output = Option<rfd::FileHandle>>>>>,
     hptf_picker: Option<Pin<Box<dyn Future<Output = Option<rfd::FileHandle>>>>>,
     room_picker: Option<room_settings::RoomPicker>,
+    /// Screen edits not yet applied; `None` when the page shows the settings.
+    room_screen_draft: Option<crate::backend::ScreenSettings>,
     /// The drawn profile, read once per path and design rate.
     hptf_drawing: Option<HptfDrawing>,
     /// The profile under the pointer, cached the same way so that sweeping the
@@ -937,6 +939,7 @@ impl PlayerApp {
             bridge_ui: crate::posebridge::ui::Panel::default(),
             hptf_picker: None,
             room_picker: None,
+            room_screen_draft: None,
             hptf_drawing: None,
             hptf_ghost: None,
             hptf_saving: None,

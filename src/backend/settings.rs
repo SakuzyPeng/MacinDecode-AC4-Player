@@ -1,3 +1,4 @@
+use super::screen::ScreenSettings;
 use super::{OutputDeviceSelection, SpatialBackendKind};
 use crate::head_tracking::HeadSource;
 use serde::{Deserialize, Serialize};
@@ -122,6 +123,8 @@ pub struct OutputSettings {
     /// prepared into this form first.
     pub room_hrir: String,
     pub room_metres_per_unit: f64,
+    /// Screen mapping for screen-referenced objects; room renderer only.
+    pub room_screen: ScreenSettings,
     /// `AutoEq` `ParametricEQ.txt` headphone compensation; empty is off.
     pub hptf: String,
     pub hptf_auto_trim: bool,
@@ -150,6 +153,7 @@ impl Default for OutputSettings {
             room: String::new(),
             room_hrir: String::new(),
             room_metres_per_unit: ROOM_METRES_PER_UNIT_DEFAULT,
+            room_screen: ScreenSettings::default(),
             hptf: String::new(),
             hptf_auto_trim: false,
             hptf_bass_db: 0.0,
@@ -256,6 +260,7 @@ impl OutputSettings {
         } else {
             ROOM_METRES_PER_UNIT_DEFAULT
         };
+        self.room_screen = self.room_screen.validated();
         // A stored file is not a trusted one: a knob that came back as NaN would
         // reach the biquad design as NaN, and `clamped` cannot fix that.
         for knob in [&mut self.hptf_bass_db, &mut self.hptf_tilt_db] {
@@ -282,12 +287,13 @@ impl OutputSettings {
                     || self.speaker_renderer != other.speaker_renderer
                     || (self.layout == SpeakerLayout::TwentyTwoTwo
                         && self.split_lfe != other.split_lfe)))
-            // A room session fixes its HRIR and its scale when it is created;
-            // only the room itself can change under a running one.
+            // A room session fixes its HRIR, its scale and its screens when it
+            // is created; only the room itself can change under a running one.
             || (self.mode.resolved() == SpatialBackendKind::SafBinaural
                 && (self.binaural_renderer != other.binaural_renderer
                     || (self.binaural_renderer == BinauralRenderer::Room
                         && (self.room_hrir != other.room_hrir
+                            || self.room_screen != other.room_screen
                             || self.room_metres_per_unit.to_bits()
                                 != other.room_metres_per_unit.to_bits()))))
             || self.native_device != other.native_device
@@ -379,6 +385,9 @@ mod tests {
         let mut scale = room.clone();
         scale.room_metres_per_unit = 2.0;
         assert!(room.needs_rebuild(&scale));
+        let mut screen = room.clone();
+        screen.room_screen.reproduction_enabled = true;
+        assert!(room.needs_rebuild(&screen));
 
         // A room choice saved while another mode plays changes nothing audible.
         let mut speakers = room.clone();

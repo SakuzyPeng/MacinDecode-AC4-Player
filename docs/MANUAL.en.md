@@ -396,13 +396,21 @@ Choosing it replaces the page with three controls:
 - **Room** — the room package's `room.json`. Room and HRIR packages are a manifest plus component
   files beside it, so they are picked where they lie rather than copied into the data directory; the
   page names them as folder/manifest, with the full path on hover.
-- **HRIR** — an optional personal HRIR package, `hrir.json`; without one the room package's own
-  binding is used. A SOFA file is not one: prepare it into an HRIR package with MacinRender's
-  `prepare-hrir.py` first.
+- **HRIR** — an optional personal SOFA file or prepared HRIR package (`hrir.json`); without one the
+  room package's own binding is used. The renderer prepares a SOFA itself when the session is created.
 - **Scene unit** — how many metres one unit of Scene distance spans, 0.01–100 m, 1.5 m by default.
+- **Screen mapping** (collapsed) — screen-referenced (`screenRef`) objects are moved from the
+  **reference screen** they were mixed against onto the **reproduction screen** they are watched on,
+  by BS.2127-1 §7.3.3's polar edge warping; nothing else moves. Mapping needs **Reproduction
+  screen** ticked; **Reference screen** is the standard one (straight ahead, 58° wide, 1.78:1)
+  unless set to Custom. Each screen takes polar coordinates (azimuth positive to the left,
+  elevation, distance, angular width) or Cartesian ones (x right, y front, z up, width along X);
+  switching converts to the same screen, and the four edges are shown live, or what the renderer
+  would refuse about the geometry. Edits stay in a draft until **Apply**; **Revert** drops them;
+  **Copy as JSON** copies `mradm.screen-config` v1 for `mradm --screen-config`.
 
-The room can change during playback; the HRIR and the scene unit are fixed when a session is
-created, so changing either prepares a new output.
+The room can change during playback; the HRIR, the scene unit and the screens are fixed when a
+session is created, so changing any of them prepares a new output.
 
 **This version ships the interface only.** The settings are saved, but the MacinRender the player
 pins does not carry room rendering yet (that needs C ABI 1.46), so starting playback with Room

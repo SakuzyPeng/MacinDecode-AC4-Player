@@ -880,6 +880,103 @@ fn picked_room_packages_become_the_room_settings() {
 }
 
 #[test]
+fn screen_edits_reach_the_settings_only_when_applied_and_valid() {
+    use crate::backend::{OutputSettings, ScreenSettings};
+
+    // The section alone, so the test runs where no binaural mode is available.
+    fn frame(
+        app: &mut PlayerApp,
+        context: &egui::Context,
+        settings: &mut OutputSettings,
+        time: f64,
+        events: Vec<egui::Event>,
+    ) -> egui::FullOutput {
+        let mut output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(600.0, 760.0),
+                )),
+                time: Some(time),
+                events,
+                focused: true,
+                ..Default::default()
+            },
+            |ui| app.draw_room_screens(ui, settings),
+        );
+        output.textures_delta.clear();
+        output
+    }
+    fn click(
+        app: &mut PlayerApp,
+        context: &egui::Context,
+        settings: &mut OutputSettings,
+        output: &egui::FullOutput,
+        label: &str,
+        time: f64,
+    ) {
+        let pos = painted_text(output)
+            .into_iter()
+            .find(|(text, _, _)| text == label)
+            .unwrap_or_else(|| panic!("{label} is drawn"))
+            .1
+            .center();
+        let press = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let _ = frame(
+            app,
+            context,
+            settings,
+            time,
+            vec![egui::Event::PointerMoved(pos), press(true)],
+        );
+        let _ = frame(app, context, settings, time + 0.04, vec![press(false)]);
+    }
+    let drawn = |output: &egui::FullOutput, wanted: &str| {
+        painted_text(output)
+            .iter()
+            .any(|(text, _, _)| text.starts_with(wanted))
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let (mut app, context) = open(dir.path());
+    let mut settings = OutputSettings::default();
+    let mut draft = ScreenSettings {
+        reproduction_enabled: true,
+        ..ScreenSettings::default()
+    };
+    draft.reproduction.width = 90.0;
+    app.room_screen_draft = Some(draft);
+    let output = frame(&mut app, &context, &mut settings, 0.0, vec![]);
+    assert!(drawn(&output, "Not applied yet."));
+    assert!(drawn(&output, "Spans azimuth -45.0° to +45.0°"));
+    assert_eq!(settings.room_screen, ScreenSettings::default());
+    click(&mut app, &context, &mut settings, &output, "Apply", 0.5);
+    assert_eq!(settings.room_screen, draft);
+    assert_eq!(app.room_screen_draft, None);
+
+    // A screen the renderer would refuse is named, and cannot be applied.
+    let mut broken = draft;
+    broken.reproduction.centre = [180.0, 0.0, 1.0];
+    app.room_screen_draft = Some(broken);
+    let output = frame(&mut app, &context, &mut settings, 1.0, vec![]);
+    assert!(drawn(&output, "Reproduction screen: "));
+    click(&mut app, &context, &mut settings, &output, "Apply", 1.5);
+    assert_eq!(settings.room_screen, draft);
+    assert_eq!(app.room_screen_draft, Some(broken));
+
+    // Revert drops the draft and keeps what was applied.
+    let output = frame(&mut app, &context, &mut settings, 2.0, vec![]);
+    click(&mut app, &context, &mut settings, &output, "Revert", 2.5);
+    assert_eq!(app.room_screen_draft, None);
+    assert_eq!(settings.room_screen, draft);
+}
+
+#[test]
 fn pending_audio_settings_do_not_replace_committed_preferences() {
     let dir = tempfile::tempdir().unwrap();
     let (mut app, context) = open(dir.path());

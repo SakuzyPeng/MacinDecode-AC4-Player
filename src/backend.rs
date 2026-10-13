@@ -11,8 +11,10 @@ mod controller;
 mod lfe;
 #[cfg(macinrender_output)]
 mod macinrender;
+mod screen;
 mod settings;
 pub use controller::SpatialOutputController;
+pub use screen::{ScreenCoordinates, ScreenGeometry, ScreenSettings};
 pub use settings::{
     BinauralRenderer, OutputSettings, ROOM_METRES_PER_UNIT_DEFAULT, ROOM_METRES_PER_UNIT_RANGE,
     SpeakerLayout, SpeakerRenderer,

@@ -321,11 +321,18 @@ Triple Balance 已支持三个布局，后台验证完成后可选。LFE 使用�
 
 - **Room**：房间包的 `room.json`。房间包和 HRIR 包都是“清单 + 旁边的组件文件”，所以原地选择、
   不复制进数据目录；列表里按“文件夹/清单”显示，悬停看完整路径。
-- **HRIR**：可选的个人 HRIR 包 `hrir.json`，不选则用房间包自带的绑定。SOFA 文件不能直接用，
-  需先用 MacinRender 的 `prepare-hrir.py` 转成 HRIR 包。
+- **HRIR**：可选的个人 SOFA 文件或已准备的 HRIR 包 `hrir.json`，不选则用房间包自带的绑定。
+  SOFA 由渲染器在创建会话时自行准备。
 - **Scene unit**：一个 Scene 距离单位对应多少米，0.01–100 m，默认 1.5 m。
+- **Screen mapping**（折叠）：屏幕参考（`screenRef`）的对象从**制作屏幕**映射到**重放屏幕**，
+  按 BS.2127-1 §7.3.3 的极坐标屏幕边缘变换，其余对象不动。勾选 **Reproduction screen** 才会映射；
+  **Reference screen** 默认是标准制作屏幕（正前方、58° 宽、1.78:1），也可自定义。每块屏幕可用极坐标
+  （方位角左正、仰角、距离、角宽度）或直角坐标（x 右、y 前、z 上、X 方向宽度）输入，切换坐标系会换算成
+  同一块屏幕；下方实时显示四条边缘的方位角与仰角，渲染器不接受的几何会直接说明哪里不对。
+  编辑先停在草稿里，点 **Apply** 才生效、**Revert** 放弃；**Copy as JSON** 复制
+  `mradm.screen-config` v1，可直接给 `mradm --screen-config` 用。
 
-播放中可以换房间；HRIR 和 Scene unit 在会话创建时固定，改它们会重新准备输出。
+播放中可以换房间；HRIR、Scene unit 和屏幕在会话创建时固定，改它们会重新准备输出。
 
 **当前版本只有界面。** 设置会保存，但播放器固定的 MacinRender 还不带房间渲染（需要 C ABI 1.46），
 所以选 Room 后开始播放会显示明确的错误，不会悄悄改用 SAF HRTF 播放。
