@@ -25,6 +25,7 @@ mod playlist;
 mod playlist_ui;
 mod posebridge;
 mod preferences;
+mod room_package;
 mod scene3d;
 mod scene_view;
 mod skin_library;

@@ -70,6 +70,15 @@ Audio settings 的内容按**播放模式**分页，页签由 `OutputPage::of` �
 `room_hrir` 接受 SOFA 或已准备的 HRIR 清单：上游 `c03af5f` 起，`hrir_manifest` 为 SOFA 时由渲染器在
 创建会话时原生准备。
 
+房间信息卡（`room_package.rs`）只读 `mradm.room` v1 清单的明文几何字段（`dimensions`、`listener`、
+`reference_distance`、`minimum_distance`、`boundary_clearance`），按路径缓存，重新选择同一房间包即重读；
+清单上限 1 MiB，坐标沿用渲染器的 x 前后、y 左右、z 上。判定只覆盖 BS.1116-3 / EBU Tech 3276 的几何
+建议（面积、比例、整数比、左右对称），名义 Tm 只作为目标值显示。衰减和早反射属于上游
+`check-acoustics.py` 对滤波器的测量，播放器不推算也不声明；以后读取声学报告时，必须以报告记录的清单
+SHA-256 与所选清单一致为前提。到墙距离按上游的射线约束和 `boundary_clearance` 计算各仰角最坏方位的
+最大半径；单位距离电平差为 `20·log10(reference_distance / max(scale, minimum_distance))`，未计入被墙拉回
+后的进一步变化。
+
 屏幕映射存于 `room_screen`（`backend/screen.rs` 的 `ScreenSettings`）：重放屏幕与自定义制作屏幕
 各自带开关，关闭时保留几何。`config_json` 生成 C ABI 1.47 `adm_create_scene_stream_with_room_ex`
 所收的 `mradm.screen-config` v1，关闭的屏幕省略，即用上游缺省（无重放屏幕＝位置不变；无制作屏幕＝

@@ -17,6 +17,10 @@ use crate::backend::{
     BinauralRenderer, OutputSettings, ROOM_METRES_PER_UNIT_DEFAULT, ROOM_METRES_PER_UNIT_RANGE,
     ScreenCoordinates, ScreenGeometry,
 };
+use crate::room_package::{REVERBERATION_TOLERANCE, RoomGeometry};
+
+/// A room manifest read once for the page, keyed by its path.
+pub(super) type RoomGeometrySlot = Option<(String, Result<RoomGeometry, String>)>;
 
 /// Which of the room renderer's two packages a file dialog is choosing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +57,10 @@ impl PlayerApp {
                 Some("This renderer requires a Unicode package path".into());
             return;
         };
+        if package == RoomPackage::Room {
+            // Choosing the same package again is how an edited one is re-read.
+            self.room_geometry = None;
+        }
         let mut settings = self.output.settings().clone();
         path.clone_into(match package {
             RoomPackage::Room => &mut settings.room,
@@ -159,6 +167,8 @@ impl PlayerApp {
             }
         });
 
+        self.draw_room_geometry(ui, settings);
+
         ui.colored_label(
             theme::MUTED,
             "Renders at 48 kHz around a fixed listening position. A new room takes over during playback; the HRIR and the scene unit apply to a new output.",
@@ -248,6 +258,24 @@ impl PlayerApp {
         self.room_screen_draft = (draft != settings.room_screen).then_some(draft);
     }
 
+    /// What the chosen room is, held against the listening-room geometry
+    /// recommendations, and how the current scene unit sits inside it.
+    pub(super) fn draw_room_geometry(&mut self, ui: &mut egui::Ui, settings: &OutputSettings) {
+        if settings.room.is_empty() {
+            return;
+        }
+        let geometry = room_geometry(&mut self.room_geometry, &settings.room);
+        egui::CollapsingHeader::new("Room geometry")
+            .id_salt("room-geometry")
+            .default_open(true)
+            .show(ui, |ui| match geometry {
+                Ok(room) => draw_room_card(ui, room, settings.room_metres_per_unit),
+                Err(error) => {
+                    ui.colored_label(theme::WARNING, error);
+                }
+            });
+    }
+
     fn pick_room_package(&mut self, package: RoomPackage, current: &str, context: &egui::Context) {
         let mut dialog = rfd::AsyncFileDialog::new();
         dialog = match package {
@@ -268,6 +296,133 @@ impl PlayerApp {
         });
         context.request_repaint();
     }
+}
+
+fn room_geometry<'a>(
+    slot: &'a mut RoomGeometrySlot,
+    path: &str,
+) -> &'a Result<RoomGeometry, String> {
+    // Read once per path: the page is drawn every frame, the file is not
+    // edited that often.
+    if slot.as_ref().is_none_or(|(read, _)| read != path) {
+        *slot = Some((path.to_owned(), RoomGeometry::read(Path::new(path))));
+    }
+    &slot.as_ref().expect("filled above").1
+}
+
+fn mark(ui: &mut egui::Ui, met: bool) {
+    if met {
+        ui.colored_label(theme::SUCCESS, "✓");
+    } else {
+        ui.colored_label(theme::WARNING, "×");
+    }
+}
+
+fn elevation_label(elevation: i32) -> String {
+    match elevation {
+        0 => "ear level".into(),
+        90 => "overhead".into(),
+        _ => format!("{elevation:+}°"),
+    }
+}
+
+fn draw_room_card(ui: &mut egui::Ui, room: &RoomGeometry, metres_per_unit: f64) {
+    let [front, side, height] = room.dimensions;
+    let [x, y, z] = room.listener;
+    let nominal = room.nominal_reverberation();
+    egui::Grid::new("room-geometry-facts")
+        .num_columns(2)
+        .show(ui, |ui| {
+            ui.label("Room");
+            ui.label(if room.name.is_empty() {
+                &room.id
+            } else {
+                &room.name
+            })
+            .on_hover_text(&room.id);
+            ui.end_row();
+            ui.label("Size");
+            ui.label(format!("{front:.2} × {side:.2} × {height:.2} m"))
+                .on_hover_text("Front–back × left–right × height");
+            ui.end_row();
+            ui.label("Listener");
+            ui.label(format!("({x:.2}, {y:.2}, {z:.2}) m"))
+                .on_hover_text("From the room's corner: front–back, left–right, height");
+            ui.end_row();
+            ui.label("Floor · volume");
+            ui.label(format!(
+                "{:.1} m² · {:.1} m³",
+                room.floor_area(),
+                room.volume()
+            ));
+            ui.end_row();
+            ui.label("Nominal Tm");
+            ui.label(format!(
+                "{nominal:.3} s ({:.3}–{:.3} s)",
+                nominal - REVERBERATION_TOLERANCE,
+                nominal + REVERBERATION_TOLERANCE
+            ))
+            .on_hover_text(
+                "0.25 · (V / 100 m³)^⅓, the centre of the BS.1116-3 / EBU Tech 3276 tolerance mask; the range is its 200 Hz – 4 kHz part. A target for the package's decay, not a measurement of it.",
+            );
+            ui.end_row();
+        });
+
+    ui.add_space(4.0);
+    ui.strong("BS.1116-3 · EBU Tech 3276 room geometry");
+    for criterion in room.criteria() {
+        ui.horizontal_wrapped(|ui| {
+            mark(ui, criterion.met);
+            ui.label(criterion.label);
+            ui.colored_label(theme::MUTED, criterion.detail);
+        });
+    }
+    ui.colored_label(
+        theme::MUTED,
+        "Geometry only. Decay and early reflections are for the package's acoustic report to state; background noise, room response and listening level belong to the headphones and the room you listen in.",
+    );
+
+    ui.add_space(4.0);
+    ui.strong("Scene unit in this room");
+    let reach = room.reach();
+    let pulled = reach
+        .iter()
+        .filter(|reach| metres_per_unit > reach.metres)
+        .map(|reach| elevation_label(reach.elevation))
+        .collect::<Vec<_>>();
+    ui.horizontal_wrapped(|ui| {
+        mark(ui, pulled.is_empty());
+        ui.label(if pulled.is_empty() {
+            format!("At {metres_per_unit:.2} m, unit distance clears every wall")
+        } else {
+            format!(
+                "At {metres_per_unit:.2} m, the walls pull in unit distance at {}",
+                pulled.join(", ")
+            )
+        });
+    });
+    ui.colored_label(
+        theme::MUTED,
+        format!(
+            "Clear up to {}",
+            reach
+                .iter()
+                .map(|reach| format!("{} {:.2} m", elevation_label(reach.elevation), reach.metres))
+                .collect::<Vec<_>>()
+                .join(" · ")
+        ),
+    )
+    .on_hover_text(
+        "The farthest a source can sit in that direction, at its worst azimuth, before the renderer moves it inside the walls along its own direction.",
+    );
+    ui.colored_label(
+        theme::MUTED,
+        format!(
+            "Unit distance plays {:+.1} dB against the room's {:.2} m reference",
+            room.unit_distance_gain_db(metres_per_unit),
+            room.reference_distance
+        ),
+    );
 }
 
 /// Which number of a [`ScreenGeometry`] a row of the screen form edits.

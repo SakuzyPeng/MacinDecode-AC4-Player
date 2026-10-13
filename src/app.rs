@@ -99,6 +99,7 @@ pub struct PlayerApp {
     sofa_picker: Option<Pin<Box<dyn Future<Output = Option<rfd::FileHandle>>>>>,
     hptf_picker: Option<Pin<Box<dyn Future<Output = Option<rfd::FileHandle>>>>>,
     room_picker: Option<room_settings::RoomPicker>,
+    room_geometry: room_settings::RoomGeometrySlot,
     /// Screen edits not yet applied; `None` when the page shows the settings.
     room_screen_draft: Option<crate::backend::ScreenSettings>,
     /// The drawn profile, read once per path and design rate.
@@ -940,6 +941,7 @@ impl PlayerApp {
             hptf_picker: None,
             room_picker: None,
             room_screen_draft: None,
+            room_geometry: None,
             hptf_drawing: None,
             hptf_ghost: None,
             hptf_saving: None,

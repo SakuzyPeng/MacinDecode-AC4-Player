@@ -399,6 +399,24 @@ Choosing it replaces the page with three controls:
 - **HRIR** — an optional personal SOFA file or prepared HRIR package (`hrir.json`); without one the
   room package's own binding is used. The renderer prepares a SOFA itself when the session is created.
 - **Scene unit** — how many metres one unit of Scene distance spans, 0.01–100 m, 1.5 m by default.
+- **Room geometry** — a card shown once a room package is chosen, read straight from the
+  dimensions, listening position and distances in its `room.json`.
+  - The room's name, size (front–back × left–right × height), listening position, floor area and
+    volume, and the nominal reverberation time Tm = 0.25·(V/100 m³)^⅓ with its ±0.05 s window from
+    200 Hz to 4 kHz — a target, not a measurement of the package.
+  - The room-geometry recommendations of ITU-R BS.1116-3 and EBU Tech 3276 (Supplement 1 for
+    multichannel), each marked ✓ or × with the room's own numbers beside it: a multichannel floor
+    area of 30–70 m²; 1.1·w/h ≤ l/h ≤ 4.5·w/h − 4; l/h < 3 and w/h < 3; no ratio within ±5 % of an
+    integer; the listener on the left–right centre line (l is the longer side of the floor).
+  - **Geometry only.** Decay and early reflections are for the package's own acoustic report to
+    state; background noise, the operational room response and the listening level depend on the
+    headphones and the room you actually sit in, which a model cannot claim.
+  - **Scene unit in this room** — whether a source at one Scene unit is pulled in by a wall, the
+    ceiling or the floor at ear level, +30°, +45°, overhead and −30° (the renderer keeps sources
+    0.15 m inside every boundary, along their own direction), how far each direction reaches, and
+    how loud unit distance plays against the room's reference distance (2.1 m in the reference
+    room). The reference room clears every wall at the default 1.5 m but plays about 2.9 dB above its
+    reference; at 2.1 m the ceiling pulls overhead sources in.
 - **Screen mapping** (collapsed) — screen-referenced (`screenRef`) objects are moved from the
   **reference screen** they were mixed against onto the **reproduction screen** they are watched on,
   by BS.2127-1 §7.3.3's polar edge warping; nothing else moves. Mapping needs **Reproduction

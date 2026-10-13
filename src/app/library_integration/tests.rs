@@ -977,6 +977,77 @@ fn screen_edits_reach_the_settings_only_when_applied_and_valid() {
 }
 
 #[test]
+fn the_room_card_reads_the_chosen_manifest_and_follows_the_scene_unit() {
+    use crate::backend::OutputSettings;
+
+    fn frame(
+        app: &mut PlayerApp,
+        context: &egui::Context,
+        settings: &OutputSettings,
+    ) -> Vec<String> {
+        let mut output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(600.0, 900.0),
+                )),
+                ..Default::default()
+            },
+            |ui| app.draw_room_geometry(ui, settings),
+        );
+        output.textures_delta.clear();
+        painted_text(&output)
+            .into_iter()
+            .map(|(text, _, _)| text)
+            .collect()
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let (mut app, context) = open(dir.path());
+    let manifest = dir.path().join("reference").join("room.json");
+    std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+    std::fs::write(
+        &manifest,
+        r#"{"schema": "mradm.room", "version": 1, "id": "reference-7x6x3.2-corrected-v1",
+            "name": "Corrected reference listening room",
+            "dimensions": [7.0, 6.0, 3.2], "listener": [3.4, 3.0, 1.2],
+            "reference_distance": 2.1, "minimum_distance": 0.25,
+            "boundary_clearance": 0.15}"#,
+    )
+    .unwrap();
+    let mut settings = OutputSettings {
+        room: manifest.to_str().unwrap().into(),
+        ..OutputSettings::default()
+    };
+
+    let text = frame(&mut app, &context, &settings);
+    let has = |text: &[String], wanted: &str| text.iter().any(|line| line.starts_with(wanted));
+    assert!(has(&text, "Corrected reference listening room"));
+    assert!(has(&text, "42.0 m² · 134.4 m³"));
+    assert!(has(&text, "0.276 s"));
+    assert_eq!(text.iter().filter(|line| *line == "✓").count(), 6);
+    assert!(has(&text, "At 1.50 m, unit distance clears every wall"));
+    assert!(has(&text, "Unit distance plays +2.9 dB"));
+
+    // At the room's own reference distance, the ceiling is nearer than that.
+    settings.room_metres_per_unit = 2.1;
+    let text = frame(&mut app, &context, &settings);
+    assert!(has(
+        &text,
+        "At 2.10 m, the walls pull in unit distance at overhead"
+    ));
+    assert!(has(&text, "×"));
+
+    // A file that is not a room says so instead of drawing a card.
+    let other = dir.path().join("hrir.json");
+    std::fs::write(&other, r#"{"schema": "mradm.hrir", "version": 1}"#).unwrap();
+    settings.room = other.to_str().unwrap().into();
+    let text = frame(&mut app, &context, &settings);
+    assert!(has(&text, "This is not a room manifest"));
+    assert!(!text.iter().any(|line| line == "Room"));
+}
+
+#[test]
 fn pending_audio_settings_do_not_replace_committed_preferences() {
     let dir = tempfile::tempdir().unwrap();
     let (mut app, context) = open(dir.path());
