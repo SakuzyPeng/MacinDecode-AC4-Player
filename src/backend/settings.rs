@@ -19,6 +19,46 @@ impl SpeakerRenderer {
     }
 }
 
+/// Which renderer forms the headphone feed under software binaural output.
+///
+/// The binaural counterpart of [`SpeakerRenderer`]: both renderers write the
+/// same two channels to the same stereo device, so the choice lives inside the
+/// mode rather than beside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum BinauralRenderer {
+    #[default]
+    #[serde(rename = "saf-hrtf")]
+    SafHrtf,
+    /// `MacinRender`'s native room renderer: a modelled room around a fixed
+    /// listening position, with personal HRIRs and 3DoF head rotation.
+    #[serde(rename = "room")]
+    Room,
+}
+impl BinauralRenderer {
+    pub const ALL: [Self; 2] = [Self::SafHrtf, Self::Room];
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::SafHrtf => "SAF HRTF",
+            Self::Room => "Room",
+        }
+    }
+}
+
+/// How many metres one unit of Scene distance spans in the modelled room.
+///
+/// The range and the default are the renderer's own (`adm_room_config_t`):
+/// outside it the renderer refuses the configuration rather than clamping.
+pub const ROOM_METRES_PER_UNIT_DEFAULT: f64 = 1.5;
+pub const ROOM_METRES_PER_UNIT_RANGE: std::ops::RangeInclusive<f64> = 0.01..=100.0;
+
+/// Why room playback cannot start yet, before any output is asked for.
+///
+/// The interface ships ahead of the renderer: until the pinned `MacinRender`
+/// carries room rendering (C ABI 1.46) and `backend/macinrender.rs` drives it,
+/// choosing the room renderer is stored but refuses to play, rather than
+/// quietly playing SAF HRTF under a room label.
+pub const ROOM_PLAYBACK_UNAVAILABLE: &str = "Room binaural playback is not available in this build yet: it needs MacinRender's room renderer (C ABI 1.46)";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum SpeakerLayout {
     #[default]
@@ -72,7 +112,16 @@ pub struct OutputSettings {
     pub layout: SpeakerLayout,
     pub split_lfe: bool,
     pub atmos_label_assist: bool,
+    pub binaural_renderer: BinauralRenderer,
     pub sofa: String,
+    /// The room package (`room.json`) the room renderer models; empty is none
+    /// chosen, which the renderer cannot play.
+    pub room: String,
+    /// Personal HRIR package (`hrir.json`) for the room renderer; empty uses
+    /// the HRIR the room package binds. A SOFA file is not one: it has to be
+    /// prepared into this form first.
+    pub room_hrir: String,
+    pub room_metres_per_unit: f64,
     /// `AutoEq` `ParametricEQ.txt` headphone compensation; empty is off.
     pub hptf: String,
     pub hptf_auto_trim: bool,
@@ -96,7 +145,11 @@ impl Default for OutputSettings {
             layout: SpeakerLayout::default(),
             split_lfe: true,
             atmos_label_assist: true,
+            binaural_renderer: BinauralRenderer::default(),
             sofa: String::new(),
+            room: String::new(),
+            room_hrir: String::new(),
+            room_metres_per_unit: ROOM_METRES_PER_UNIT_DEFAULT,
             hptf: String::new(),
             hptf_auto_trim: false,
             hptf_bass_db: 0.0,
@@ -162,6 +215,23 @@ impl OutputSettings {
         }
         .clamped()
     }
+    /// Whether the room renderer is the one forming the headphone feed.
+    pub fn room_selected(&self) -> bool {
+        self.mode.resolved() == SpatialBackendKind::SafBinaural
+            && self.binaural_renderer == BinauralRenderer::Room
+    }
+    /// Why these settings cannot start an output, when the reason is already
+    /// known from the settings alone. The output paths ask before creating a
+    /// session, so the refusal arrives as an ordinary output error.
+    pub fn playback_blocker(&self) -> Option<&'static str> {
+        if !self.room_selected() {
+            None
+        } else if self.room.is_empty() {
+            Some("Choose a room package for room binaural playback")
+        } else {
+            Some(ROOM_PLAYBACK_UNAVAILABLE)
+        }
+    }
     pub fn validated(mut self) -> Self {
         self.posebridge.validate();
         if self.head_source == HeadSource::PoseBridge && !cfg!(posebridge_input) {
@@ -173,9 +243,19 @@ impl OutputSettings {
         if self.sofa.contains('\0') {
             self.sofa.clear();
         }
-        if self.hptf.contains('\0') {
-            self.hptf.clear();
+        for path in [&mut self.hptf, &mut self.room, &mut self.room_hrir] {
+            if path.contains('\0') {
+                path.clear();
+            }
         }
+        self.room_metres_per_unit = if self.room_metres_per_unit.is_finite() {
+            self.room_metres_per_unit.clamp(
+                *ROOM_METRES_PER_UNIT_RANGE.start(),
+                *ROOM_METRES_PER_UNIT_RANGE.end(),
+            )
+        } else {
+            ROOM_METRES_PER_UNIT_DEFAULT
+        };
         // A stored file is not a trusted one: a knob that came back as NaN would
         // reach the biquad design as NaN, and `clamped` cannot fix that.
         for knob in [&mut self.hptf_bass_db, &mut self.hptf_tilt_db] {
@@ -202,6 +282,14 @@ impl OutputSettings {
                     || self.speaker_renderer != other.speaker_renderer
                     || (self.layout == SpeakerLayout::TwentyTwoTwo
                         && self.split_lfe != other.split_lfe)))
+            // A room session fixes its HRIR and its scale when it is created;
+            // only the room itself can change under a running one.
+            || (self.mode.resolved() == SpatialBackendKind::SafBinaural
+                && (self.binaural_renderer != other.binaural_renderer
+                    || (self.binaural_renderer == BinauralRenderer::Room
+                        && (self.room_hrir != other.room_hrir
+                            || self.room_metres_per_unit.to_bits()
+                                != other.room_metres_per_unit.to_bits()))))
             || self.native_device != other.native_device
             || self.stereo_device != other.stereo_device
     }
@@ -255,6 +343,94 @@ mod tests {
             "a saved speaker choice must not change headphone rendering"
         );
     }
+    #[test]
+    fn room_settings_migrate_and_rebuild_only_what_a_room_session_fixes() {
+        // Settings written before the room renderer existed keep SAF HRTF.
+        let old: OutputSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.binaural_renderer, BinauralRenderer::SafHrtf);
+        assert!(old.room.is_empty() && old.room_hrir.is_empty());
+        assert_eq!(
+            old.room_metres_per_unit.to_bits(),
+            ROOM_METRES_PER_UNIT_DEFAULT.to_bits()
+        );
+
+        let saf = OutputSettings {
+            mode: SpatialBackendKind::SafBinaural,
+            ..old
+        };
+        let room = OutputSettings {
+            binaural_renderer: BinauralRenderer::Room,
+            room: "rooms/studio-a/room.json".into(),
+            ..saf.clone()
+        };
+        let reloaded: OutputSettings =
+            serde_json::from_str(&serde_json::to_string(&room).unwrap()).unwrap();
+        assert_eq!(reloaded, room);
+        assert!(saf.needs_rebuild(&room) && room.needs_rebuild(&saf));
+
+        // The room itself is switched under a running session.
+        let mut other_room = room.clone();
+        other_room.room = "rooms/studio-b/room.json".into();
+        assert!(!room.needs_rebuild(&other_room));
+        // The HRIR and the scale are fixed when the session is created.
+        let mut hrir = room.clone();
+        hrir.room_hrir = "hrir/personal/hrir.json".into();
+        assert!(room.needs_rebuild(&hrir));
+        let mut scale = room.clone();
+        scale.room_metres_per_unit = 2.0;
+        assert!(room.needs_rebuild(&scale));
+
+        // A room choice saved while another mode plays changes nothing audible.
+        let mut speakers = room.clone();
+        speakers.mode = SpatialBackendKind::SystemSpatial;
+        let mut speakers_saf = speakers.clone();
+        speakers_saf.binaural_renderer = BinauralRenderer::SafHrtf;
+        speakers_saf.room_metres_per_unit = 3.0;
+        assert!(!speakers.needs_rebuild(&speakers_saf));
+        assert!(!speakers.room_selected());
+        assert_eq!(speakers.playback_blocker(), None);
+    }
+
+    #[test]
+    fn room_playback_refuses_until_the_renderer_can_run_it() {
+        let mut settings = OutputSettings {
+            mode: SpatialBackendKind::SafBinaural,
+            ..OutputSettings::default()
+        };
+        assert_eq!(settings.playback_blocker(), None);
+        settings.binaural_renderer = BinauralRenderer::Room;
+        assert!(
+            settings
+                .playback_blocker()
+                .is_some_and(|reason| reason.contains("room package"))
+        );
+        settings.room = "rooms/studio-a/room.json".into();
+        assert_eq!(settings.playback_blocker(), Some(ROOM_PLAYBACK_UNAVAILABLE));
+    }
+
+    #[test]
+    fn stored_room_settings_are_not_trusted() {
+        let mut settings = OutputSettings {
+            room: "room\0.json".into(),
+            room_hrir: "hrir\0.json".into(),
+            room_metres_per_unit: f64::NAN,
+            ..OutputSettings::default()
+        };
+        settings = settings.validated();
+        assert!(settings.room.is_empty() && settings.room_hrir.is_empty());
+        assert_eq!(
+            settings.room_metres_per_unit.to_bits(),
+            ROOM_METRES_PER_UNIT_DEFAULT.to_bits()
+        );
+        for (stored, kept) in [(0.0, 0.01_f64), (1_000.0, 100.0), (2.5, 2.5)] {
+            settings.room_metres_per_unit = stored;
+            assert_eq!(
+                settings.clone().validated().room_metres_per_unit.to_bits(),
+                kept.to_bits()
+            );
+        }
+    }
+
     #[test]
     fn defaults_and_layout_catalog_are_fixed() {
         let settings = OutputSettings::default();

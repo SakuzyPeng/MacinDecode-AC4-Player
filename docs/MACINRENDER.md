@@ -23,7 +23,7 @@ Triple Balance 要求完整的 7.1.2 bed。播放器在原生边界为 LFE 增�
   SAF 的等功率模式由播放器按块生成两路目的 PCM，Core 使用 Direct，避免再次合成或复制。单路源补齐一个不与源 ID 冲突的输出 LFE ID，不进入源场景和电平表。
   检测在增益/静音之后按音频块执行（阈值 `1e-12`），不在逐采样过零点改变增益。Windows 对象直通只有一个 LFE 槽位：单路有信号时原电平通过，两路都有信号时按 `(LFE1 + LFE2) / sqrt(2)` 合成。
   更换 LFE 路由会准备新的输出并沿用当前播放位置，避免已排队 PCM 跨越两种归一化策略。
-- 软件双耳：SAF HRTF，默认内置 KEMAR，可选择用户 SOFA。
+- 软件双耳：SAF HRTF，默认内置 KEMAR，可选择用户 SOFA；渲染器另可选 Room（目前只有界面，见[房间双耳](#房间双耳仅界面)）。
 - 系统模式跟随系统默认输出。Windows 的固定床超出静态槽位的位置采用所选后端的几何；
   静态槽位的最终角度由 Windows 的空间化器决定。
 - 软件朝向在 Mac 优先使用 AirPods，缺失或权限不可用时使用手动朝向；Windows 使用手动朝向。
@@ -56,6 +56,25 @@ Audio settings 的内容按**播放模式**分页，页签由 `OutputPage::of` �
 `draw_hptf_knobs` / `draw_hptf_response`），这也是三者相互依赖的顺序：ghost 画哪一份由选择页
 报出的悬停行决定，曲线画什么由旋钮决定。写盘那一步是 `stage_tuned_profile`，不碰任何应用状态，
 因此那条 `#` 来源注释与文件名可以脱离 GUI 直接测。
+
+## 房间双耳（仅界面）
+
+软件双耳的 `HRTF` 页顶部是 `Binaural renderer`：SAF HRTF（默认）或 Room，与系统空间音频的
+`Speaker renderer` 同构——两者向同一个立体声设备写同样的两声道，所以是模式内的选择而不是新模式，
+设备、头追和 `Headphones` 页沿用软件双耳。偏好字段为 `binaural_renderer`（`saf-hrtf` / `room`），
+旧设置缺省为 SAF HRTF。Room 另存 `room`（房间包清单）、`room_hrir`（个人 HRIR 包清单，空为房间包
+默认绑定）和 `room_metres_per_unit`（0.01–100，默认 1.5；加载时钳入范围，非有限值回到默认），
+对应上游 C ABI 1.46 的 `adm_room_config_t`。两种包都是清单加旁边的组件文件，所以原地选择
+（`app/room_settings.rs`），不进 `file_catalog` 的托管目录。
+
+`needs_rebuild` 按上游会话契约划分：切换渲染器、HRIR 或比例需要新会话；只换房间不重建，留给
+`adm_scene_stream_switch_room` 在运行中的会话里后台准备并交叉淡化。
+
+当前固定的 `d75d460` / C ABI 1.45 没有房间渲染。`OutputSettings::playback_blocker` 在选中 Room 时
+总是返回错误（未选房间包时提示先选），`validate_source`、`PreparedSession::new` 和
+`Runtime::replace_source` 在创建或复用会话前检查它：Room 选择既不会新建会话，也不会复用已持有的
+SAF 会话、在 Room 名义下播放 SAF HRTF。接入后端时升级三处固定版本，在 `native::RendererSettings`
+中携带房间配置，并删除 `ROOM_PLAYBACK_UNAVAILABLE` 这一分支。
 
 ## 耳机补偿（HpTF）
 

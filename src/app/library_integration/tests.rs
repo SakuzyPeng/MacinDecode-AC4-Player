@@ -837,6 +837,49 @@ fn pending_restore_keeps_async_settings_dialogs_moving() {
 }
 
 #[test]
+fn picked_room_packages_become_the_room_settings() {
+    use crate::app::room_settings::{RoomPackage, RoomPicker};
+    let dir = tempfile::tempdir().unwrap();
+    let (mut app, context) = open(dir.path());
+    settle(&mut app, &context);
+    for (package, path) in [
+        (
+            RoomPackage::Room,
+            dir.path().join("studio-a").join("room.json"),
+        ),
+        (
+            RoomPackage::Hrir,
+            dir.path().join("personal").join("hrir.json"),
+        ),
+    ] {
+        let picked = path.clone();
+        app.room_picker = Some(RoomPicker {
+            package,
+            future: Box::pin(async move { Some(picked) }),
+        });
+        app.tick(&context, false);
+        assert!(app.room_picker.is_none());
+        let settings = app.output.settings();
+        assert_eq!(
+            match package {
+                RoomPackage::Room => &settings.room,
+                RoomPackage::Hrir => &settings.room_hrir,
+            },
+            path.to_str().unwrap()
+        );
+    }
+    // A cancelled dialog leaves the choice where it was.
+    let before = app.output.settings().clone();
+    app.room_picker = Some(RoomPicker {
+        package: RoomPackage::Room,
+        future: Box::pin(async { None }),
+    });
+    app.tick(&context, false);
+    assert!(app.room_picker.is_none());
+    assert_eq!(app.output.settings(), &before);
+}
+
+#[test]
 fn pending_audio_settings_do_not_replace_committed_preferences() {
     let dir = tempfile::tempdir().unwrap();
     let (mut app, context) = open(dir.path());

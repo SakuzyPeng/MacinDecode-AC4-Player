@@ -38,6 +38,9 @@ impl PreparedSession {
         sample_rate: u32,
         device: &OutputDeviceSelection,
     ) -> Result<Self, String> {
+        if let Some(blocker) = settings.playback_blocker() {
+            return Err(blocker.into());
+        }
         let config = native_config(settings, sample_rate, device);
         let session = create_session(&config)?;
         Ok(Self {
@@ -145,6 +148,9 @@ pub(super) fn validate_source(
     settings: &OutputSettings,
     config: &OutputStreamConfig,
 ) -> Result<(), String> {
+    if let Some(blocker) = settings.playback_blocker() {
+        return Err(blocker.into());
+    }
     let renderer = settings.renderer();
     renderer_lfes(&config.scene_signature, &renderer)?;
     if renderer.speaker_renderer == native::SpeakerRenderer::TripleBalance
@@ -297,7 +303,10 @@ impl Runtime {
         reader: SceneQueueReader,
     ) -> bool {
         let format = native_config(settings, config.sample_rate, &config.output_device);
-        if self.format.input_rate != format.input_rate
+        // A held SAF session has the same native format as a room selection
+        // would today, so reusing it would play SAF HRTF under the room label.
+        if settings.playback_blocker().is_some()
+            || self.format.input_rate != format.input_rate
             || self.format.output != format.output
             || self.format.device_id != format.device_id
             || self.format.renderer.binaural != format.renderer.binaural

@@ -28,6 +28,7 @@ use crate::playlist_ui;
 use crate::preferences::{AppPreferences, DataDirectory};
 mod head_puck;
 mod library_integration;
+mod room_settings;
 mod visual_settings;
 use crate::scene3d;
 use crate::theme;
@@ -97,6 +98,7 @@ pub struct PlayerApp {
     audio_settings_error: Option<String>,
     sofa_picker: Option<Pin<Box<dyn Future<Output = Option<rfd::FileHandle>>>>>,
     hptf_picker: Option<Pin<Box<dyn Future<Output = Option<rfd::FileHandle>>>>>,
+    room_picker: Option<room_settings::RoomPicker>,
     /// The drawn profile, read once per path and design rate.
     hptf_drawing: Option<HptfDrawing>,
     /// The profile under the pointer, cached the same way so that sweeping the
@@ -934,6 +936,7 @@ impl PlayerApp {
             #[cfg(posebridge_input)]
             bridge_ui: crate::posebridge::ui::Panel::default(),
             hptf_picker: None,
+            room_picker: None,
             hptf_drawing: None,
             hptf_ghost: None,
             hptf_saving: None,
@@ -1806,7 +1809,8 @@ impl PlayerApp {
                         && self.sofa_picker.is_none()
                         && !self.sofa.busy()
                         && self.hptf_picker.is_none()
-                        && !self.hptf.busy(),
+                        && !self.hptf.busy()
+                        && self.room_picker.is_none(),
                     |ui| {
                         // Not one of the pages: the mode decides which pages
                         // exist, so it sits above the bar where no page can
@@ -1849,7 +1853,9 @@ impl PlayerApp {
                         ui.separator();
                         match page {
                             OutputPage::Speakers => self.draw_speaker_settings(ui, &mut settings),
-                            OutputPage::Hrtf => self.draw_hrtf_page(ui, &mut settings, context),
+                            OutputPage::Hrtf => {
+                                self.draw_binaural_page(ui, &mut settings, context);
+                            }
                             OutputPage::Headphones => {
                                 self.draw_headphones_page(ui, &mut settings, context);
                             }
@@ -1925,7 +1931,7 @@ impl PlayerApp {
         }
     }
 
-    /// The HRTF page: which ears the binaural renderer borrows.
+    /// SAF HRTF's half of the HRTF page: which ears it borrows.
     fn draw_hrtf_page(
         &mut self,
         ui: &mut egui::Ui,

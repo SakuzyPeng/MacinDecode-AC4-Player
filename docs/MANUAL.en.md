@@ -386,6 +386,28 @@ Large SOFA datasets use accelerated triangulation and sparse interpolation table
 geometry cache. Seeking, repeating and changing tracks reuse the prepared HRTF when the output format
 is compatible, preserving all measurement directions and the interpolation resolution.
 
+#### Room binaural (preview)
+
+**Binaural renderer** at the top of the `HRTF` page chooses between SAF HRTF (the default) and
+**Room**. Room is MacinRender's native room renderer: a fixed listening position inside a modelled
+room, rendered to two channels through personal HRIRs with 3DoF head rotation, always at 48 kHz.
+Choosing it replaces the page with three controls:
+
+- **Room** — the room package's `room.json`. Room and HRIR packages are a manifest plus component
+  files beside it, so they are picked where they lie rather than copied into the data directory; the
+  page names them as folder/manifest, with the full path on hover.
+- **HRIR** — an optional personal HRIR package, `hrir.json`; without one the room package's own
+  binding is used. A SOFA file is not one: prepare it into an HRIR package with MacinRender's
+  `prepare-hrir.py` first.
+- **Scene unit** — how many metres one unit of Scene distance spans, 0.01–100 m, 1.5 m by default.
+
+The room can change during playback; the HRIR and the scene unit are fixed when a session is
+created, so changing either prepares a new output.
+
+**This version ships the interface only.** The settings are saved, but the MacinRender the player
+pins does not carry room rendering yet (that needs C ABI 1.46), so starting playback with Room
+selected shows a specific error instead of quietly playing SAF HRTF.
+
 ### Headphone compensation (HpTF)
 
 Takes the headphone's own response out of binaural monitoring. **Available in SAF binaural only** —
